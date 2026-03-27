@@ -120,9 +120,9 @@ Exit criteria:
 - routing remains correct through split and rebalance
 - stale allocator decisions cannot win
 
-**Status:** In progress. `internal/meta`, `internal/routing`, and generation
-checks in `internal/replica` are implemented; authoritative meta ranges and
-range movement are still open.
+**Status:** In progress. `internal/meta`, `internal/routing`, authoritative
+meta descriptor lookup/refresh, and generation checks in `internal/replica` are
+implemented; split/move orchestration and full range movement are still open.
 
 ### [ ] Phase 4: Transaction Core
 

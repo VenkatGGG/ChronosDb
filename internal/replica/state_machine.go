@@ -9,6 +9,7 @@ import (
 	"github.com/VenkatGGG/ChronosDb/internal/lease"
 	"github.com/VenkatGGG/ChronosDb/internal/meta"
 	"github.com/VenkatGGG/ChronosDb/internal/storage"
+	"github.com/cockroachdb/pebble"
 	raftpb "go.etcd.io/raft/v3/raftpb"
 )
 
@@ -46,8 +47,15 @@ func OpenStateMachine(rangeID, replicaID uint64, engine *storage.Engine) (*State
 	if err != nil {
 		return nil, err
 	}
-	desc, err := engine.LoadRangeDescriptor(rangeID)
-	if err != nil {
+	var desc meta.RangeDescriptor
+	descPayload, err := engine.GetRaw(nil, storage.RangeDescriptorKey(rangeID))
+	switch {
+	case errors.Is(err, pebble.ErrNotFound):
+	case err == nil:
+		if decodeErr := desc.UnmarshalBinary(descPayload); decodeErr != nil {
+			return nil, decodeErr
+		}
+	default:
 		return nil, err
 	}
 	return &StateMachine{
@@ -134,7 +142,11 @@ func (s *StateMachine) StageEntries(batch *storage.WriteBatch, entries []raftpb.
 				if cmd.Descriptor.ExpectedGeneration != currentGeneration {
 					return ApplyDelta{}, fmt.Errorf("%w: expected %d got %d", ErrDescriptorGenerationMismatch, cmd.Descriptor.ExpectedGeneration, currentGeneration)
 				}
-				if err := batch.SetRangeDescriptor(s.rangeID, cmd.Descriptor.Descriptor); err != nil {
+				payload, err := cmd.Descriptor.Descriptor.MarshalBinary()
+				if err != nil {
+					return ApplyDelta{}, err
+				}
+				if err := batch.SetRaw(storage.RangeDescriptorKey(s.rangeID), payload); err != nil {
 					return ApplyDelta{}, err
 				}
 				delta.Descriptor = cmd.Descriptor.Descriptor

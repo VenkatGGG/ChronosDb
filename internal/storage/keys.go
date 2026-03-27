@@ -14,6 +14,8 @@ var (
 	prefixMVCC       = []byte("/mvcc/")
 	prefixMVCCGlobal = []byte("/mvcc/global/")
 	prefixMVCCLocal  = []byte("/mvcc/local/")
+	prefixMeta1      = []byte("/mvcc/global/meta1/")
+	prefixMeta2      = []byte("/mvcc/global/meta2/")
 
 	storeIdentKey   = []byte("/mvcc/local/store/ident")
 	storeVersionKey = []byte("/mvcc/local/store/version")
@@ -84,6 +86,36 @@ func RangeLeaseKey(rangeID uint64) []byte {
 func RangeDescriptorKey(rangeID uint64) []byte {
 	dst := rangeLocalPrefix(rangeID)
 	return append(dst, []byte("/descriptor")...)
+}
+
+// Meta1Prefix returns the authoritative meta1 namespace prefix.
+func Meta1Prefix() []byte {
+	return bytes.Clone(prefixMeta1)
+}
+
+// Meta2Prefix returns the authoritative meta2 namespace prefix.
+func Meta2Prefix() []byte {
+	return bytes.Clone(prefixMeta2)
+}
+
+// Meta1DescriptorKey returns the meta1 key for the descriptor whose end key is endKey.
+func Meta1DescriptorKey(endKey []byte) []byte {
+	return metaKey(prefixMeta1, endKey)
+}
+
+// Meta2DescriptorKey returns the meta2 key for the descriptor whose end key is endKey.
+func Meta2DescriptorKey(endKey []byte) []byte {
+	return metaKey(prefixMeta2, endKey)
+}
+
+// Meta1LookupKey returns the seek key used to resolve a meta2 span through meta1.
+func Meta1LookupKey(key []byte) []byte {
+	return metaKey(prefixMeta1, key)
+}
+
+// Meta2LookupKey returns the seek key used to resolve a user/system span through meta2.
+func Meta2LookupKey(key []byte) []byte {
+	return metaKey(prefixMeta2, key)
 }
 
 // GlobalTablePrimaryKey returns the logical MVCC key for a table primary row.
@@ -169,6 +201,14 @@ func encodeUint64(v uint64) []byte {
 func rangeLocalPrefix(rangeID uint64) []byte {
 	dst := append(bytes.Clone(prefixMVCCLocal), []byte("range/")...)
 	return append(dst, encodeUint64(rangeID)...)
+}
+
+func metaKey(prefix, endKey []byte) []byte {
+	dst := bytes.Clone(prefix)
+	if len(endKey) == 0 {
+		return append(dst, 0xff)
+	}
+	return appendEscapedBytes(dst, endKey)
 }
 
 func appendEscapedBytes(dst, raw []byte) []byte {
