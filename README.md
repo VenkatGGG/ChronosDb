@@ -3,9 +3,15 @@
 ChronosDB is a geo-distributed, strictly serializable SQL database built on a
 replicated MVCC KV substrate.
 
-This repository is intentionally **docs-first** right now. The architecture,
-execution contract, and roadmap are being frozen before any implementation code
-lands so the system does not drift into accidental shortcuts.
+Implementation is underway. The repository already contains:
+
+- the Phase 0 protocol spec pack
+- the Phase 1 Pebble-backed storage core
+- the Phase 2 single-range replication and lease/read foundations
+- the first Phase 3 meta and routing primitives
+
+The repo still follows a plan-first discipline: protocol and scope changes
+should be written down before the corresponding code lands.
 
 ## Why ChronosDB Exists
 
@@ -116,10 +122,10 @@ flowchart TD
 
 ## Development Roadmap
 
-1. **Phase 0**: freeze keyspace, state machines, retry contract, errors, closed timestamps, placement, and invariants
-2. **Phase 1**: Pebble-backed single-node storage core
-3. **Phase 2**: shared MultiRaft scheduler, lease system, fast reads, and durability batching
-4. **Phase 3**: meta ranges, routing, liveness, split, rebalance, and membership changes
+1. **Phase 0**: freeze keyspace, state machines, retry contract, errors, closed timestamps, placement, and invariants. Status: complete.
+2. **Phase 1**: Pebble-backed single-node storage core. Status: complete.
+3. **Phase 2**: shared MultiRaft scheduler, lease system, fast reads, and durability batching. Status: complete.
+4. **Phase 3**: meta ranges, routing, liveness, split, rebalance, and membership changes. Status: in progress.
 5. **Phase 4**: transaction core
 6. **Phase 5**: multi-range transactions, `STAGING`, and parallel commit
 7. **Phase 6**: PostgreSQL wire protocol and distributed SQL front door
@@ -128,13 +134,15 @@ flowchart TD
 
 ## Repository Contract
 
-Before any code lands:
+Current source-of-truth docs:
 
 - [`ARCHITECTURE.md`](./ARCHITECTURE.md) explains the target system and rationale
 - [`IMPLEMENTATION_PLAN.md`](./IMPLEMENTATION_PLAN.md) is the execution contract
 - [`TODOS.md`](./TODOS.md) tracks the next concrete milestones
+- [`rules.md`](./rules.md) defines the repo workflow rules
 
 Implementation rule:
 
 - if code needs a protocol or scope change not already written down, update
   `IMPLEMENTATION_PLAN.md` first in a docs commit, then write code
+- push directly to `main` unless a PR is explicitly requested
