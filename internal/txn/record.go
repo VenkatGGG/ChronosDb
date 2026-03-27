@@ -3,6 +3,7 @@ package txn
 import (
 	"bytes"
 	"fmt"
+	"slices"
 
 	"github.com/VenkatGGG/ChronosDb/internal/hlc"
 	"github.com/VenkatGGG/ChronosDb/internal/storage"
@@ -20,14 +21,17 @@ const (
 
 // Record is the canonical in-memory transaction record used by the transaction layer.
 type Record struct {
-	ID          storage.TxnID
-	Status      Status
-	ReadTS      hlc.Timestamp
-	WriteTS     hlc.Timestamp
-	MinCommitTS hlc.Timestamp
-	Epoch       uint32
-	Priority    uint32
-	DeadlineTS  hlc.Timestamp
+	ID              storage.TxnID
+	Status          Status
+	ReadTS          hlc.Timestamp
+	WriteTS         hlc.Timestamp
+	MinCommitTS     hlc.Timestamp
+	Epoch           uint32
+	Priority        uint32
+	AnchorRangeID   uint64
+	TouchedRanges   []uint64
+	LastHeartbeatTS hlc.Timestamp
+	DeadlineTS      hlc.Timestamp
 }
 
 // Validate checks that the transaction record is internally consistent.
@@ -49,8 +53,14 @@ func (r Record) Validate() error {
 	if r.WriteTS.Compare(r.ReadTS) < 0 {
 		return fmt.Errorf("txn: write timestamp must not move behind read timestamp")
 	}
+	if r.AnchorRangeID == 0 && len(r.TouchedRanges) > 0 {
+		return fmt.Errorf("txn: touched ranges require an anchor range")
+	}
 	if !r.MinCommitTS.IsZero() && r.MinCommitTS.Compare(r.WriteTS) > 0 && r.Status != StatusPending && r.Status != StatusStaging {
 		return fmt.Errorf("txn: terminal write timestamp must not trail min commit timestamp")
+	}
+	if !r.LastHeartbeatTS.IsZero() && r.Status != StatusPending && r.Status != StatusStaging {
+		return fmt.Errorf("txn: terminal transactions must not accept new heartbeats")
 	}
 	return nil
 }
@@ -88,6 +98,7 @@ func (r Record) Restart(nextReadTS hlc.Timestamp) (Record, error) {
 	r.Epoch++
 	r.ReadTS = readTS
 	r.WriteTS = writeTS
+	r.Status = StatusPending
 	return r, r.Validate()
 }
 
@@ -97,6 +108,55 @@ func (r Record) OlderThan(other Record) bool {
 		return cmp < 0
 	}
 	return bytes.Compare(r.ID[:], other.ID[:]) < 0
+}
+
+// Anchor materializes the transaction record on an anchor range and records the first touched range.
+func (r Record) Anchor(rangeID uint64, heartbeatTS hlc.Timestamp) (Record, error) {
+	if err := r.Validate(); err != nil {
+		return Record{}, err
+	}
+	if rangeID == 0 {
+		return Record{}, fmt.Errorf("txn: anchor range id must be non-zero")
+	}
+	r.AnchorRangeID = rangeID
+	r.TouchedRanges = appendUniqueRange(r.TouchedRanges, rangeID)
+	if !heartbeatTS.IsZero() {
+		r.LastHeartbeatTS = heartbeatTS
+	}
+	return r, r.Validate()
+}
+
+// TouchRange records that the transaction interacted with one additional range.
+func (r Record) TouchRange(rangeID uint64) (Record, error) {
+	if err := r.Validate(); err != nil {
+		return Record{}, err
+	}
+	if r.AnchorRangeID == 0 {
+		return Record{}, fmt.Errorf("txn: transaction must be anchored before touching ranges")
+	}
+	if rangeID == 0 {
+		return Record{}, fmt.Errorf("txn: touched range id must be non-zero")
+	}
+	r.TouchedRanges = appendUniqueRange(r.TouchedRanges, rangeID)
+	return r, r.Validate()
+}
+
+// Heartbeat advances the transaction heartbeat while the record is live.
+func (r Record) Heartbeat(now hlc.Timestamp) (Record, error) {
+	if err := r.Validate(); err != nil {
+		return Record{}, err
+	}
+	if r.Status != StatusPending && r.Status != StatusStaging {
+		return Record{}, fmt.Errorf("txn: only PENDING or STAGING transactions may heartbeat")
+	}
+	if now.IsZero() {
+		return Record{}, fmt.Errorf("txn: heartbeat timestamp must be non-zero")
+	}
+	if !r.LastHeartbeatTS.IsZero() && now.Compare(r.LastHeartbeatTS) < 0 {
+		return Record{}, fmt.Errorf("txn: heartbeat must not move backward")
+	}
+	r.LastHeartbeatTS = now
+	return r, r.Validate()
 }
 
 func maxTimestamp(a, b hlc.Timestamp) hlc.Timestamp {
@@ -113,4 +173,11 @@ func isZeroTxnID(id storage.TxnID) bool {
 		}
 	}
 	return true
+}
+
+func appendUniqueRange(ranges []uint64, rangeID uint64) []uint64 {
+	if slices.Contains(ranges, rangeID) {
+		return ranges
+	}
+	return append(ranges, rangeID)
 }

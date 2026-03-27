@@ -153,7 +153,7 @@ client-visible retry/error mapping.
 
 Deliver:
 
-- anchored `TxnRecord`
+- [x] anchored `TxnRecord`
 - distributed intents
 - coordinator recovery
 - async intent resolution
@@ -164,6 +164,10 @@ Exit criteria:
 
 - encountering-request and async recovery produce deterministic outcomes
 - `STAGING -> COMMITTED/ABORTED` follows the written state-machine rule
+
+**Status:** In progress. The canonical transaction record now carries anchor
+range identity, touched-range tracking, and heartbeat semantics. Distributed
+intents, recovery, and `STAGING` resolution are still open.
 
 ### [ ] Phase 6: SQL Front Door
 
