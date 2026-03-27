@@ -1,0 +1,137 @@
+package storage
+
+import (
+	"bytes"
+	"context"
+	"testing"
+
+	"github.com/VenkatGGG/ChronosDb/internal/hlc"
+	"github.com/cockroachdb/pebble/vfs"
+)
+
+func TestBootstrapSnapshotAndRecovery(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	fs := vfs.NewMem()
+	engine, err := Open(ctx, Options{
+		Dir: "chronosdb-test",
+		FS:  fs,
+	})
+	if err != nil {
+		t.Fatalf("open engine: %v", err)
+	}
+
+	if engine.Metadata().Bootstrapped {
+		t.Fatalf("fresh engine should not be bootstrapped")
+	}
+
+	ident := StoreIdent{
+		ClusterID: "cluster-a",
+		NodeID:    11,
+		StoreID:   29,
+	}
+	if err := engine.Bootstrap(ctx, ident); err != nil {
+		t.Fatalf("bootstrap engine: %v", err)
+	}
+
+	logicalKey := GlobalTablePrimaryKey(7, []byte("alice"))
+	ts1 := hlc.Timestamp{WallTime: 100, Logical: 1}
+	ts2 := hlc.Timestamp{WallTime: 200, Logical: 1}
+	if err := engine.PutMVCCValue(ctx, logicalKey, ts1, []byte("v1")); err != nil {
+		t.Fatalf("put mvcc value: %v", err)
+	}
+	intent := Intent{
+		TxnID:          TxnID{9, 9, 9},
+		Epoch:          1,
+		WriteTimestamp: hlc.Timestamp{WallTime: 150, Logical: 4},
+		Strength:       IntentStrengthExclusive,
+		Value:          []byte("pending"),
+	}
+	if err := engine.PutIntent(ctx, logicalKey, intent); err != nil {
+		t.Fatalf("put intent: %v", err)
+	}
+
+	snap := engine.NewSnapshot()
+
+	if err := engine.PutMVCCValue(ctx, logicalKey, ts2, []byte("v2")); err != nil {
+		t.Fatalf("put post-snapshot value: %v", err)
+	}
+
+	snapValue, err := snap.GetMVCCValue(ctx, logicalKey, ts2)
+	if err == nil {
+		t.Fatalf("expected snapshot to not see post-snapshot value, got %q", snapValue)
+	}
+	if got, err := snap.GetMVCCValue(ctx, logicalKey, ts1); err != nil || !bytes.Equal(got, []byte("v1")) {
+		t.Fatalf("snapshot read old value: got %q err=%v", got, err)
+	}
+	if got, err := snap.GetIntent(ctx, logicalKey); err != nil || !bytes.Equal(got.Value, intent.Value) {
+		t.Fatalf("snapshot read intent: got %+v err=%v", got, err)
+	}
+
+	if got, err := engine.GetMVCCValue(ctx, logicalKey, ts2); err != nil || !bytes.Equal(got, []byte("v2")) {
+		t.Fatalf("engine read new value: got %q err=%v", got, err)
+	}
+	if err := snap.Close(); err != nil {
+		t.Fatalf("close snapshot: %v", err)
+	}
+
+	if err := engine.Close(); err != nil {
+		t.Fatalf("close engine: %v", err)
+	}
+
+	reopened, err := Open(ctx, Options{
+		Dir: "chronosdb-test",
+		FS:  fs,
+	})
+	if err != nil {
+		t.Fatalf("reopen engine: %v", err)
+	}
+	defer reopened.Close()
+
+	meta := reopened.Metadata()
+	if !meta.Bootstrapped {
+		t.Fatalf("reopened engine should be bootstrapped")
+	}
+	if meta.Ident != ident {
+		t.Fatalf("ident mismatch: got %+v want %+v", meta.Ident, ident)
+	}
+	if meta.Version != CurrentStoreVersion {
+		t.Fatalf("version mismatch: got %+v want %+v", meta.Version, CurrentStoreVersion)
+	}
+	if got, err := reopened.GetMVCCValue(ctx, logicalKey, ts1); err != nil || !bytes.Equal(got, []byte("v1")) {
+		t.Fatalf("recovered old value: got %q err=%v", got, err)
+	}
+	if got, err := reopened.GetMVCCValue(ctx, logicalKey, ts2); err != nil || !bytes.Equal(got, []byte("v2")) {
+		t.Fatalf("recovered new value: got %q err=%v", got, err)
+	}
+	if got, err := reopened.GetIntent(ctx, logicalKey); err != nil || !bytes.Equal(got.Value, intent.Value) {
+		t.Fatalf("recovered intent: got %+v err=%v", got, err)
+	}
+}
+
+func TestBootstrapRejectsSecondInitialization(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	engine, err := Open(ctx, Options{
+		Dir: "already-bootstrapped",
+		FS:  vfs.NewMem(),
+	})
+	if err != nil {
+		t.Fatalf("open engine: %v", err)
+	}
+	defer engine.Close()
+
+	ident := StoreIdent{
+		ClusterID: "cluster-a",
+		NodeID:    1,
+		StoreID:   2,
+	}
+	if err := engine.Bootstrap(ctx, ident); err != nil {
+		t.Fatalf("first bootstrap: %v", err)
+	}
+	if err := engine.Bootstrap(ctx, ident); err != ErrAlreadyBootstrapped {
+		t.Fatalf("second bootstrap error = %v, want %v", err, ErrAlreadyBootstrapped)
+	}
+}

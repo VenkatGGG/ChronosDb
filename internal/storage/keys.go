@@ -1,0 +1,162 @@
+package storage
+
+import (
+	"bytes"
+	"encoding/binary"
+	"fmt"
+
+	"github.com/VenkatGGG/ChronosDb/internal/hlc"
+)
+
+var (
+	prefixRaft       = []byte("/raft/")
+	prefixRaftRange  = []byte("/raft/range/")
+	prefixMVCC       = []byte("/mvcc/")
+	prefixMVCCGlobal = []byte("/mvcc/global/")
+	prefixMVCCLocal  = []byte("/mvcc/local/")
+
+	storeIdentKey   = []byte("/mvcc/local/store/ident")
+	storeVersionKey = []byte("/mvcc/local/store/version")
+)
+
+const (
+	mvccVersionMarker  byte = 0x00
+	mvccMetadataMarker byte = 0x01
+)
+
+// MVCCKeyKind identifies whether an encoded MVCC key refers to a version or the
+// metadata sentinel for a logical key.
+type MVCCKeyKind uint8
+
+const (
+	MVCCKeyKindValue MVCCKeyKind = iota + 1
+	MVCCKeyKindMetadata
+)
+
+// DecodedMVCCKey is the parsed form of an encoded MVCC key.
+type DecodedMVCCKey struct {
+	Kind       MVCCKeyKind
+	LogicalKey []byte
+	Timestamp  hlc.Timestamp
+}
+
+// StoreIdentKey returns the local key used to persist the store identity.
+func StoreIdentKey() []byte {
+	return bytes.Clone(storeIdentKey)
+}
+
+// StoreVersionKey returns the local key used to persist the store version.
+func StoreVersionKey() []byte {
+	return bytes.Clone(storeVersionKey)
+}
+
+// RaftHardStateKey returns the key for a range's HardState record.
+func RaftHardStateKey(rangeID uint64) []byte {
+	dst := append(bytes.Clone(prefixRaftRange), encodeUint64(rangeID)...)
+	return append(dst, []byte("/hardstate")...)
+}
+
+// RaftLogEntryKey returns the key for a Raft log entry.
+func RaftLogEntryKey(rangeID, logIndex uint64) []byte {
+	dst := append(bytes.Clone(prefixRaftRange), encodeUint64(rangeID)...)
+	dst = append(dst, []byte("/entry/")...)
+	return append(dst, encodeUint64(logIndex)...)
+}
+
+// RangeAppliedStateKey returns the local range applied-state key.
+func RangeAppliedStateKey(rangeID uint64) []byte {
+	dst := append(bytes.Clone(prefixMVCCLocal), []byte("range/")...)
+	dst = append(dst, encodeUint64(rangeID)...)
+	return append(dst, []byte("/applied_state")...)
+}
+
+// GlobalTablePrimaryKey returns the logical MVCC key for a table primary row.
+func GlobalTablePrimaryKey(tableID uint64, encodedPrimaryKey []byte) []byte {
+	dst := append(bytes.Clone(prefixMVCCGlobal), []byte("table/")...)
+	dst = append(dst, encodeUint64(tableID)...)
+	dst = append(dst, []byte("/primary/")...)
+	return appendEscapedBytes(dst, encodedPrimaryKey)
+}
+
+// GlobalTableIndexKey returns the logical MVCC key for a table secondary index row.
+func GlobalTableIndexKey(tableID, indexID uint64, encodedIndexKey []byte) []byte {
+	dst := append(bytes.Clone(prefixMVCCGlobal), []byte("table/")...)
+	dst = append(dst, encodeUint64(tableID)...)
+	dst = append(dst, []byte("/index/")...)
+	dst = append(dst, encodeUint64(indexID)...)
+	dst = append(dst, '/')
+	return appendEscapedBytes(dst, encodedIndexKey)
+}
+
+// EncodeMVCCVersionKey returns the on-disk key for a committed MVCC version.
+func EncodeMVCCVersionKey(logicalKey []byte, ts hlc.Timestamp) ([]byte, error) {
+	if len(logicalKey) == 0 {
+		return nil, fmt.Errorf("encode mvcc version key: logical key required")
+	}
+	if ts.IsZero() {
+		return nil, fmt.Errorf("encode mvcc version key: timestamp must be non-zero")
+	}
+
+	dst := make([]byte, 0, len(logicalKey)+1+hlc.EncodedSize)
+	dst = append(dst, logicalKey...)
+	dst = append(dst, mvccVersionMarker)
+	dst = ts.AppendDescending(dst)
+	return dst, nil
+}
+
+// EncodeMVCCMetadataKey returns the sentinel key stored adjacent to versions for a logical key.
+func EncodeMVCCMetadataKey(logicalKey []byte) ([]byte, error) {
+	if len(logicalKey) == 0 {
+		return nil, fmt.Errorf("encode mvcc metadata key: logical key required")
+	}
+	dst := make([]byte, 0, len(logicalKey)+1)
+	dst = append(dst, logicalKey...)
+	dst = append(dst, mvccMetadataMarker)
+	return dst, nil
+}
+
+// DecodeMVCCKey parses a Pebble MVCC key back into its logical parts.
+func DecodeMVCCKey(encoded []byte) (DecodedMVCCKey, error) {
+	if len(encoded) == 0 {
+		return DecodedMVCCKey{}, fmt.Errorf("decode mvcc key: empty key")
+	}
+	if len(encoded) >= 1+hlc.EncodedSize && encoded[len(encoded)-1-hlc.EncodedSize] == mvccVersionMarker {
+		logicalKey := bytes.Clone(encoded[:len(encoded)-1-hlc.EncodedSize])
+		ts, rest, err := hlc.DecodeDescending(encoded[len(encoded)-hlc.EncodedSize:])
+		if err != nil {
+			return DecodedMVCCKey{}, err
+		}
+		if len(rest) != 0 {
+			return DecodedMVCCKey{}, fmt.Errorf("decode mvcc key: trailing version payload")
+		}
+		return DecodedMVCCKey{
+			Kind:       MVCCKeyKindValue,
+			LogicalKey: logicalKey,
+			Timestamp:  ts,
+		}, nil
+	}
+	if encoded[len(encoded)-1] == mvccMetadataMarker {
+		return DecodedMVCCKey{
+			Kind:       MVCCKeyKindMetadata,
+			LogicalKey: bytes.Clone(encoded[:len(encoded)-1]),
+		}, nil
+	}
+	return DecodedMVCCKey{}, fmt.Errorf("decode mvcc key: unrecognized suffix")
+}
+
+func encodeUint64(v uint64) []byte {
+	var buf [8]byte
+	binary.BigEndian.PutUint64(buf[:], v)
+	return buf[:]
+}
+
+func appendEscapedBytes(dst, raw []byte) []byte {
+	for _, b := range raw {
+		if b == 0x00 {
+			dst = append(dst, 0x00, 0xff)
+			continue
+		}
+		dst = append(dst, b)
+	}
+	return append(dst, 0x00, 0x01)
+}

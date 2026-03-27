@@ -62,21 +62,24 @@ appears, especially the parts people usually get wrong in distributed databases.
 
 ## Delivery Phases
 
-### [ ] Phase 1: Single-Node Storage Core
+### [x] Phase 1: Single-Node Storage Core
 
 Deliver:
 
-- [ ] Pebble wrapper
-- [ ] MVCC key encoding
-- [ ] logical namespaces for `/raft/...` and `/mvcc/...`
-- [ ] snapshots and recovery semantics
-- [ ] intent representation
-- [ ] store-versioning hooks before on-disk evolution
+- [x] Pebble wrapper
+- [x] MVCC key encoding
+- [x] logical namespaces for `/raft/...` and `/mvcc/...`
+- [x] snapshots and recovery semantics
+- [x] intent representation
+- [x] store-versioning hooks before on-disk evolution
 
 Exit criteria:
 
 - storage behavior is testable without Raft
 - store-versioning exists before on-disk evolution begins
+
+**Status:** Completed with `internal/storage` and `internal/hlc`, covered by
+`go test ./...`.
 
 ### [ ] Phase 2: Single-Range Replication and Fast Reads
 
