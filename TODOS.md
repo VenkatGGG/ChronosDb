@@ -110,7 +110,7 @@ Deliver:
 - [x] range cache
 - [x] routing refresh and invalidation
 - [x] liveness records and epochs
-- [ ] split triggers
+- [x] split triggers
 - [ ] learner/snapshot/rebalance flow
 - [x] generation-checked config changes
 - [ ] optional advisory gossip dissemination
@@ -121,9 +121,9 @@ Exit criteria:
 - stale allocator decisions cannot win
 
 **Status:** In progress. `internal/meta`, `internal/routing`, authoritative
-meta descriptor lookup, cache-backed resolution/refresh, and generation checks
-in `internal/replica` are implemented; split/move orchestration and full range
-movement are still open.
+meta descriptor lookup, cache-backed resolution/refresh, generation checks, and
+split-trigger application in `internal/replica` are implemented; meta-range
+bootstrapping and learner/snapshot/rebalance orchestration are still open.
 
 ### [ ] Phase 4: Transaction Core
 

@@ -43,6 +43,15 @@ func (b *WriteBatch) SetRaw(key, value []byte) error {
 	return nil
 }
 
+// DeleteRaw appends a raw delete operation to the batch.
+func (b *WriteBatch) DeleteRaw(key []byte) error {
+	if err := b.batch.Delete(key, nil); err != nil {
+		return err
+	}
+	b.opCount++
+	return nil
+}
+
 // PutMVCCValue appends one committed MVCC value write to the batch.
 func (b *WriteBatch) PutMVCCValue(logicalKey []byte, ts hlc.Timestamp, value []byte) error {
 	encoded, err := EncodeMVCCVersionKey(logicalKey, ts)
