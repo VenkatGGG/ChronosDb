@@ -106,7 +106,7 @@ Exit criteria:
 
 Deliver:
 
-- [ ] meta ranges
+- [x] meta ranges
 - [x] range cache
 - [x] routing refresh and invalidation
 - [x] liveness records and epochs
@@ -121,9 +121,10 @@ Exit criteria:
 - stale allocator decisions cannot win
 
 **Status:** In progress. `internal/meta`, `internal/routing`, authoritative
-meta descriptor lookup, cache-backed resolution/refresh, generation checks, and
-split-trigger application in `internal/replica` are implemented; meta-range
-bootstrapping and learner/snapshot/rebalance orchestration are still open.
+meta1/meta2 layout bootstrapping, authoritative descriptor lookup,
+cache-backed resolution/refresh, generation checks, and split-trigger
+application in `internal/replica` are implemented; learner/snapshot/rebalance
+orchestration is still open.
 
 ### [ ] Phase 4: Transaction Core
 
