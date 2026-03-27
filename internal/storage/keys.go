@@ -56,18 +56,34 @@ func RaftHardStateKey(rangeID uint64) []byte {
 	return append(dst, []byte("/hardstate")...)
 }
 
+// RaftEntryPrefix returns the prefix for a range's log entries.
+func RaftEntryPrefix(rangeID uint64) []byte {
+	dst := append(bytes.Clone(prefixRaftRange), encodeUint64(rangeID)...)
+	return append(dst, []byte("/entry/")...)
+}
+
 // RaftLogEntryKey returns the key for a Raft log entry.
 func RaftLogEntryKey(rangeID, logIndex uint64) []byte {
-	dst := append(bytes.Clone(prefixRaftRange), encodeUint64(rangeID)...)
-	dst = append(dst, []byte("/entry/")...)
+	dst := RaftEntryPrefix(rangeID)
 	return append(dst, encodeUint64(logIndex)...)
 }
 
 // RangeAppliedStateKey returns the local range applied-state key.
 func RangeAppliedStateKey(rangeID uint64) []byte {
-	dst := append(bytes.Clone(prefixMVCCLocal), []byte("range/")...)
-	dst = append(dst, encodeUint64(rangeID)...)
+	dst := rangeLocalPrefix(rangeID)
 	return append(dst, []byte("/applied_state")...)
+}
+
+// RangeLeaseKey returns the local range lease key.
+func RangeLeaseKey(rangeID uint64) []byte {
+	dst := rangeLocalPrefix(rangeID)
+	return append(dst, []byte("/lease")...)
+}
+
+// RangeDescriptorKey returns the local persisted descriptor key for a range.
+func RangeDescriptorKey(rangeID uint64) []byte {
+	dst := rangeLocalPrefix(rangeID)
+	return append(dst, []byte("/descriptor")...)
 }
 
 // GlobalTablePrimaryKey returns the logical MVCC key for a table primary row.
@@ -148,6 +164,11 @@ func encodeUint64(v uint64) []byte {
 	var buf [8]byte
 	binary.BigEndian.PutUint64(buf[:], v)
 	return buf[:]
+}
+
+func rangeLocalPrefix(rangeID uint64) []byte {
+	dst := append(bytes.Clone(prefixMVCCLocal), []byte("range/")...)
+	return append(dst, encodeUint64(rangeID)...)
 }
 
 func appendEscapedBytes(dst, raw []byte) []byte {

@@ -81,41 +81,48 @@ Exit criteria:
 **Status:** Completed with `internal/storage` and `internal/hlc`, covered by
 `go test ./...`.
 
-### [ ] Phase 2: Single-Range Replication and Fast Reads
+### [x] Phase 2: Single-Range Replication and Fast Reads
 
 Deliver:
 
-- shared MultiRaft scheduler
-- batched `WriteBatch` persistence
-- replica apply loop
-- lease records and epoch-bumped transfer semantics
-- leaseholder-local fast reads
-- `ReadIndex` fallback
-- commit-wait ordering
-- compaction escalation triggers
+- [x] shared MultiRaft scheduler
+- [x] batched `WriteBatch` persistence
+- [x] replica apply loop
+- [x] lease records and epoch-bumped transfer semantics
+- [x] leaseholder-local fast reads
+- [x] `ReadIndex` fallback
+- [x] commit-wait ordering
+- [x] compaction escalation triggers
 
 Exit criteria:
 
 - one range can replicate, fail over, transfer lease, and read safely
 - the scheduler owns batching and fsync amortization
 
+**Status:** Completed with `internal/multiraft`, `internal/replica`,
+`internal/lease`, and Phase 2 storage extensions, covered by `go test ./...`.
+
 ### [ ] Phase 3: Meta, Routing, and Membership
 
 Deliver:
 
-- meta ranges
-- range cache
-- routing refresh and invalidation
-- liveness records and epochs
-- split triggers
-- learner/snapshot/rebalance flow
-- generation-checked config changes
-- optional advisory gossip dissemination
+- [ ] meta ranges
+- [x] range cache
+- [x] routing refresh and invalidation
+- [x] liveness records and epochs
+- [ ] split triggers
+- [ ] learner/snapshot/rebalance flow
+- [x] generation-checked config changes
+- [ ] optional advisory gossip dissemination
 
 Exit criteria:
 
 - routing remains correct through split and rebalance
 - stale allocator decisions cannot win
+
+**Status:** In progress. `internal/meta`, `internal/routing`, and generation
+checks in `internal/replica` are implemented; authoritative meta ranges and
+range movement are still open.
 
 ### [ ] Phase 4: Transaction Core
 
