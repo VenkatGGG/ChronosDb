@@ -204,6 +204,7 @@ architecture.
 
 Deliver:
 
+- spec artifacts under `specs/phase0/`
 - keyspace layout
 - replica state machine
 - lease state machine

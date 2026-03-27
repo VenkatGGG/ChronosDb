@@ -6,7 +6,7 @@ with `ARCHITECTURE.md` or `IMPLEMENTATION_PLAN.md`.
 
 ## Pre-Code Blockers
 
-### [ ] Publish Phase 0 Spec Pack
+### [x] Publish Phase 0 Spec Pack
 
 **What:** Write the protocol-level specs required before any code lands.
 
@@ -15,14 +15,16 @@ must follow exact state-machine and contract rules instead of inventing them.
 
 **Must produce:**
 
-- `KEYSPACE.md`
-- `LEASE_STATE_MACHINE.md`
-- `TXN_STATE_MACHINE.md`
-- `ERRORS.md`
-- `RETRY_CONTRACT.md`
-- `CLOSED_TIMESTAMPS.md`
-- `PLACEMENT_AND_SURVIVAL.md`
-- `INVARIANTS.md`
+- `specs/phase0/KEYSPACE.md`
+- `specs/phase0/REPLICA_STATE_MACHINE.md`
+- `specs/phase0/LEASE_STATE_MACHINE.md`
+- `specs/phase0/TXN_STATE_MACHINE.md`
+- `specs/phase0/TIMESTAMPS.md`
+- `specs/phase0/ERRORS.md`
+- `specs/phase0/RETRY_CONTRACT.md`
+- `specs/phase0/CLOSED_TIMESTAMPS.md`
+- `specs/phase0/PLACEMENT_AND_SURVIVAL.md`
+- `specs/phase0/INVARIANTS.md`
 
 **Must freeze:**
 
@@ -36,9 +38,11 @@ must follow exact state-machine and contract rules instead of inventing them.
 - compaction escalation triggers when Pebble approaches write-stall pressure
 - closed timestamp publication as the follower-read gate
 
+**Status:** Completed in the Phase 0 spec-pack PR.
+
 **Depends on / blocked by:** Nothing. This must be completed before Phase 1 code.
 
-### [ ] Freeze README as the Public Baseline
+### [x] Freeze README as the Public Baseline
 
 **What:** Keep the repository README aligned with the architecture contract.
 
@@ -52,6 +56,8 @@ appears, especially the parts people usually get wrong in distributed databases.
 - follower reads are historical and bounded by closed timestamps
 - SQL is the product interface; KV is the internal substrate
 
+**Status:** Completed before implementation code.
+
 **Depends on / blocked by:** `ARCHITECTURE.md`, `IMPLEMENTATION_PLAN.md`
 
 ## Delivery Phases
@@ -60,11 +66,12 @@ appears, especially the parts people usually get wrong in distributed databases.
 
 Deliver:
 
-- Pebble wrapper
-- MVCC key encoding
-- logical namespaces for `/raft/...` and `/mvcc/...`
-- snapshots and recovery semantics
-- intent representation
+- [ ] Pebble wrapper
+- [ ] MVCC key encoding
+- [ ] logical namespaces for `/raft/...` and `/mvcc/...`
+- [ ] snapshots and recovery semantics
+- [ ] intent representation
+- [ ] store-versioning hooks before on-disk evolution
 
 Exit criteria:
 
