@@ -381,7 +381,7 @@ After that:
 - test additions land in the same commit as the behavior they validate
 - agent-generated changes must land through pull requests instead of direct pushes to `main`
 - a new branch is not required for every task; an existing working branch may be reused
-- the default prefix when creating an agent branch is `codex/`
+- when creating a branch, use a name that matches the feature or change being shipped
 - work may continue after opening a PR without waiting for asynchronous review feedback
 
 ## 8. Assumptions and Defaults

@@ -8,7 +8,8 @@ agents working in this repo.
 1. Never push agent-generated changes directly to `main`.
 2. Agent-generated changes should be raised through pull requests.
 3. Reusing an existing working branch is fine; a brand-new branch is not required
-   for every task. Use the `codex/` prefix by default when creating a branch.
+   for every task. When creating a branch, use a name that matches the feature or
+   change being shipped.
 4. Once a PR is raised, work may continue without blocking on asynchronous review.
 5. If a protocol or architecture change is needed, update docs first in the PR
    before any implementation code.
