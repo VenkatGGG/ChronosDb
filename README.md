@@ -138,3 +138,5 @@ Implementation rule:
 
 - if code needs a protocol or scope change not already written down, update
   `IMPLEMENTATION_PLAN.md` first in a docs commit, then write code
+- use one branch and one PR per task; do not add new unrelated tasks onto an
+  existing open PR

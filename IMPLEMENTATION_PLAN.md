@@ -41,6 +41,10 @@ Implementation guardrails:
 - Any protocol or scope change requires an `IMPLEMENTATION_PLAN.md` update first.
 - Docs-only commits are required before architectural changes in code.
 - No mixed commits that combine unrelated future-phase work with current-phase work.
+- Do not push directly to `main`; every distinct task must land through its own
+  branch and its own pull request.
+- Do not keep adding unrelated work to an already-open PR; only review-driven
+  follow-up or same-task completion may be added to that PR.
 
 ## 3. Canonical Subsystem Boundaries
 
