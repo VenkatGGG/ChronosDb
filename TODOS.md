@@ -137,7 +137,7 @@ Deliver:
 - [x] retryable restart handling
 - refresh spans
 - one-phase commit fast path
-- client-visible retry/error mapping
+- [x] client-visible retry/error mapping
 
 Exit criteria:
 
@@ -146,8 +146,8 @@ Exit criteria:
 
 **Status:** In progress. The canonical transaction package now owns the base
 transaction record, retry/restart rules, lock table state, wait queues, and
-wound-wait decisions. Refresh spans, one-phase commit, and client-visible retry
-mapping are still open.
+wound-wait decisions, plus client-visible retry/error mapping. Refresh spans
+and one-phase commit are still open.
 
 ### [ ] Phase 5: Multi-Range Transactions
 
