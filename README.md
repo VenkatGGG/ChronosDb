@@ -133,8 +133,14 @@ Before any code lands:
 - [`ARCHITECTURE.md`](./ARCHITECTURE.md) explains the target system and rationale
 - [`IMPLEMENTATION_PLAN.md`](./IMPLEMENTATION_PLAN.md) is the execution contract
 - [`TODOS.md`](./TODOS.md) tracks the next concrete milestones
+- [`rules.md`](./rules.md) stores persistent Codex/agent workflow rules
 
 Implementation rule:
 
 - if code needs a protocol or scope change not already written down, update
   `IMPLEMENTATION_PLAN.md` first in a docs commit, then write code
+
+Git workflow rule:
+
+- agent-generated changes should go to a `codex/*` branch and land through a pull
+  request so automated review can inspect them before merge

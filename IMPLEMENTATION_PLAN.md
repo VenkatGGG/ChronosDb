@@ -379,11 +379,14 @@ After that:
 - docs-only commits come before protocol changes
 - code commits are phase-scoped
 - test additions land in the same commit as the behavior they validate
+- agent-generated changes go to a branch, not directly to `main`
+- the default branch prefix for agent work is `codex/`
+- each agent branch must be pushed and reviewed via pull request before merge
 
 ## 8. Assumptions and Defaults
 
 - `origin` is `https://github.com/VenkatGGG/ChronosDb`
-- pushes go directly to `main`
+- agent-generated changes use a PR-first workflow rather than direct pushes to `main`
 - the current local docs seed the remote history
 - docs-first is mandatory
 - GitHub Actions is the default CI when implementation begins
