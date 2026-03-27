@@ -127,7 +127,7 @@ transitions, and snapshot image installation are implemented. Optional advisory
 gossip dissemination remains open by design because correctness does not depend
 on it.
 
-### [ ] Phase 4: Transaction Core
+### [x] Phase 4: Transaction Core
 
 Deliver:
 
@@ -136,7 +136,7 @@ Deliver:
 - [x] wound-wait
 - [x] retryable restart handling
 - [x] refresh spans
-- one-phase commit fast path
+- [x] one-phase commit fast path
 - [x] client-visible retry/error mapping
 
 Exit criteria:
@@ -144,10 +144,10 @@ Exit criteria:
 - transaction semantics are centralized and testable
 - callers do not invent their own retry or lock behavior
 
-**Status:** In progress. The canonical transaction package now owns the base
-transaction record, retry/restart rules, lock table state, wait queues, and
-wound-wait decisions, plus client-visible retry/error mapping. Refresh spans
-are implemented. One-phase commit is still open.
+**Status:** Core deliverables are complete. The canonical transaction package
+now owns the base transaction record, retry/restart rules, lock table state,
+wait queues, wound-wait decisions, refresh spans, one-phase commit, and
+client-visible retry/error mapping.
 
 ### [ ] Phase 5: Multi-Range Transactions
 

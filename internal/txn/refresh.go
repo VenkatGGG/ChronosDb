@@ -10,6 +10,21 @@ import (
 // ErrRefreshConflict reports that a tracked read span observed a conflicting committed write.
 var ErrRefreshConflict = fmt.Errorf("refresh span conflict")
 
+// RefreshConflictError carries the conflicting commit timestamp that blocked refresh.
+type RefreshConflictError struct {
+	CommitTS hlc.Timestamp
+}
+
+// Error implements error.
+func (e *RefreshConflictError) Error() string {
+	return fmt.Sprintf("%v: observed write at %s overlaps tracked span", ErrRefreshConflict, e.CommitTS)
+}
+
+// Unwrap allows errors.Is to match ErrRefreshConflict.
+func (e *RefreshConflictError) Unwrap() error {
+	return ErrRefreshConflict
+}
+
 // Span is a half-open key span. An empty EndKey denotes a point span.
 type Span struct {
 	StartKey []byte
@@ -76,7 +91,7 @@ func (r *RefreshSet) ValidateRefresh(readTS, refreshTS hlc.Timestamp, observed [
 		}
 		for _, span := range r.spans {
 			if spansOverlap(span, write.Span) {
-				return fmt.Errorf("%w: observed write at %s overlaps tracked span", ErrRefreshConflict, write.CommitTS)
+				return &RefreshConflictError{CommitTS: write.CommitTS}
 			}
 		}
 	}
