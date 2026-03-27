@@ -366,6 +366,311 @@ func TestStageEntriesRejectInvalidSplitTrigger(t *testing.T) {
 	}
 }
 
+func TestStageEntriesApplyReplicaRebalanceFlow(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	engine, err := storage.Open(ctx, storage.Options{
+		Dir: "replica-rebalance-test",
+		FS:  vfs.NewMem(),
+	})
+	if err != nil {
+		t.Fatalf("open engine: %v", err)
+	}
+	defer engine.Close()
+	if err := engine.Bootstrap(ctx, storage.StoreIdent{ClusterID: "cluster-a", NodeID: 1, StoreID: 1}); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+
+	stateMachine, err := OpenStateMachine(1, 1, engine)
+	if err != nil {
+		t.Fatalf("open state machine: %v", err)
+	}
+	parent := meta.RangeDescriptor{
+		RangeID:    1,
+		Generation: 1,
+		StartKey:   []byte("a"),
+		EndKey:     []byte("z"),
+		Replicas: []meta.ReplicaDescriptor{
+			{ReplicaID: 1, NodeID: 1, Role: meta.ReplicaRoleVoter},
+			{ReplicaID: 2, NodeID: 2, Role: meta.ReplicaRoleVoter},
+			{ReplicaID: 3, NodeID: 3, Role: meta.ReplicaRoleVoter},
+		},
+		LeaseholderReplicaID: 1,
+	}
+	if err := installDescriptor(t, stateMachine, engine, 3, parent); err != nil {
+		t.Fatalf("install parent descriptor: %v", err)
+	}
+
+	catalog := meta.NewCatalog(engine)
+	if err := catalog.Upsert(ctx, meta.LevelMeta2, parent); err != nil {
+		t.Fatalf("seed meta descriptor: %v", err)
+	}
+
+	learner := meta.ReplicaDescriptor{ReplicaID: 4, NodeID: 4, Role: meta.ReplicaRoleLearner}
+	if err := applyReplicaChangeCommand(stateMachine, engine, 4, ChangeReplicas{
+		ExpectedGeneration: 1,
+		MetaLevel:          meta.LevelMeta2,
+		Change:             ReplicaChange{Kind: ReplicaChangeAddLearner, Replica: learner},
+	}); err != nil {
+		t.Fatalf("add learner: %v", err)
+	}
+	if got := stateMachine.Descriptor().Generation; got != 2 {
+		t.Fatalf("generation after add learner = %d, want 2", got)
+	}
+	if role := stateMachine.Descriptor().Replicas[3].Role; role != meta.ReplicaRoleLearner {
+		t.Fatalf("learner role = %q, want %q", role, meta.ReplicaRoleLearner)
+	}
+
+	stalePromotePayload, err := Command{
+		Version: 1,
+		Type:    CommandTypeChangeReplicas,
+		Replica: &ChangeReplicas{
+			ExpectedGeneration: 1,
+			MetaLevel:          meta.LevelMeta2,
+			Change: ReplicaChange{
+				Kind:    ReplicaChangePromote,
+				Replica: meta.ReplicaDescriptor{ReplicaID: 4, NodeID: 4, Role: meta.ReplicaRoleVoter},
+			},
+		},
+	}.Marshal()
+	if err != nil {
+		t.Fatalf("marshal stale promote: %v", err)
+	}
+	batch := engine.NewWriteBatch()
+	defer batch.Close()
+	_, err = stateMachine.StageEntries(batch, []raftpb.Entry{{Index: 5, Type: raftpb.EntryNormal, Data: stalePromotePayload}})
+	if !errors.Is(err, ErrDescriptorGenerationMismatch) {
+		t.Fatalf("stale promote error = %v, want %v", err, ErrDescriptorGenerationMismatch)
+	}
+
+	if err := applyReplicaChangeCommand(stateMachine, engine, 6, ChangeReplicas{
+		ExpectedGeneration: 2,
+		MetaLevel:          meta.LevelMeta2,
+		Change: ReplicaChange{
+			Kind:    ReplicaChangePromote,
+			Replica: meta.ReplicaDescriptor{ReplicaID: 4, NodeID: 4, Role: meta.ReplicaRoleVoter},
+		},
+	}); err != nil {
+		t.Fatalf("promote learner: %v", err)
+	}
+	if got := stateMachine.Descriptor().Generation; got != 3 {
+		t.Fatalf("generation after promote = %d, want 3", got)
+	}
+	if role := stateMachine.Descriptor().Replicas[3].Role; role != meta.ReplicaRoleVoter {
+		t.Fatalf("promoted role = %q, want %q", role, meta.ReplicaRoleVoter)
+	}
+
+	if err := applyReplicaChangeCommand(stateMachine, engine, 7, ChangeReplicas{
+		ExpectedGeneration: 3,
+		MetaLevel:          meta.LevelMeta2,
+		Change: ReplicaChange{
+			Kind:    ReplicaChangeRemove,
+			Replica: meta.ReplicaDescriptor{ReplicaID: 2, NodeID: 2, Role: meta.ReplicaRoleVoter},
+		},
+	}); err != nil {
+		t.Fatalf("remove voter: %v", err)
+	}
+	if got := stateMachine.Descriptor().Generation; got != 4 {
+		t.Fatalf("generation after remove = %d, want 4", got)
+	}
+	if len(stateMachine.Descriptor().Replicas) != 3 {
+		t.Fatalf("replica count after remove = %d, want 3", len(stateMachine.Descriptor().Replicas))
+	}
+	for _, replica := range stateMachine.Descriptor().Replicas {
+		if replica.ReplicaID == 2 {
+			t.Fatalf("removed replica 2 still present")
+		}
+	}
+
+	routed, err := catalog.LookupMeta2(ctx, []byte("m"))
+	if err != nil {
+		t.Fatalf("routing lookup after rebalance: %v", err)
+	}
+	if routed.Generation != 4 {
+		t.Fatalf("routed descriptor generation = %d, want 4", routed.Generation)
+	}
+	if len(routed.Replicas) != 3 {
+		t.Fatalf("routed replica count = %d, want 3", len(routed.Replicas))
+	}
+}
+
+func TestStageEntriesRejectLeaseholderRemoval(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	engine, err := storage.Open(ctx, storage.Options{
+		Dir: "replica-remove-leaseholder-test",
+		FS:  vfs.NewMem(),
+	})
+	if err != nil {
+		t.Fatalf("open engine: %v", err)
+	}
+	defer engine.Close()
+	if err := engine.Bootstrap(ctx, storage.StoreIdent{ClusterID: "cluster-a", NodeID: 1, StoreID: 1}); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+
+	stateMachine, err := OpenStateMachine(1, 1, engine)
+	if err != nil {
+		t.Fatalf("open state machine: %v", err)
+	}
+	parent := meta.RangeDescriptor{
+		RangeID:    1,
+		Generation: 1,
+		StartKey:   []byte("a"),
+		EndKey:     []byte("z"),
+		Replicas: []meta.ReplicaDescriptor{
+			{ReplicaID: 1, NodeID: 1, Role: meta.ReplicaRoleVoter},
+			{ReplicaID: 2, NodeID: 2, Role: meta.ReplicaRoleVoter},
+		},
+		LeaseholderReplicaID: 1,
+	}
+	if err := installDescriptor(t, stateMachine, engine, 2, parent); err != nil {
+		t.Fatalf("install parent descriptor: %v", err)
+	}
+
+	payload, err := Command{
+		Version: 1,
+		Type:    CommandTypeChangeReplicas,
+		Replica: &ChangeReplicas{
+			ExpectedGeneration: 1,
+			MetaLevel:          meta.LevelMeta2,
+			Change: ReplicaChange{
+				Kind:    ReplicaChangeRemove,
+				Replica: meta.ReplicaDescriptor{ReplicaID: 1, NodeID: 1, Role: meta.ReplicaRoleVoter},
+			},
+		},
+	}.Marshal()
+	if err != nil {
+		t.Fatalf("marshal removal: %v", err)
+	}
+	batch := engine.NewWriteBatch()
+	defer batch.Close()
+	_, err = stateMachine.StageEntries(batch, []raftpb.Entry{{Index: 3, Type: raftpb.EntryNormal, Data: payload}})
+	if !errors.Is(err, ErrInvalidReplicaChange) {
+		t.Fatalf("leaseholder removal error = %v, want %v", err, ErrInvalidReplicaChange)
+	}
+}
+
+func TestApplySnapshotInstallsReplicaImage(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	engine, err := storage.Open(ctx, storage.Options{
+		Dir: "replica-snapshot-install-test",
+		FS:  vfs.NewMem(),
+	})
+	if err != nil {
+		t.Fatalf("open engine: %v", err)
+	}
+	defer engine.Close()
+	if err := engine.Bootstrap(ctx, storage.StoreIdent{ClusterID: "cluster-a", NodeID: 2, StoreID: 2}); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+
+	stateMachine, err := OpenStateMachine(2, 4, engine)
+	if err != nil {
+		t.Fatalf("open state machine: %v", err)
+	}
+	record, err := lease.NewRecord(4, 2, hlc.Timestamp{WallTime: 100, Logical: 0}, hlc.Timestamp{WallTime: 200, Logical: 0}, 1)
+	if err != nil {
+		t.Fatalf("new lease: %v", err)
+	}
+	image := SnapshotImage{
+		AppliedIndex: 11,
+		Descriptor: meta.RangeDescriptor{
+			RangeID:    2,
+			Generation: 3,
+			StartKey:   []byte("m"),
+			EndKey:     []byte("z"),
+			Replicas: []meta.ReplicaDescriptor{
+				{ReplicaID: 3, NodeID: 3, Role: meta.ReplicaRoleVoter},
+				{ReplicaID: 4, NodeID: 4, Role: meta.ReplicaRoleLearner},
+			},
+			LeaseholderReplicaID: 3,
+		},
+		Lease:            record,
+		HasLease:         true,
+		SafeReadFrontier: hlc.Timestamp{WallTime: 150, Logical: 1},
+	}
+
+	if err := stateMachine.ApplySnapshot(image); err != nil {
+		t.Fatalf("apply snapshot: %v", err)
+	}
+	if stateMachine.AppliedIndex() != 11 {
+		t.Fatalf("applied index = %d, want 11", stateMachine.AppliedIndex())
+	}
+	if stateMachine.Lease() != record {
+		t.Fatalf("lease = %+v, want %+v", stateMachine.Lease(), record)
+	}
+	reopened, err := OpenStateMachine(2, 4, engine)
+	if err != nil {
+		t.Fatalf("reopen state machine: %v", err)
+	}
+	if reopened.AppliedIndex() != 11 {
+		t.Fatalf("reopened applied index = %d, want 11", reopened.AppliedIndex())
+	}
+	if reopened.Descriptor().Generation != 3 {
+		t.Fatalf("reopened generation = %d, want 3", reopened.Descriptor().Generation)
+	}
+	if reopened.Lease() != record {
+		t.Fatalf("reopened lease = %+v, want %+v", reopened.Lease(), record)
+	}
+}
+
+func TestApplySnapshotRejectsStaleGeneration(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	engine, err := storage.Open(ctx, storage.Options{
+		Dir: "replica-snapshot-stale-test",
+		FS:  vfs.NewMem(),
+	})
+	if err != nil {
+		t.Fatalf("open engine: %v", err)
+	}
+	defer engine.Close()
+	if err := engine.Bootstrap(ctx, storage.StoreIdent{ClusterID: "cluster-a", NodeID: 1, StoreID: 1}); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+
+	stateMachine, err := OpenStateMachine(1, 1, engine)
+	if err != nil {
+		t.Fatalf("open state machine: %v", err)
+	}
+	parent := meta.RangeDescriptor{
+		RangeID:    1,
+		Generation: 4,
+		StartKey:   []byte("a"),
+		EndKey:     []byte("z"),
+		Replicas: []meta.ReplicaDescriptor{
+			{ReplicaID: 1, NodeID: 1, Role: meta.ReplicaRoleVoter},
+		},
+		LeaseholderReplicaID: 1,
+	}
+	if err := installDescriptor(t, stateMachine, engine, 5, parent); err != nil {
+		t.Fatalf("install parent descriptor: %v", err)
+	}
+
+	err = stateMachine.ApplySnapshot(SnapshotImage{
+		AppliedIndex: 6,
+		Descriptor: meta.RangeDescriptor{
+			RangeID:    1,
+			Generation: 3,
+			StartKey:   []byte("a"),
+			EndKey:     []byte("z"),
+			Replicas: []meta.ReplicaDescriptor{
+				{ReplicaID: 1, NodeID: 1, Role: meta.ReplicaRoleVoter},
+			},
+			LeaseholderReplicaID: 1,
+		},
+	})
+	if !errors.Is(err, ErrStaleSnapshot) {
+		t.Fatalf("stale snapshot error = %v, want %v", err, ErrStaleSnapshot)
+	}
+}
+
 func installDescriptor(t *testing.T, stateMachine *StateMachine, engine *storage.Engine, index uint64, desc meta.RangeDescriptor) error {
 	t.Helper()
 
@@ -376,6 +681,30 @@ func installDescriptor(t *testing.T, stateMachine *StateMachine, engine *storage
 			ExpectedGeneration: stateMachine.Descriptor().Generation,
 			Descriptor:         desc,
 		},
+	}.Marshal()
+	if err != nil {
+		return err
+	}
+	batch := engine.NewWriteBatch()
+	defer batch.Close()
+	delta, err := stateMachine.StageEntries(batch, []raftpb.Entry{
+		{Index: index, Type: raftpb.EntryNormal, Data: payload},
+	})
+	if err != nil {
+		return err
+	}
+	if err := batch.Commit(true); err != nil {
+		return err
+	}
+	stateMachine.CommitApply(delta)
+	return nil
+}
+
+func applyReplicaChangeCommand(stateMachine *StateMachine, engine *storage.Engine, index uint64, change ChangeReplicas) error {
+	payload, err := Command{
+		Version: 1,
+		Type:    CommandTypeChangeReplicas,
+		Replica: &change,
 	}.Marshal()
 	if err != nil {
 		return err

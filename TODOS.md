@@ -102,7 +102,7 @@ Exit criteria:
 **Status:** Completed with `internal/multiraft`, `internal/replica`,
 `internal/lease`, and Phase 2 storage extensions, covered by `go test ./...`.
 
-### [ ] Phase 3: Meta, Routing, and Membership
+### [x] Phase 3: Meta, Routing, and Membership
 
 Deliver:
 
@@ -111,20 +111,21 @@ Deliver:
 - [x] routing refresh and invalidation
 - [x] liveness records and epochs
 - [x] split triggers
-- [ ] learner/snapshot/rebalance flow
+- [x] learner/snapshot/rebalance flow
 - [x] generation-checked config changes
-- [ ] optional advisory gossip dissemination
+- [ ] optional advisory gossip dissemination (deferred)
 
 Exit criteria:
 
 - routing remains correct through split and rebalance
 - stale allocator decisions cannot win
 
-**Status:** In progress. `internal/meta`, `internal/routing`, authoritative
-meta1/meta2 layout bootstrapping, authoritative descriptor lookup,
-cache-backed resolution/refresh, generation checks, and split-trigger
-application in `internal/replica` are implemented; learner/snapshot/rebalance
-orchestration is still open.
+**Status:** Core deliverables are complete. `internal/meta`, `internal/routing`,
+authoritative meta1/meta2 layout bootstrapping, cache-backed routing,
+generation checks, split-trigger application, rebalance-safe membership
+transitions, and snapshot image installation are implemented. Optional advisory
+gossip dissemination remains open by design because correctness does not depend
+on it.
 
 ### [ ] Phase 4: Transaction Core
 

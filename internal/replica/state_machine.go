@@ -20,6 +20,12 @@ var ErrDescriptorGenerationMismatch = errors.New("descriptor generation mismatch
 // ErrInvalidSplitTrigger reports that a split trigger violates the written replica-state contract.
 var ErrInvalidSplitTrigger = errors.New("invalid split trigger")
 
+// ErrInvalidReplicaChange reports that a rebalance step violates the membership rules.
+var ErrInvalidReplicaChange = errors.New("invalid replica change")
+
+// ErrStaleSnapshot reports that a snapshot image is older than the descriptor already applied locally.
+var ErrStaleSnapshot = errors.New("stale snapshot image")
+
 // StateMachine is the local replica apply state for one range on one node.
 type StateMachine struct {
 	rangeID          uint64
@@ -38,6 +44,15 @@ type ApplyDelta struct {
 	HasLease         bool
 	Descriptor       meta.RangeDescriptor
 	HasDescriptor    bool
+	SafeReadFrontier hlc.Timestamp
+}
+
+// SnapshotImage is the self-consistent local replica image installed by snapshot application.
+type SnapshotImage struct {
+	AppliedIndex     uint64
+	Descriptor       meta.RangeDescriptor
+	Lease            lease.Record
+	HasLease         bool
 	SafeReadFrontier hlc.Timestamp
 }
 
@@ -188,6 +203,30 @@ func (s *StateMachine) StageEntries(batch *storage.WriteBatch, entries []raftpb.
 				}
 				delta.Descriptor = cmd.Split.Left
 				delta.HasDescriptor = true
+			case CommandTypeChangeReplicas:
+				currentDescriptor := s.descriptor
+				if delta.HasDescriptor {
+					currentDescriptor = delta.Descriptor
+				}
+				if cmd.Replica.ExpectedGeneration != currentDescriptor.Generation {
+					return ApplyDelta{}, fmt.Errorf("%w: expected %d got %d", ErrDescriptorGenerationMismatch, cmd.Replica.ExpectedGeneration, currentDescriptor.Generation)
+				}
+				nextDescriptor, err := applyReplicaChange(currentDescriptor, cmd.Replica.Change)
+				if err != nil {
+					return ApplyDelta{}, err
+				}
+				payload, err := nextDescriptor.MarshalBinary()
+				if err != nil {
+					return ApplyDelta{}, err
+				}
+				if err := batch.SetRaw(storage.RangeDescriptorKey(s.rangeID), payload); err != nil {
+					return ApplyDelta{}, err
+				}
+				if err := batch.SetRaw(descriptorKeyForLevel(cmd.Replica.MetaLevel, nextDescriptor.EndKey), payload); err != nil {
+					return ApplyDelta{}, err
+				}
+				delta.Descriptor = nextDescriptor
+				delta.HasDescriptor = true
 			default:
 				return ApplyDelta{}, fmt.Errorf("stage entry: unhandled command %q", cmd.Type)
 			}
@@ -236,6 +275,63 @@ func (s *StateMachine) FastGet(ctx context.Context, logicalKey []byte, readTS hl
 	return value, err
 }
 
+// ApplySnapshot replaces the local replica image with a self-consistent snapshot.
+func (s *StateMachine) ApplySnapshot(image SnapshotImage) error {
+	if err := image.Descriptor.Validate(); err != nil {
+		return err
+	}
+	if image.Descriptor.RangeID != s.rangeID {
+		return fmt.Errorf("apply snapshot: descriptor range %d does not match state machine range %d", image.Descriptor.RangeID, s.rangeID)
+	}
+	if image.AppliedIndex == 0 {
+		return fmt.Errorf("apply snapshot: applied index must be non-zero")
+	}
+	if image.HasLease {
+		if err := image.Lease.Validate(); err != nil {
+			return err
+		}
+	}
+	if s.descriptor.Generation > 0 && image.Descriptor.Generation < s.descriptor.Generation {
+		return fmt.Errorf("%w: current=%d incoming=%d", ErrStaleSnapshot, s.descriptor.Generation, image.Descriptor.Generation)
+	}
+
+	batch := s.engine.NewWriteBatch()
+	defer batch.Close()
+
+	payload, err := image.Descriptor.MarshalBinary()
+	if err != nil {
+		return err
+	}
+	if err := batch.SetRaw(storage.RangeDescriptorKey(s.rangeID), payload); err != nil {
+		return err
+	}
+	if err := batch.SetRangeAppliedIndex(s.rangeID, image.AppliedIndex); err != nil {
+		return err
+	}
+	if image.HasLease {
+		if err := batch.SetRangeLease(s.rangeID, image.Lease); err != nil {
+			return err
+		}
+	} else {
+		if err := batch.DeleteRaw(storage.RangeLeaseKey(s.rangeID)); err != nil {
+			return err
+		}
+	}
+	if err := batch.Commit(true); err != nil {
+		return err
+	}
+
+	s.appliedIndex = image.AppliedIndex
+	s.descriptor = image.Descriptor
+	if image.HasLease {
+		s.lease = image.Lease
+	} else {
+		s.lease = lease.Record{}
+	}
+	s.safeReadFrontier = image.SafeReadFrontier
+	return nil
+}
+
 func validateSplitTrigger(current, left, right meta.RangeDescriptor) error {
 	if current.RangeID == 0 {
 		return fmt.Errorf("%w: current descriptor is missing", ErrInvalidSplitTrigger)
@@ -274,6 +370,65 @@ func validateSplitTrigger(current, left, right meta.RangeDescriptor) error {
 		return fmt.Errorf("%w: right leaseholder hint must preserve parent leaseholder", ErrInvalidSplitTrigger)
 	}
 	return nil
+}
+
+func applyReplicaChange(current meta.RangeDescriptor, change ReplicaChange) (meta.RangeDescriptor, error) {
+	next := current
+	next.Replicas = append([]meta.ReplicaDescriptor(nil), current.Replicas...)
+	next.Generation = current.Generation + 1
+
+	index := findReplicaIndex(current.Replicas, change.Replica.ReplicaID)
+	switch change.Kind {
+	case ReplicaChangeAddLearner:
+		if index >= 0 {
+			return meta.RangeDescriptor{}, fmt.Errorf("%w: learner replica %d already exists", ErrInvalidReplicaChange, change.Replica.ReplicaID)
+		}
+		next.Replicas = append(next.Replicas, change.Replica)
+	case ReplicaChangePromote:
+		if index < 0 {
+			return meta.RangeDescriptor{}, fmt.Errorf("%w: learner replica %d not found", ErrInvalidReplicaChange, change.Replica.ReplicaID)
+		}
+		if current.Replicas[index].Role != meta.ReplicaRoleLearner {
+			return meta.RangeDescriptor{}, fmt.Errorf("%w: replica %d is not a learner", ErrInvalidReplicaChange, change.Replica.ReplicaID)
+		}
+		next.Replicas[index] = change.Replica
+	case ReplicaChangeRemove:
+		if index < 0 {
+			return meta.RangeDescriptor{}, fmt.Errorf("%w: replica %d not found", ErrInvalidReplicaChange, change.Replica.ReplicaID)
+		}
+		if current.LeaseholderReplicaID == change.Replica.ReplicaID {
+			return meta.RangeDescriptor{}, fmt.Errorf("%w: transfer lease before removing leaseholder replica %d", ErrInvalidReplicaChange, change.Replica.ReplicaID)
+		}
+		next.Replicas = append(next.Replicas[:index], next.Replicas[index+1:]...)
+		if countVoters(next.Replicas) == 0 {
+			return meta.RangeDescriptor{}, fmt.Errorf("%w: removal would leave the range without voters", ErrInvalidReplicaChange)
+		}
+	default:
+		return meta.RangeDescriptor{}, fmt.Errorf("%w: unknown replica change %q", ErrInvalidReplicaChange, change.Kind)
+	}
+	if err := next.Validate(); err != nil {
+		return meta.RangeDescriptor{}, fmt.Errorf("%w: %v", ErrInvalidReplicaChange, err)
+	}
+	return next, nil
+}
+
+func findReplicaIndex(replicas []meta.ReplicaDescriptor, replicaID uint64) int {
+	for i, replica := range replicas {
+		if replica.ReplicaID == replicaID {
+			return i
+		}
+	}
+	return -1
+}
+
+func countVoters(replicas []meta.ReplicaDescriptor) int {
+	count := 0
+	for _, replica := range replicas {
+		if replica.Role == meta.ReplicaRoleVoter {
+			count++
+		}
+	}
+	return count
 }
 
 func sameReplicaSet(left, right []meta.ReplicaDescriptor) bool {

@@ -17,6 +17,7 @@ const (
 	CommandTypeSetLease         CommandType = "set_lease"
 	CommandTypeUpdateDescriptor CommandType = "update_descriptor"
 	CommandTypeSplitRange       CommandType = "split_range"
+	CommandTypeChangeReplicas   CommandType = "change_replicas"
 )
 
 // Command is a versioned replica state-machine command.
@@ -27,6 +28,7 @@ type Command struct {
 	Lease      *SetLease         `json:"lease,omitempty"`
 	Descriptor *UpdateDescriptor `json:"descriptor,omitempty"`
 	Split      *SplitRange       `json:"split,omitempty"`
+	Replica    *ChangeReplicas   `json:"replica,omitempty"`
 }
 
 // PutValue writes one committed MVCC value.
@@ -53,6 +55,28 @@ type SplitRange struct {
 	MetaLevel          meta.Level           `json:"meta_level"`
 	Left               meta.RangeDescriptor `json:"left"`
 	Right              meta.RangeDescriptor `json:"right"`
+}
+
+// ReplicaChangeKind identifies one rebalance-safe membership step.
+type ReplicaChangeKind string
+
+const (
+	ReplicaChangeAddLearner   ReplicaChangeKind = "add_learner"
+	ReplicaChangePromote      ReplicaChangeKind = "promote_learner"
+	ReplicaChangeRemove       ReplicaChangeKind = "remove_replica"
+)
+
+// ChangeReplicas applies one generation-checked membership transition.
+type ChangeReplicas struct {
+	ExpectedGeneration uint64        `json:"expected_generation"`
+	MetaLevel          meta.Level    `json:"meta_level"`
+	Change             ReplicaChange `json:"change"`
+}
+
+// ReplicaChange describes a single membership mutation.
+type ReplicaChange struct {
+	Kind    ReplicaChangeKind     `json:"kind"`
+	Replica meta.ReplicaDescriptor `json:"replica"`
 }
 
 // Marshal encodes the command into its replicated binary form.
@@ -82,7 +106,7 @@ func (c Command) Validate() error {
 	}
 	switch c.Type {
 	case CommandTypePutValue:
-		if c.Put == nil || c.Lease != nil || c.Descriptor != nil || c.Split != nil {
+		if c.Put == nil || c.Lease != nil || c.Descriptor != nil || c.Split != nil || c.Replica != nil {
 			return fmt.Errorf("command: put_value payload mismatch")
 		}
 		if len(c.Put.LogicalKey) == 0 {
@@ -92,21 +116,21 @@ func (c Command) Validate() error {
 			return fmt.Errorf("command: put timestamp required")
 		}
 	case CommandTypeSetLease:
-		if c.Lease == nil || c.Put != nil || c.Descriptor != nil || c.Split != nil {
+		if c.Lease == nil || c.Put != nil || c.Descriptor != nil || c.Split != nil || c.Replica != nil {
 			return fmt.Errorf("command: set_lease payload mismatch")
 		}
 		if err := c.Lease.Record.Validate(); err != nil {
 			return err
 		}
 	case CommandTypeUpdateDescriptor:
-		if c.Descriptor == nil || c.Put != nil || c.Lease != nil || c.Split != nil {
+		if c.Descriptor == nil || c.Put != nil || c.Lease != nil || c.Split != nil || c.Replica != nil {
 			return fmt.Errorf("command: update_descriptor payload mismatch")
 		}
 		if err := c.Descriptor.Descriptor.Validate(); err != nil {
 			return err
 		}
 	case CommandTypeSplitRange:
-		if c.Split == nil || c.Put != nil || c.Lease != nil || c.Descriptor != nil {
+		if c.Split == nil || c.Put != nil || c.Lease != nil || c.Descriptor != nil || c.Replica != nil {
 			return fmt.Errorf("command: split_range payload mismatch")
 		}
 		switch c.Split.MetaLevel {
@@ -122,6 +146,31 @@ func (c Command) Validate() error {
 		}
 		if c.Split.Left.RangeID == c.Split.Right.RangeID {
 			return fmt.Errorf("command: split_range must create a distinct right range")
+		}
+	case CommandTypeChangeReplicas:
+		if c.Replica == nil || c.Put != nil || c.Lease != nil || c.Descriptor != nil || c.Split != nil {
+			return fmt.Errorf("command: change_replicas payload mismatch")
+		}
+		switch c.Replica.MetaLevel {
+		case meta.LevelMeta1, meta.LevelMeta2:
+		default:
+			return fmt.Errorf("command: change_replicas meta level %d is invalid", c.Replica.MetaLevel)
+		}
+		switch c.Replica.Change.Kind {
+		case ReplicaChangeAddLearner:
+			if c.Replica.Change.Replica.Role != meta.ReplicaRoleLearner {
+				return fmt.Errorf("command: add_learner requires learner role")
+			}
+		case ReplicaChangePromote:
+			if c.Replica.Change.Replica.Role != meta.ReplicaRoleVoter {
+				return fmt.Errorf("command: promote_learner requires voter role")
+			}
+		case ReplicaChangeRemove:
+		default:
+			return fmt.Errorf("command: unknown replica change kind %q", c.Replica.Change.Kind)
+		}
+		if c.Replica.Change.Replica.ReplicaID == 0 || c.Replica.Change.Replica.NodeID == 0 {
+			return fmt.Errorf("command: replica ids must be non-zero")
 		}
 	default:
 		return fmt.Errorf("command: unknown type %q", c.Type)
