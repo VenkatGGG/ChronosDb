@@ -131,10 +131,10 @@ on it.
 
 Deliver:
 
-- lock table
-- contention handling
-- wound-wait
-- retryable restart handling
+- [x] lock table
+- [x] contention handling
+- [x] wound-wait
+- [x] retryable restart handling
 - refresh spans
 - one-phase commit fast path
 - client-visible retry/error mapping
@@ -143,6 +143,11 @@ Exit criteria:
 
 - transaction semantics are centralized and testable
 - callers do not invent their own retry or lock behavior
+
+**Status:** In progress. The canonical transaction package now owns the base
+transaction record, retry/restart rules, lock table state, wait queues, and
+wound-wait decisions. Refresh spans, one-phase commit, and client-visible retry
+mapping are still open.
 
 ### [ ] Phase 5: Multi-Range Transactions
 
