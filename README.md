@@ -133,6 +133,7 @@ Before any code lands:
 - [`ARCHITECTURE.md`](./ARCHITECTURE.md) explains the target system and rationale
 - [`IMPLEMENTATION_PLAN.md`](./IMPLEMENTATION_PLAN.md) is the execution contract
 - [`TODOS.md`](./TODOS.md) tracks the next concrete milestones
+- [`rules.md`](./rules.md) stores persistent Codex/agent workflow rules
 
 Implementation rule:
 
@@ -140,3 +141,9 @@ Implementation rule:
   `IMPLEMENTATION_PLAN.md` first in a docs commit, then write code
 - use one branch and one PR per task; do not add new unrelated tasks onto an
   existing open PR
+
+Git workflow rule:
+
+- agent-generated changes should land through pull requests instead of direct
+  pushes to `main`; a new branch is not required for every task, and work can
+  continue after the PR is opened while review happens asynchronously
