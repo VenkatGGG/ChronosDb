@@ -142,5 +142,6 @@ Implementation rule:
 
 Git workflow rule:
 
-- agent-generated changes should go to a `codex/*` branch and land through a pull
-  request so automated review can inspect them before merge
+- agent-generated changes should land through pull requests instead of direct
+  pushes to `main`; a new branch is not required for every task, and work can
+  continue after the PR is opened while review happens asynchronously

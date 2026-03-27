@@ -379,9 +379,10 @@ After that:
 - docs-only commits come before protocol changes
 - code commits are phase-scoped
 - test additions land in the same commit as the behavior they validate
-- agent-generated changes go to a branch, not directly to `main`
-- the default branch prefix for agent work is `codex/`
-- each agent branch must be pushed and reviewed via pull request before merge
+- agent-generated changes must land through pull requests instead of direct pushes to `main`
+- a new branch is not required for every task; an existing working branch may be reused
+- the default prefix when creating an agent branch is `codex/`
+- work may continue after opening a PR without waiting for asynchronous review feedback
 
 ## 8. Assumptions and Defaults
 

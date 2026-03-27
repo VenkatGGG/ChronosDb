@@ -6,9 +6,10 @@ agents working in this repo.
 ## Git Workflow
 
 1. Never push agent-generated changes directly to `main`.
-2. Always create a branch for agent work. Use the `codex/` prefix by default.
-3. Push the branch to `origin` and open a pull request.
-4. Wait for the repository's automated review flow to inspect the PR before merge.
+2. Agent-generated changes should be raised through pull requests.
+3. Reusing an existing working branch is fine; a brand-new branch is not required
+   for every task. Use the `codex/` prefix by default when creating a branch.
+4. Once a PR is raised, work may continue without blocking on asynchronous review.
 5. If a protocol or architecture change is needed, update docs first in the PR
    before any implementation code.
 
