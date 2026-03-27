@@ -381,11 +381,14 @@ After that:
 - docs-only commits come before protocol changes
 - code commits are phase-scoped
 - test additions land in the same commit as the behavior they validate
+- agent-generated changes push directly to `main` unless the user explicitly requests a PR-based flow
+- commits stay incremental and scoped to one coherent change
+- plan and protocol updates land before code that depends on them
 
 ## 8. Assumptions and Defaults
 
 - `origin` is `https://github.com/VenkatGGG/ChronosDb`
-- pushes go directly to `main`
+- pushes go directly to `main` unless the user explicitly requests a PR-based flow
 - the current local docs seed the remote history
 - docs-first is mandatory
 - GitHub Actions is the default CI when implementation begins
