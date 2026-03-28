@@ -286,7 +286,8 @@ wait, and ambiguous-commit scenarios against a pluggable cluster controller.
 That harness now also has a built-in catalog of canonical partition, restart,
 and ambiguous-commit recovery scenarios. Runner executions now also emit
 structured reports and support post-step and post-run assertion hooks. Chaos
-validation is still open.
+validation is still open, but the same scenarios can now be exported as a
+versioned handoff manifest for external Jepsen/chaos runners.
 
 ## Ongoing Discipline
 
@@ -319,8 +320,8 @@ Rule:
 - [x] 8.2 Add snapshot-pressure and allocator-observability metrics around the new operator HTTP surface
 - [x] 8.3 Add a chaos/system-test harness skeleton for partitions, crash/restart, and ambiguous commit timing
 
-### [ ] Phase 8 Follow-On Execution
+### [x] Phase 8 Follow-On Execution
 
 - [x] 8.4 Add a built-in catalog of canonical chaos scenarios for partition, crash/restart, and ambiguous-commit recovery
 - [x] 8.5 Add structured execution reports and assertion hooks to the system-test runner
-- [ ] 8.6 Add a Jepsen/chaos handoff manifest format so external fault runners can consume the same scenarios
+- [x] 8.6 Add a Jepsen/chaos handoff manifest format so external fault runners can consume the same scenarios
