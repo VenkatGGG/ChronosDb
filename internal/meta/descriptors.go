@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/VenkatGGG/ChronosDb/internal/hlc"
+	"github.com/VenkatGGG/ChronosDb/internal/placement"
 )
 
 // ReplicaRole describes a replica's membership role in a range.
@@ -31,6 +32,7 @@ type RangeDescriptor struct {
 	EndKey               []byte              `json:"end_key,omitempty"`
 	Replicas             []ReplicaDescriptor `json:"replicas"`
 	LeaseholderReplicaID uint64              `json:"leaseholder_replica_id,omitempty"`
+	PlacementPolicy      *placement.Policy   `json:"placement_policy,omitempty"`
 }
 
 // NodeLiveness is the epoch-bearing liveness record for one node.
@@ -75,6 +77,9 @@ func (d RangeDescriptor) Validate() error {
 			return fmt.Errorf("range descriptor: leaseholder replica %d not present", d.LeaseholderReplicaID)
 		}
 	}
+	if _, _, err := d.CompiledPlacement(); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -103,6 +108,18 @@ func (d *RangeDescriptor) UnmarshalBinary(data []byte) error {
 		return fmt.Errorf("decode range descriptor: %w", err)
 	}
 	return d.Validate()
+}
+
+// CompiledPlacement resolves the descriptor's placement policy, if present.
+func (d RangeDescriptor) CompiledPlacement() (placement.CompiledPolicy, bool, error) {
+	if d.PlacementPolicy == nil {
+		return placement.CompiledPolicy{}, false, nil
+	}
+	compiled, err := placement.Compile(*d.PlacementPolicy)
+	if err != nil {
+		return placement.CompiledPolicy{}, false, fmt.Errorf("range descriptor: invalid placement policy: %w", err)
+	}
+	return compiled, true, nil
 }
 
 // Validate checks the liveness record for obvious corruption.

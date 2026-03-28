@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/VenkatGGG/ChronosDb/internal/hlc"
+	"github.com/VenkatGGG/ChronosDb/internal/placement"
 )
 
 func TestRangeDescriptorContainsKey(t *testing.T) {
@@ -44,6 +45,11 @@ func TestDescriptorAndLivenessBinaryRoundTrip(t *testing.T) {
 			{ReplicaID: 2, NodeID: 2, Role: ReplicaRoleLearner},
 		},
 		LeaseholderReplicaID: 1,
+		PlacementPolicy: &placement.Policy{
+			PlacementMode:    placement.ModeHomeRegion,
+			HomeRegion:       "us-east1",
+			PreferredRegions: []string{"us-east1", "us-west1", "europe-west1"},
+		},
 	}
 	payload, err := desc.MarshalBinary()
 	if err != nil {
@@ -55,6 +61,9 @@ func TestDescriptorAndLivenessBinaryRoundTrip(t *testing.T) {
 	}
 	if decodedDesc.RangeID != desc.RangeID || decodedDesc.Generation != desc.Generation {
 		t.Fatalf("decoded descriptor = %+v, want %+v", decodedDesc, desc)
+	}
+	if decodedDesc.PlacementPolicy == nil || decodedDesc.PlacementPolicy.HomeRegion != "us-east1" {
+		t.Fatalf("decoded placement policy = %+v, want home_region us-east1", decodedDesc.PlacementPolicy)
 	}
 
 	liveness := NodeLiveness{
@@ -73,5 +82,28 @@ func TestDescriptorAndLivenessBinaryRoundTrip(t *testing.T) {
 	}
 	if decodedLiveness != liveness {
 		t.Fatalf("decoded liveness = %+v, want %+v", decodedLiveness, liveness)
+	}
+}
+
+func TestRangeDescriptorRejectsInvalidPlacementPolicy(t *testing.T) {
+	t.Parallel()
+
+	desc := RangeDescriptor{
+		RangeID:    1,
+		Generation: 7,
+		StartKey:   []byte("m"),
+		EndKey:     []byte("z"),
+		Replicas: []ReplicaDescriptor{
+			{ReplicaID: 1, NodeID: 1, Role: ReplicaRoleVoter},
+			{ReplicaID: 2, NodeID: 2, Role: ReplicaRoleVoter},
+		},
+		LeaseholderReplicaID: 1,
+		PlacementPolicy: &placement.Policy{
+			PlacementMode:    placement.ModeGlobal,
+			PreferredRegions: []string{"us-east1", "us-west1"},
+		},
+	}
+	if err := desc.Validate(); err == nil {
+		t.Fatalf("expected invalid placement policy to be rejected")
 	}
 }
