@@ -217,8 +217,10 @@ Exit criteria:
 **Status:** In progress. The closed-timestamp publication core and follower-read
 eligibility checks now exist as a dedicated package, including monotonic
 publication, lease-sequence invalidation, intent-backlog stalling, and
-fail-closed behavior under clock-offset violations. Placement policy and SQL-
-visible locality semantics are still open.
+fail-closed behavior under clock-offset violations. Placement policy
+normalization and allocator-facing compilation now exist as a dedicated package
+for `REGIONAL`, `HOME_REGION`, and `GLOBAL` declarations. SQL-visible locality
+semantics and descriptor integration are still open.
 
 ### [ ] Phase 8: Hardening and Operability
 
