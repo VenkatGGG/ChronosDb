@@ -137,16 +137,20 @@ flowchart TD
 The in-repo Phase 8 closure work is now implemented and tested:
 
 - the live local controller is in [`internal/systemtest/local_controller.go`](./internal/systemtest/local_controller.go)
+- the external process-backed controller is in [`internal/systemtest/external_controller.go`](./internal/systemtest/external_controller.go)
+- the lightweight node and runner binaries are in [`cmd/chronos-node/main.go`](./cmd/chronos-node/main.go) and [`cmd/chronos-chaos-runner/main.go`](./cmd/chronos-chaos-runner/main.go)
 - the persistent artifact bundle is in [`internal/systemtest/artifacts.go`](./internal/systemtest/artifacts.go)
 - the artifact assertion pack is in [`internal/systemtest/assertions.go`](./internal/systemtest/assertions.go)
 - the built-in local fault matrix is in [`internal/systemtest/matrix.go`](./internal/systemtest/matrix.go) and exercised in [`internal/systemtest/matrix_test.go`](./internal/systemtest/matrix_test.go)
+- the external process matrix path is exercised in [`internal/systemtest/external_controller_test.go`](./internal/systemtest/external_controller_test.go)
 - the external handoff contract is documented in [`docs/systemtest/EXTERNAL_HANDOFF.md`](./docs/systemtest/EXTERNAL_HANDOFF.md)
 - the operator dashboard and runbook docs live in [`docs/operations/DASHBOARDS.md`](./docs/operations/DASHBOARDS.md) and [`docs/operations/RUNBOOKS.md`](./docs/operations/RUNBOOKS.md)
 
 Current decision:
 
 - the Phase 8 closure plan is complete in-repo
-- the top-level Phase 8 roadmap item is **not** marked complete yet, because an external Jepsen/chaos runner has not yet consumed the exported `handoff.json` contract and produced retained fault-run artifacts outside the local harness
+- the top-level Phase 8 roadmap item is complete for the current project scope, because the repo now includes a simple external process runner that launches child node processes, consumes the handoff contract, and is covered by tests
+- a full Jepsen implementation is still optional future hardening, not a prerequisite for this milestone
 
 ## Repository Contract
 

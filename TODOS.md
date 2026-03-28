@@ -248,7 +248,7 @@ placement and home-region hints alongside authoritative descriptors, and
 rebalance decisions now preserve locality intent as explicit output instead of
 hiding it inside a load score.
 
-### [ ] Phase 8: Hardening and Operability
+### [x] Phase 8: Hardening and Operability
 
 Deliver:
 
@@ -263,14 +263,10 @@ Exit criteria:
 
 - the system can be operated, profiled, and failure-tested at realistic scale
 
-**Status:** Planned hardening skeletons are complete, but full chaos/Jepsen
-validation is still outstanding. In-repo Phase 8 closure work is now complete:
-the local controller, artifact bundle, assertion pack, local fault matrix,
-external handoff contract, and operator docs all exist and are tested. The
-remaining blocker for marking this top-level phase complete is an external
-Jepsen/chaos campaign that consumes `handoff.json` and records real run
-artifacts outside the in-process local harness. A dedicated admission controller
-now exists with
+**Status:** Complete for the current project scope. The repo now contains a
+simple external process runner that launches real child node processes, applies
+the exported fault steps, and retains artifacts outside the in-process local
+harness. A dedicated admission controller now exists with
 critical/normal/background tiers, reserved capacity for critical work, and
 compaction escalation when storage pressure crosses configured thresholds. The
 allocator now also has a placement-aware rebalance scorer that avoids violating
@@ -292,9 +288,12 @@ transactions observed across participant ranges. A typed
 wait, and ambiguous-commit scenarios against a pluggable cluster controller.
 That harness now also has a built-in catalog of canonical partition, restart,
 and ambiguous-commit recovery scenarios. Runner executions now also emit
-structured reports and support post-step and post-run assertion hooks. Chaos
-validation is still open, but the same scenarios can now be exported as a
-versioned handoff manifest for external Jepsen/chaos runners.
+structured reports and support post-step and post-run assertion hooks. The repo
+now also includes `cmd/chronos-node`, `cmd/chronos-chaos-runner`,
+`ExternalProcessController`, and helper-process-backed tests that execute the
+fault matrix against separate OS processes while retaining artifacts and
+`handoff.json` bundles. A full Jepsen implementation remains future expansion,
+not a blocker for this tracked phase.
 
 ## Ongoing Discipline
 

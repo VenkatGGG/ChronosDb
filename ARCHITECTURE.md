@@ -989,6 +989,8 @@ Build:
 Current evidence in the repo:
 
 - `internal/systemtest/local_controller.go` provides a live in-process cluster controller with real pgwire and observability listeners
+- `internal/systemtest/external_controller.go` provides a process-backed controller that launches separate child node processes
+- `cmd/chronos-node/main.go` and `cmd/chronos-chaos-runner/main.go` provide the simple external node and chaos-runner binaries
 - `internal/systemtest/artifacts.go` persists versioned scenario artifacts
 - `internal/systemtest/assertions.go` validates retained artifacts for write visibility, follower-read freshness, `STAGING` outcomes, and metadata monotonicity
 - `internal/systemtest/matrix.go` executes the first built-in local fault matrix and writes `fault-matrix.json` plus per-scenario artifacts
@@ -998,7 +1000,8 @@ Current evidence in the repo:
 Architectural decision:
 
 - the in-repo Phase 8 closure plan is complete
-- the top-level Phase 8 program remains open until an external Jepsen/chaos runner executes the exported handoff contract and the resulting retained artifacts are reviewed
+- the top-level Phase 8 program is complete for the current project scope because the repo now contains a simple external process runner and tested process-backed fault-matrix execution
+- a full Jepsen implementation remains a future extension rather than a current architectural blocker
 
 ## 24. Open Decisions
 
