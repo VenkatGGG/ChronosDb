@@ -325,3 +325,49 @@ Rule:
 - [x] 8.4 Add a built-in catalog of canonical chaos scenarios for partition, crash/restart, and ambiguous-commit recovery
 - [x] 8.5 Add structured execution reports and assertion hooks to the system-test runner
 - [x] 8.6 Add a Jepsen/chaos handoff manifest format so external fault runners can consume the same scenarios
+
+## Completion Plan For Remaining Open Work
+
+This section is a planning artifact only. It defines how to close the still-open
+top-level outcomes without starting that work yet.
+
+### [ ] 9. Phase 8 Closure Plan
+
+- [x] 9.1 Implement a real cluster-backed `internal/systemtest` controller
+  Status: complete via `LocalController`, which now starts real pgwire and observability listeners per node, supports crash/restart and partition/heal controls, and provides one-shot ambiguous-commit fault injection against the live query path.
+  so manifests and built-in scenarios can run against an actual multi-process
+  ChronosDB cluster instead of only a recording stub
+- [ ] 9.2 Add a persistent run artifact format for chaos runs
+  including scenario manifest, structured runner report, per-node logs, and a
+  final pass/fail summary that can be attached to CI or retained for manual review
+- [ ] 9.3 Define and implement assertion packs for external correctness checks
+  including no acknowledged-write loss, no stale follower read beyond closed
+  timestamp, deterministic `STAGING` recovery outcome, and lease/descriptor
+  generation monotonicity under churn
+- [ ] 9.4 Execute a first fault matrix over the real cluster controller
+  covering minority partition, majority partition, crash during lease transfer,
+  crash during learner snapshot catch-up, crash during `STAGING`, ambiguous
+  commit response loss, and split/rebalance during concurrent traffic
+- [ ] 9.5 Integrate an external Jepsen/chaos runner handoff path
+  so exported manifests can be consumed by the external fault toolchain with a
+  documented mapping from manifest steps to fault injector operations
+- [ ] 9.6 Add operator-facing observability dashboards and runbooks
+  for snapshot pressure, allocator decisions, closed timestamp lag, lease
+  churn, retry/error rates, and recovery outcomes so Phase 8 is operationally
+  complete instead of only code-complete
+- [ ] 9.7 Close Phase 8 with evidence
+  by updating `README.md`, `ARCHITECTURE.md`, and this file with the executed
+  fault matrix, evidence locations, observed gaps, and the final decision on
+  whether Phase 8 can be marked complete
+
+### [ ] 10. Deferred Optional Work
+
+- [ ] 10.1 Decide whether advisory gossip dissemination is still worth doing
+  now that correctness, routing truth, and placement all depend on authoritative
+  metadata instead of gossip
+- [ ] 10.2 If kept, implement advisory gossip strictly as a hint plane
+  for liveness suspicion and topology hints only, with an explicit guarantee
+  that it cannot override meta-range truth or lease/routing decisions
+- [ ] 10.3 Add validation and failure tests for advisory gossip
+  covering stale hints, GC-pause false suspicion, and disagreement with
+  authoritative metadata so the feature stays non-authoritative by construction

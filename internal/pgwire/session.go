@@ -29,6 +29,13 @@ func (e Error) Error() string {
 	return e.Message
 }
 
+// SessionTerminationError allows a query handler to terminate the current
+// session without sending an error response frame.
+type SessionTerminationError interface {
+	error
+	TerminateSession() bool
+}
+
 // Session is the protocol-level PostgreSQL session skeleton.
 type Session struct {
 	serverParameters map[string]string
@@ -71,6 +78,10 @@ func (s *Session) HandleFrontend(ctx context.Context, msg FrontendMessage) (fram
 		}
 		result, handlerErr := s.handler.HandleSimpleQuery(ctx, typed.SQL)
 		if handlerErr != nil {
+			var terminationErr SessionTerminationError
+			if errors.As(handlerErr, &terminationErr) && terminationErr.TerminateSession() {
+				return nil, true, nil
+			}
 			return errorFrames(asWireError(handlerErr)), false, nil
 		}
 		frames = make([][]byte, 0, len(result.Rows)+3)
