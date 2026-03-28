@@ -355,6 +355,8 @@ top-level outcomes without starting that work yet.
   crash during learner snapshot catch-up, crash during `STAGING`, ambiguous
   commit response loss, and split/rebalance during concurrent traffic
 - [ ] 9.5 Integrate an external Jepsen/chaos runner handoff path
+- [x] 9.5 Integrate an external Jepsen/chaos runner handoff path
+  Status: complete via `handoff.json` export per scenario artifact directory, `BuildHandoffBundle`/`WriteHandoffBundle`, and documented action-to-operation mapping in `docs/systemtest/EXTERNAL_HANDOFF.md`.
   so exported manifests can be consumed by the external fault toolchain with a
   documented mapping from manifest steps to fault injector operations
 - [ ] 9.6 Add operator-facing observability dashboards and runbooks

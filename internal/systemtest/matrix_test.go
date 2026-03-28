@@ -28,6 +28,7 @@ func TestExecuteFaultMatrixWithLocalController(t *testing.T) {
 			filepath.Join(entry.ArtifactDir, "manifest.json"),
 			filepath.Join(entry.ArtifactDir, "report.json"),
 			filepath.Join(entry.ArtifactDir, "summary.json"),
+			filepath.Join(entry.ArtifactDir, "handoff.json"),
 		} {
 			if _, err := os.Stat(path); err != nil {
 				t.Fatalf("stat %s: %v", path, err)

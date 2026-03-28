@@ -225,6 +225,9 @@ func executeMatrixScenario(
 	if err := artifacts.WriteDir(entry.ArtifactDir); err != nil {
 		return entry, err
 	}
+	if err := WriteHandoffBundle(entry.ArtifactDir, scenario); err != nil {
+		return entry, err
+	}
 	return entry, runErr
 }
 
