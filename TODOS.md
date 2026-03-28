@@ -250,8 +250,10 @@ Exit criteria:
 
 **Status:** In progress. A dedicated admission controller now exists with
 critical/normal/background tiers, reserved capacity for critical work, and
-compaction escalation when storage pressure crosses configured thresholds.
-Balancing, observability, simulation, and chaos validation are still open.
+compaction escalation when storage pressure crosses configured thresholds. The
+allocator now also has a placement-aware rebalance scorer that avoids violating
+survival-region constraints while moving replicas off hotter nodes.
+Observability, simulation, and chaos validation are still open.
 
 ## Ongoing Discipline
 
