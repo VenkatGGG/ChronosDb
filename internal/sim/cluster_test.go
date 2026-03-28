@@ -266,6 +266,269 @@ func TestRangeClusterLeaseTransferRequiresFreshClosedTimestamp(t *testing.T) {
 	}
 }
 
+func TestRangeClusterLeaseChurnRejectsStalePublications(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	cluster, err := NewRangeCluster(10, []Member{
+		{NodeID: 1, ReplicaID: 1},
+		{NodeID: 2, ReplicaID: 2},
+	})
+	if err != nil {
+		t.Fatalf("new range cluster: %v", err)
+	}
+	defer cluster.Close()
+
+	rangeStart := storage.GlobalTablePrimaryPrefix(13)
+	rangeEnd := storage.GlobalTablePrimaryPrefix(14)
+	desc := meta.RangeDescriptor{
+		RangeID:    10,
+		Generation: 1,
+		StartKey:   rangeStart,
+		EndKey:     rangeEnd,
+		Replicas: []meta.ReplicaDescriptor{
+			{ReplicaID: 1, NodeID: 1, Role: meta.ReplicaRoleVoter},
+			{ReplicaID: 2, NodeID: 2, Role: meta.ReplicaRoleVoter},
+		},
+		LeaseholderReplicaID: 1,
+	}
+	applyReplicatedCommand(t, cluster, []uint64{1, 2}, replica.Command{
+		Version: 1,
+		Type:    replica.CommandTypeUpdateDescriptor,
+		Descriptor: &replica.UpdateDescriptor{
+			ExpectedGeneration: 0,
+			Descriptor:         desc,
+		},
+	})
+
+	leaseOne, err := lease.NewRecord(1, 1, hlc.Timestamp{WallTime: 100, Logical: 0}, hlc.Timestamp{WallTime: 220, Logical: 0}, 1)
+	if err != nil {
+		t.Fatalf("new lease one: %v", err)
+	}
+	applyReplicatedCommand(t, cluster, []uint64{1, 2}, replica.Command{
+		Version: 1,
+		Type:    replica.CommandTypeSetLease,
+		Lease:   &replica.SetLease{Record: leaseOne},
+	})
+
+	logicalKey := storage.GlobalTablePrimaryKey(13, []byte("charlie"))
+	valueTS := hlc.Timestamp{WallTime: 140, Logical: 1}
+	applyReplicatedCommand(t, cluster, []uint64{1, 2}, replica.Command{
+		Version: 1,
+		Type:    replica.CommandTypePutValue,
+		Put: &replica.PutValue{
+			LogicalKey: logicalKey,
+			Timestamp:  valueTS,
+			Value:      []byte("value"),
+		},
+	})
+	applyReplicatedCommand(t, cluster, []uint64{1, 2}, replica.Command{
+		Version: 1,
+		Type:    replica.CommandTypeSetClosedTS,
+		ClosedTS: &replica.SetClosedTS{
+			Record: closedts.Record{
+				RangeID:       10,
+				LeaseSequence: leaseOne.Sequence,
+				ClosedTS:      valueTS,
+				PublishedAt:   hlc.Timestamp{WallTime: 150, Logical: 0},
+			},
+		},
+	})
+
+	leaseTwo, err := leaseOne.Transfer(2, 2, hlc.Timestamp{WallTime: 160, Logical: 0}, hlc.Timestamp{WallTime: 260, Logical: 0})
+	if err != nil {
+		t.Fatalf("transfer to replica 2: %v", err)
+	}
+	applyReplicatedCommand(t, cluster, []uint64{1, 2}, replica.Command{
+		Version: 1,
+		Type:    replica.CommandTypeSetLease,
+		Lease:   &replica.SetLease{Record: leaseTwo},
+	})
+	desc.Generation = 2
+	desc.LeaseholderReplicaID = 2
+	applyReplicatedCommand(t, cluster, []uint64{1, 2}, replica.Command{
+		Version: 1,
+		Type:    replica.CommandTypeUpdateDescriptor,
+		Descriptor: &replica.UpdateDescriptor{
+			ExpectedGeneration: 1,
+			Descriptor:         desc,
+		},
+	})
+
+	replicaOne, ok := cluster.Replica(1)
+	if !ok {
+		t.Fatalf("replica 1 missing")
+	}
+	if _, err := replicaOne.State.HistoricalGet(ctx, logicalKey, valueTS); !errors.Is(err, closedts.ErrClosedTimestampLeaseMismatch) {
+		t.Fatalf("historical read after first transfer = %v, want %v", err, closedts.ErrClosedTimestampLeaseMismatch)
+	}
+
+	applyReplicatedCommand(t, cluster, []uint64{1, 2}, replica.Command{
+		Version: 1,
+		Type:    replica.CommandTypeSetClosedTS,
+		ClosedTS: &replica.SetClosedTS{
+			Record: closedts.Record{
+				RangeID:       10,
+				LeaseSequence: leaseTwo.Sequence,
+				ClosedTS:      hlc.Timestamp{WallTime: 160, Logical: 0},
+				PublishedAt:   hlc.Timestamp{WallTime: 170, Logical: 0},
+			},
+		},
+	})
+	if got, err := replicaOne.State.HistoricalGet(ctx, logicalKey, valueTS); err != nil {
+		t.Fatalf("historical get after first refreshed publication: %v", err)
+	} else if !bytes.Equal(got, []byte("value")) {
+		t.Fatalf("historical value after first transfer = %q, want value", got)
+	}
+
+	leaseThree, err := leaseTwo.Transfer(1, 1, hlc.Timestamp{WallTime: 180, Logical: 0}, hlc.Timestamp{WallTime: 280, Logical: 0})
+	if err != nil {
+		t.Fatalf("transfer back to replica 1: %v", err)
+	}
+	applyReplicatedCommand(t, cluster, []uint64{1, 2}, replica.Command{
+		Version: 1,
+		Type:    replica.CommandTypeSetLease,
+		Lease:   &replica.SetLease{Record: leaseThree},
+	})
+	desc.Generation = 3
+	desc.LeaseholderReplicaID = 1
+	applyReplicatedCommand(t, cluster, []uint64{1, 2}, replica.Command{
+		Version: 1,
+		Type:    replica.CommandTypeUpdateDescriptor,
+		Descriptor: &replica.UpdateDescriptor{
+			ExpectedGeneration: 2,
+			Descriptor:         desc,
+		},
+	})
+
+	stalePublication := nextEntry(t, cluster, replica.Command{
+		Version: 1,
+		Type:    replica.CommandTypeSetClosedTS,
+		ClosedTS: &replica.SetClosedTS{
+			Record: closedts.Record{
+				RangeID:       10,
+				LeaseSequence: leaseTwo.Sequence,
+				ClosedTS:      hlc.Timestamp{WallTime: 175, Logical: 0},
+				PublishedAt:   hlc.Timestamp{WallTime: 181, Logical: 0},
+			},
+		},
+	})
+	if err := cluster.ApplyEntry([]uint64{1, 2}, stalePublication); !errors.Is(err, replica.ErrInvalidClosedTimestamp) {
+		t.Fatalf("stale publication apply = %v, want %v", err, replica.ErrInvalidClosedTimestamp)
+	}
+
+	replicaTwo, ok := cluster.Replica(2)
+	if !ok {
+		t.Fatalf("replica 2 missing")
+	}
+	if _, err := replicaTwo.State.HistoricalGet(ctx, logicalKey, valueTS); !errors.Is(err, closedts.ErrClosedTimestampLeaseMismatch) {
+		t.Fatalf("historical read after second transfer = %v, want %v", err, closedts.ErrClosedTimestampLeaseMismatch)
+	}
+
+	applyReplicatedCommand(t, cluster, []uint64{1, 2}, replica.Command{
+		Version: 1,
+		Type:    replica.CommandTypeSetClosedTS,
+		ClosedTS: &replica.SetClosedTS{
+			Record: closedts.Record{
+				RangeID:       10,
+				LeaseSequence: leaseThree.Sequence,
+				ClosedTS:      hlc.Timestamp{WallTime: 180, Logical: 0},
+				PublishedAt:   hlc.Timestamp{WallTime: 190, Logical: 0},
+			},
+		},
+	})
+	if got, err := replicaTwo.State.HistoricalGet(ctx, logicalKey, valueTS); err != nil {
+		t.Fatalf("historical get after second refreshed publication: %v", err)
+	} else if !bytes.Equal(got, []byte("value")) {
+		t.Fatalf("historical value after second transfer = %q, want value", got)
+	}
+}
+
+func TestRangeClusterRejectsStaleReplicaChangeAfterSplit(t *testing.T) {
+	t.Parallel()
+
+	cluster, err := NewRangeCluster(14, []Member{
+		{NodeID: 1, ReplicaID: 1},
+		{NodeID: 2, ReplicaID: 2},
+	})
+	if err != nil {
+		t.Fatalf("new range cluster: %v", err)
+	}
+	defer cluster.Close()
+
+	parent := meta.RangeDescriptor{
+		RangeID:    14,
+		Generation: 1,
+		StartKey:   storage.GlobalTablePrimaryPrefix(30),
+		EndKey:     storage.GlobalTablePrimaryPrefix(31),
+		Replicas: []meta.ReplicaDescriptor{
+			{ReplicaID: 1, NodeID: 1, Role: meta.ReplicaRoleVoter},
+			{ReplicaID: 2, NodeID: 2, Role: meta.ReplicaRoleVoter},
+		},
+		LeaseholderReplicaID: 1,
+	}
+	splitPoint := storage.GlobalTablePrimaryKey(30, []byte("mid"))
+	applyReplicatedCommand(t, cluster, []uint64{1, 2}, replica.Command{
+		Version: 1,
+		Type:    replica.CommandTypeUpdateDescriptor,
+		Descriptor: &replica.UpdateDescriptor{
+			ExpectedGeneration: 0,
+			Descriptor:         parent,
+		},
+	})
+
+	left := parent
+	left.Generation = 2
+	left.EndKey = splitPoint
+	right := meta.RangeDescriptor{
+		RangeID:              15,
+		Generation:           1,
+		StartKey:             splitPoint,
+		EndKey:               parent.EndKey,
+		Replicas:             append([]meta.ReplicaDescriptor(nil), parent.Replicas...),
+		LeaseholderReplicaID: parent.LeaseholderReplicaID,
+	}
+	applyReplicatedCommand(t, cluster, []uint64{1, 2}, replica.Command{
+		Version: 1,
+		Type:    replica.CommandTypeSplitRange,
+		Split: &replica.SplitRange{
+			ExpectedGeneration: 1,
+			MetaLevel:          meta.LevelMeta2,
+			Left:               left,
+			Right:              right,
+		},
+	})
+
+	staleChange := nextEntry(t, cluster, replica.Command{
+		Version: 1,
+		Type:    replica.CommandTypeChangeReplicas,
+		Replica: &replica.ChangeReplicas{
+			ExpectedGeneration: 1,
+			MetaLevel:          meta.LevelMeta2,
+			Change: replica.ReplicaChange{
+				Kind:    replica.ReplicaChangeAddLearner,
+				Replica: meta.ReplicaDescriptor{ReplicaID: 3, NodeID: 3, Role: meta.ReplicaRoleLearner},
+			},
+		},
+	})
+	if err := cluster.ApplyEntry([]uint64{1, 2}, staleChange); !errors.Is(err, replica.ErrDescriptorGenerationMismatch) {
+		t.Fatalf("stale replica change after split = %v, want %v", err, replica.ErrDescriptorGenerationMismatch)
+	}
+
+	for _, replicaID := range []uint64{1, 2} {
+		node, ok := cluster.Replica(replicaID)
+		if !ok {
+			t.Fatalf("replica %d missing", replicaID)
+		}
+		if got := node.State.Descriptor(); got.Generation != 2 || got.RangeID != left.RangeID || !bytes.Equal(got.EndKey, left.EndKey) {
+			t.Fatalf("replica %d descriptor after stale change = %+v, want left child %+v", replicaID, got, left)
+		}
+		if _, ok := replicaRole(node.State.Descriptor(), 3); ok {
+			t.Fatalf("replica %d unexpectedly added learner after stale change", replicaID)
+		}
+	}
+}
+
 func TestNewRangeClusterRejectsInvalidMembers(t *testing.T) {
 	t.Parallel()
 

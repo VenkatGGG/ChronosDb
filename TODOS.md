@@ -273,8 +273,10 @@ closed-timestamp-gated follower reads, snapshot-style learner catch-up, and
 promotion through the replicated membership state machine. A dedicated
 `internal/observability` package now also exposes a real operator HTTP surface
 with Prometheus metrics, `healthz`/`readyz`, pprof handlers, and a structured
-overview endpoint. Broader simulation coverage and chaos validation are still
-open.
+overview endpoint. The deterministic simulator now also covers stale
+generation rejection after split triggers and repeated lease churn with stale
+closed-timestamp publication rejection. Broader simulation coverage and chaos
+validation are still open.
 
 ## Ongoing Discipline
 
