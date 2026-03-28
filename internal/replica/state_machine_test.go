@@ -219,6 +219,90 @@ func TestStageEntriesRejectsClosedTimestampLeaseMismatch(t *testing.T) {
 	}
 }
 
+func TestHistoricalGetUsesClosedTimestamp(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	engine, err := storage.Open(ctx, storage.Options{
+		Dir: "replica-historical-get-test",
+		FS:  vfs.NewMem(),
+	})
+	if err != nil {
+		t.Fatalf("open engine: %v", err)
+	}
+	defer engine.Close()
+	if err := engine.Bootstrap(ctx, storage.StoreIdent{ClusterID: "cluster-a", NodeID: 1, StoreID: 1}); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+
+	stateMachine, err := OpenStateMachine(1, 2, engine)
+	if err != nil {
+		t.Fatalf("open state machine: %v", err)
+	}
+	record, err := lease.NewRecord(1, 1, hlc.Timestamp{WallTime: 100, Logical: 0}, hlc.Timestamp{WallTime: 200, Logical: 0}, 4)
+	if err != nil {
+		t.Fatalf("new lease: %v", err)
+	}
+	if err := applyLeaseCommand(stateMachine, engine, 3, record); err != nil {
+		t.Fatalf("apply lease command: %v", err)
+	}
+
+	logicalKey := storage.GlobalTablePrimaryKey(7, []byte("alice"))
+	putPayload, err := Command{
+		Version: 1,
+		Type:    CommandTypePutValue,
+		Put: &PutValue{
+			LogicalKey: logicalKey,
+			Timestamp:  hlc.Timestamp{WallTime: 150, Logical: 1},
+			Value:      []byte("value"),
+		},
+	}.Marshal()
+	if err != nil {
+		t.Fatalf("marshal put command: %v", err)
+	}
+	publicationPayload, err := Command{
+		Version: 1,
+		Type:    CommandTypeSetClosedTS,
+		ClosedTS: &SetClosedTS{
+			Record: closedts.Record{
+				RangeID:       1,
+				LeaseSequence: record.Sequence,
+				ClosedTS:      hlc.Timestamp{WallTime: 150, Logical: 1},
+				PublishedAt:   hlc.Timestamp{WallTime: 160, Logical: 0},
+			},
+		},
+	}.Marshal()
+	if err != nil {
+		t.Fatalf("marshal closed timestamp command: %v", err)
+	}
+	batch := engine.NewWriteBatch()
+	defer batch.Close()
+	delta, err := stateMachine.StageEntries(batch, []raftpb.Entry{
+		{Index: 4, Type: raftpb.EntryNormal, Data: putPayload},
+		{Index: 5, Type: raftpb.EntryNormal, Data: publicationPayload},
+	})
+	if err != nil {
+		t.Fatalf("stage entries: %v", err)
+	}
+	if err := batch.Commit(true); err != nil {
+		t.Fatalf("commit batch: %v", err)
+	}
+	stateMachine.CommitApply(delta)
+
+	got, err := stateMachine.HistoricalGet(ctx, logicalKey, hlc.Timestamp{WallTime: 150, Logical: 1})
+	if err != nil {
+		t.Fatalf("historical get: %v", err)
+	}
+	if !bytes.Equal(got, []byte("value")) {
+		t.Fatalf("historical value = %q, want %q", got, []byte("value"))
+	}
+
+	_, err = stateMachine.HistoricalGet(ctx, logicalKey, hlc.Timestamp{WallTime: 151, Logical: 0})
+	if !errors.Is(err, closedts.ErrFollowerReadTooFresh) {
+		t.Fatalf("historical read too fresh error = %v, want %v", err, closedts.ErrFollowerReadTooFresh)
+	}
+}
+
 func TestStageEntriesRejectsStaleDescriptorGeneration(t *testing.T) {
 	t.Parallel()
 

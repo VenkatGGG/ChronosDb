@@ -230,7 +230,8 @@ remaining Phase 7 work is wiring those locality policies through more of the
 live replica/routing surfaces. Closed timestamp publications can now also be
 encoded and persisted through the storage engine under the global system
 namespace, and the replica state machine now applies lease-bound closed
-timestamp publications as live replica state.
+timestamp publications as live replica state and can serve exact historical
+reads when the closed-timestamp proof permits it.
 
 ### [ ] Phase 8: Hardening and Operability
 

@@ -317,6 +317,25 @@ func (s *StateMachine) FastGet(ctx context.Context, logicalKey []byte, readTS hl
 	return value, err
 }
 
+// HistoricalGet serves one exact MVCC version from the follower-historical path if the closed timestamp permits it.
+func (s *StateMachine) HistoricalGet(ctx context.Context, logicalKey []byte, readTS hlc.Timestamp) ([]byte, error) {
+	if !s.hasClosedTS {
+		return nil, closedts.ErrFollowerReadTooFresh
+	}
+	if err := s.closedTimestamp.CanServeFollowerRead(closedts.FollowerReadRequest{
+		ReadTS:             readTS,
+		AppliedThrough:     s.closedTimestamp.ClosedTS,
+		KnownLeaseSequence: s.lease.Sequence,
+	}); err != nil {
+		return nil, err
+	}
+	value, err := s.engine.GetMVCCValue(ctx, logicalKey, readTS)
+	if errors.Is(err, storage.ErrMVCCValueNotFound) {
+		return nil, err
+	}
+	return value, err
+}
+
 // ApplySnapshot replaces the local replica image with a self-consistent snapshot.
 func (s *StateMachine) ApplySnapshot(image SnapshotImage) error {
 	if err := image.Descriptor.Validate(); err != nil {
