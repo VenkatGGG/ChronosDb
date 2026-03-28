@@ -190,6 +190,28 @@ func TestFollowerReadRequiresAppliedPublication(t *testing.T) {
 	}
 }
 
+func TestClosedTimestampBinaryRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	record := Record{
+		RangeID:       7,
+		LeaseSequence: 3,
+		ClosedTS:      hlc.Timestamp{WallTime: 90, Logical: 1},
+		PublishedAt:   hlc.Timestamp{WallTime: 95, Logical: 0},
+	}
+	payload, err := record.MarshalBinary()
+	if err != nil {
+		t.Fatalf("marshal record: %v", err)
+	}
+	var decoded Record
+	if err := decoded.UnmarshalBinary(payload); err != nil {
+		t.Fatalf("unmarshal record: %v", err)
+	}
+	if decoded != record {
+		t.Fatalf("decoded record = %+v, want %+v", decoded, record)
+	}
+}
+
 func baseLeaseRecord(t *testing.T) lease.Record {
 	t.Helper()
 

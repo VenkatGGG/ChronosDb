@@ -76,6 +76,9 @@ func TestNamespaceBuilders(t *testing.T) {
 	if key := string(RangeAppliedStateKey(7)); !strings.HasPrefix(key, "/mvcc/local/range/") {
 		t.Fatalf("applied state key should live under mvcc local namespace: %q", key)
 	}
+	if key := string(RangeClosedTimestampKey(7)); !strings.HasPrefix(key, "/mvcc/global/system/closedts/") {
+		t.Fatalf("closed timestamp key should live under global system namespace: %q", key)
+	}
 	if prefix := string(GlobalTablePrimaryPrefix(9)); prefix != "/mvcc/global/table/\x00\x00\x00\x00\x00\x00\x00\t/primary/" {
 		t.Fatalf("unexpected table primary prefix: %q", prefix)
 	}

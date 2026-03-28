@@ -82,6 +82,12 @@ func RangeLeaseKey(rangeID uint64) []byte {
 	return append(dst, []byte("/lease")...)
 }
 
+// RangeClosedTimestampKey returns the persisted closed timestamp publication key for a range.
+func RangeClosedTimestampKey(rangeID uint64) []byte {
+	dst := append(bytes.Clone(prefixMVCCGlobal), []byte("system/closedts/")...)
+	return append(dst, encodeUint64(rangeID)...)
+}
+
 // RangeDescriptorKey returns the local persisted descriptor key for a range.
 func RangeDescriptorKey(rangeID uint64) []byte {
 	dst := rangeLocalPrefix(rangeID)

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/VenkatGGG/ChronosDb/internal/closedts"
 	"github.com/VenkatGGG/ChronosDb/internal/hlc"
 	"github.com/cockroachdb/pebble"
 	"github.com/cockroachdb/pebble/vfs"
@@ -179,6 +180,31 @@ func (e *Engine) GetIntent(ctx context.Context, logicalKey []byte) (Intent, erro
 		return Intent{}, err
 	}
 	return intent, nil
+}
+
+// PutClosedTimestamp writes the latest closed timestamp publication for a range.
+func (e *Engine) PutClosedTimestamp(ctx context.Context, record closedts.Record) error {
+	value, err := record.MarshalBinary()
+	if err != nil {
+		return err
+	}
+	return e.PutRaw(ctx, RangeClosedTimestampKey(record.RangeID), value)
+}
+
+// GetClosedTimestamp loads the latest closed timestamp publication for a range.
+func (e *Engine) GetClosedTimestamp(ctx context.Context, rangeID uint64) (closedts.Record, error) {
+	value, err := e.GetRaw(ctx, RangeClosedTimestampKey(rangeID))
+	if errors.Is(err, pebble.ErrNotFound) {
+		return closedts.Record{}, ErrClosedTimestampNotFound
+	}
+	if err != nil {
+		return closedts.Record{}, err
+	}
+	var record closedts.Record
+	if err := record.UnmarshalBinary(value); err != nil {
+		return closedts.Record{}, err
+	}
+	return record, nil
 }
 
 // NewSnapshot creates a read-only point-in-time snapshot.

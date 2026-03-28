@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 
+	"github.com/VenkatGGG/ChronosDb/internal/closedts"
 	"github.com/VenkatGGG/ChronosDb/internal/hlc"
 	"github.com/VenkatGGG/ChronosDb/internal/lease"
 	"github.com/cockroachdb/pebble"
@@ -111,6 +112,18 @@ func (b *WriteBatch) SetRangeLease(rangeID uint64, record lease.Record) error {
 		return err
 	}
 	return b.SetRaw(RangeLeaseKey(rangeID), payload)
+}
+
+// SetRangeClosedTimestamp appends the latest closed timestamp publication for a range.
+func (b *WriteBatch) SetRangeClosedTimestamp(rangeID uint64, record closedts.Record) error {
+	if record.RangeID != rangeID {
+		return fmt.Errorf("set closed timestamp: record range %d does not match key range %d", record.RangeID, rangeID)
+	}
+	payload, err := record.MarshalBinary()
+	if err != nil {
+		return err
+	}
+	return b.SetRaw(RangeClosedTimestampKey(rangeID), payload)
 }
 
 // Commit writes the batch to disk, syncing if requested.

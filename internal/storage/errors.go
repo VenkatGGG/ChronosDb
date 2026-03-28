@@ -15,4 +15,6 @@ var (
 	ErrMVCCValueNotFound = errors.New("mvcc value not found")
 	// ErrIntentNotFound reports that no intent exists for a logical key.
 	ErrIntentNotFound = errors.New("intent not found")
+	// ErrClosedTimestampNotFound reports that no closed timestamp publication exists for a range.
+	ErrClosedTimestampNotFound = errors.New("closed timestamp not found")
 )

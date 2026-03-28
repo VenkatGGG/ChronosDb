@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/VenkatGGG/ChronosDb/internal/closedts"
 	"github.com/VenkatGGG/ChronosDb/internal/lease"
 	"github.com/cockroachdb/pebble"
 	raft "go.etcd.io/raft/v3"
@@ -78,6 +79,22 @@ func (e *Engine) LoadRangeLease(rangeID uint64) (lease.Record, error) {
 	var record lease.Record
 	if err := record.UnmarshalBinary(payload); err != nil {
 		return lease.Record{}, fmt.Errorf("decode lease: %w", err)
+	}
+	return record, nil
+}
+
+// LoadRangeClosedTimestamp loads the persisted closed timestamp publication for a range.
+func (e *Engine) LoadRangeClosedTimestamp(rangeID uint64) (closedts.Record, error) {
+	payload, err := e.GetRaw(nil, RangeClosedTimestampKey(rangeID))
+	if errors.Is(err, pebble.ErrNotFound) {
+		return closedts.Record{}, nil
+	}
+	if err != nil {
+		return closedts.Record{}, err
+	}
+	var record closedts.Record
+	if err := record.UnmarshalBinary(payload); err != nil {
+		return closedts.Record{}, fmt.Errorf("decode closed timestamp: %w", err)
 	}
 	return record, nil
 }

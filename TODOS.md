@@ -227,7 +227,9 @@ also choose between follower-historical and leaseholder reads based on closed
 timestamp safety. SQL table descriptors, distributed flow stages, and range
 descriptors now carry validated placement policy and home-region hints. The
 remaining Phase 7 work is wiring those locality policies through more of the
-live replica/routing surfaces.
+live replica/routing surfaces. Closed timestamp publications can now also be
+encoded and persisted through the storage engine under the global system
+namespace.
 
 ### [ ] Phase 8: Hardening and Operability
 

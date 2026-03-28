@@ -1,6 +1,7 @@
 package closedts
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"math"
@@ -68,6 +69,52 @@ func (r Record) Validate() error {
 	default:
 		return nil
 	}
+}
+
+// MarshalBinary encodes the closed timestamp record in a stable binary form.
+func (r Record) MarshalBinary() ([]byte, error) {
+	if err := r.Validate(); err != nil {
+		return nil, err
+	}
+	buf := make([]byte, 0, 1+8+8+hlc.EncodedSize+hlc.EncodedSize)
+	buf = append(buf, 1)
+	buf = appendUint64(buf, r.RangeID)
+	buf = appendUint64(buf, r.LeaseSequence)
+	buf = r.ClosedTS.AppendAscending(buf)
+	buf = r.PublishedAt.AppendAscending(buf)
+	return buf, nil
+}
+
+// UnmarshalBinary decodes the binary form produced by MarshalBinary.
+func (r *Record) UnmarshalBinary(data []byte) error {
+	if len(data) == 0 {
+		return fmt.Errorf("closedts: empty payload")
+	}
+	if data[0] != 1 {
+		return fmt.Errorf("closedts: unknown version %d", data[0])
+	}
+	data = data[1:]
+	if len(data) < 8+8+hlc.EncodedSize+hlc.EncodedSize {
+		return fmt.Errorf("closedts: truncated payload")
+	}
+	r.RangeID = binary.BigEndian.Uint64(data[:8])
+	data = data[8:]
+	r.LeaseSequence = binary.BigEndian.Uint64(data[:8])
+	data = data[8:]
+	closedTS, rest, err := hlc.DecodeAscending(data)
+	if err != nil {
+		return err
+	}
+	r.ClosedTS = closedTS
+	publishedAt, rest, err := hlc.DecodeAscending(rest)
+	if err != nil {
+		return err
+	}
+	if len(rest) != 0 {
+		return fmt.Errorf("closedts: trailing payload")
+	}
+	r.PublishedAt = publishedAt
+	return r.Validate()
 }
 
 // Publish computes the next closed timestamp publication for the leaseholder.
@@ -166,4 +213,10 @@ func previousTick(ts hlc.Timestamp) hlc.Timestamp {
 	default:
 		return hlc.Timestamp{}
 	}
+}
+
+func appendUint64(dst []byte, value uint64) []byte {
+	var buf [8]byte
+	binary.BigEndian.PutUint64(buf[:], value)
+	return append(dst, buf[:]...)
 }

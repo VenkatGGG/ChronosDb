@@ -5,6 +5,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/VenkatGGG/ChronosDb/internal/closedts"
 	"github.com/VenkatGGG/ChronosDb/internal/hlc"
 	"github.com/cockroachdb/pebble/vfs"
 )
@@ -51,6 +52,15 @@ func TestBootstrapSnapshotAndRecovery(t *testing.T) {
 	if err := engine.PutIntent(ctx, logicalKey, intent); err != nil {
 		t.Fatalf("put intent: %v", err)
 	}
+	publication := closedts.Record{
+		RangeID:       7,
+		LeaseSequence: 3,
+		ClosedTS:      hlc.Timestamp{WallTime: 180, Logical: 0},
+		PublishedAt:   hlc.Timestamp{WallTime: 190, Logical: 0},
+	}
+	if err := engine.PutClosedTimestamp(ctx, publication); err != nil {
+		t.Fatalf("put closed timestamp: %v", err)
+	}
 
 	snap := engine.NewSnapshot()
 
@@ -71,6 +81,9 @@ func TestBootstrapSnapshotAndRecovery(t *testing.T) {
 
 	if got, err := engine.GetMVCCValue(ctx, logicalKey, ts2); err != nil || !bytes.Equal(got, []byte("v2")) {
 		t.Fatalf("engine read new value: got %q err=%v", got, err)
+	}
+	if got, err := engine.GetClosedTimestamp(ctx, publication.RangeID); err != nil || got != publication {
+		t.Fatalf("engine read closed timestamp: got %+v err=%v", got, err)
 	}
 	if err := snap.Close(); err != nil {
 		t.Fatalf("close snapshot: %v", err)
@@ -107,6 +120,9 @@ func TestBootstrapSnapshotAndRecovery(t *testing.T) {
 	}
 	if got, err := reopened.GetIntent(ctx, logicalKey); err != nil || !bytes.Equal(got.Value, intent.Value) {
 		t.Fatalf("recovered intent: got %+v err=%v", got, err)
+	}
+	if got, err := reopened.GetClosedTimestamp(ctx, publication.RangeID); err != nil || got != publication {
+		t.Fatalf("recovered closed timestamp: got %+v err=%v", got, err)
 	}
 }
 
