@@ -208,7 +208,7 @@ through the pgwire description path. Full execution of those distributed flows
 is still a later concern, but the SQL front-door planning surface itself is now
 in place.
 
-### [ ] Phase 7: Locality and Follower Reads
+### [x] Phase 7: Locality and Follower Reads
 
 Deliver:
 
@@ -223,7 +223,7 @@ Exit criteria:
 - follower reads are freshness-bounded and observable
 - placement policy is user-expressible and internally consistent
 
-**Status:** In progress. The closed-timestamp publication core and follower-read
+**Status:** Core deliverables are complete. The closed-timestamp publication core and follower-read
 eligibility checks now exist as a dedicated package, including monotonic
 publication, lease-sequence invalidation, intent-backlog stalling, and
 fail-closed behavior under clock-offset violations. Placement policy
@@ -232,9 +232,8 @@ for `REGIONAL`, `HOME_REGION`, and `GLOBAL` declarations, and leaseholder
 selection can now follow compiled region preferences. Replica-local routing can
 also choose between follower-historical and leaseholder reads based on closed
 timestamp safety. SQL table descriptors, distributed flow stages, and range
-descriptors now carry validated placement policy and home-region hints. The
-remaining Phase 7 work is wiring those locality policies through more of the
-live replica/routing surfaces. Closed timestamp publications can now also be
+descriptors now carry validated placement policy and home-region hints. Closed
+timestamp publications can now also be
 encoded and persisted through the storage engine under the global system
 namespace, and the replica state machine now applies lease-bound closed
 timestamp publications as live replica state and can serve exact historical
@@ -243,7 +242,10 @@ also consult descriptor placement policy instead of treating locality as
 descriptor-only metadata. Historical read routing exposes local vs.
 leaseholder region, the chosen target region, preferred-region alignment, the
 closed/applied frontier, and an explicit freshness gap when a follower read
-must fall back to the leaseholder.
+must fall back to the leaseholder. The resolver/refresh path now also returns
+placement and home-region hints alongside authoritative descriptors, and
+rebalance decisions now preserve locality intent as explicit output instead of
+hiding it inside a load score.
 
 ### [ ] Phase 8: Hardening and Operability
 
@@ -293,11 +295,11 @@ Rule:
 - [x] 6.2 Add join-aware logical planning and distributed hash-join flow stages for supported equi-joins
 - [x] 6.3 Add explicit flow-fragment boundaries and result schemas so distributed plans can move toward execution
 
-### [ ] Phase 7 Remaining Execution
+### [x] Phase 7 Remaining Execution
 
 - [x] 7.1 Push placement and home-region policy deeper into live routing decisions, not only descriptors and flow hints
 - [x] 7.2 Make leaseholder/follower read routing expose locality reasons and freshness gaps as first-class outputs
-- [ ] 7.3 Thread locality policy through more replica movement and cache-refresh surfaces
+- [x] 7.3 Thread locality policy through more replica movement and cache-refresh surfaces
 
 ### [ ] Phase 8 Remaining Execution
 

@@ -30,6 +30,9 @@ func TestChooseRebalanceRespectsRegionFailure(t *testing.T) {
 	if decision.TargetNode.NodeID != 4 {
 		t.Fatalf("target node = %d, want 4", decision.TargetNode.NodeID)
 	}
+	if !decision.TargetPreferred || decision.PreferredRegion != "us-east1" {
+		t.Fatalf("decision locality = %+v, want preferred target in us-east1", decision)
+	}
 }
 
 func TestChooseRebalanceAvoidsViolatingRegionCount(t *testing.T) {
@@ -70,6 +73,32 @@ func TestChooseRebalanceAvoidsLeaseholderWhenAlternativeExists(t *testing.T) {
 	}
 	if decision.SourceReplica.NodeID != 2 {
 		t.Fatalf("source node = %d, want non-leaseholder node 2", decision.SourceReplica.NodeID)
+	}
+}
+
+func TestChooseRebalancePrefersMoveIntoPreferredRegion(t *testing.T) {
+	t.Parallel()
+
+	desc := testRangeDescriptor(&placement.Policy{
+		PlacementMode:    placement.ModeRegional,
+		PreferredRegions: []string{"us-east1"},
+	})
+	desc.LeaseholderReplicaID = 2
+	decision, err := ChooseRebalance(desc, []NodeLoad{
+		{NodeID: 1, Region: "us-west1", LoadScore: 0.96},
+		{NodeID: 2, Region: "us-west1", LoadScore: 0.70},
+		{NodeID: 3, Region: "europe-west1", LoadScore: 0.60},
+		{NodeID: 4, Region: "us-east1", LoadScore: 0.18},
+		{NodeID: 5, Region: "us-west1", LoadScore: 0.17},
+	})
+	if err != nil {
+		t.Fatalf("choose rebalance: %v", err)
+	}
+	if decision.TargetNode.NodeID != 4 {
+		t.Fatalf("target node = %d, want preferred-region node 4", decision.TargetNode.NodeID)
+	}
+	if !decision.TargetPreferred {
+		t.Fatalf("decision locality = %+v, want preferred target", decision)
 	}
 }
 

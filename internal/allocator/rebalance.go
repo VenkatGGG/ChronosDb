@@ -21,9 +21,13 @@ type NodeLoad struct {
 
 // RebalanceDecision replaces one existing replica with a replica on a new node.
 type RebalanceDecision struct {
-	SourceReplica meta.ReplicaDescriptor
-	TargetNode    NodeLoad
-	Reason        string
+	SourceReplica   meta.ReplicaDescriptor
+	SourceRegion    string
+	TargetNode      NodeLoad
+	PreferredRegion string
+	TargetPreferred bool
+	SourcePreferred bool
+	Reason          string
 }
 
 // ChooseRebalance picks one placement-safe replica move that improves node-load distribution.
@@ -73,6 +77,7 @@ func ChooseRebalance(desc meta.RangeDescriptor, nodes []NodeLoad) (RebalanceDeci
 				continue
 			}
 			improvement += preferenceBonus(compiled, target.Region)
+			improvement += localityTransitionBias(compiled, sourceNode.Region, target.Region)
 			if replica.ReplicaID == desc.LeaseholderReplicaID {
 				improvement -= 0.05
 			}
@@ -80,9 +85,13 @@ func ChooseRebalance(desc meta.RangeDescriptor, nodes []NodeLoad) (RebalanceDeci
 				found = true
 				bestImprovement = improvement
 				bestDecision = RebalanceDecision{
-					SourceReplica: replica,
-					TargetNode:    target,
-					Reason:        fmt.Sprintf("rebalance from node %d (%.2f) to node %d (%.2f)", replica.NodeID, sourceNode.LoadScore, target.NodeID, target.LoadScore),
+					SourceReplica:   replica,
+					SourceRegion:    sourceNode.Region,
+					TargetNode:      target,
+					PreferredRegion: preferredRegion(compiled),
+					TargetPreferred: regionPreferred(compiled, target.Region),
+					SourcePreferred: regionPreferred(compiled, sourceNode.Region),
+					Reason:          rebalanceReason(replica, sourceNode, target, compiled),
 				}
 			}
 		}
@@ -112,7 +121,7 @@ func preferenceBonus(compiled placement.CompiledPolicy, region string) float64 {
 	if len(compiled.PreferredRegions) == 0 {
 		return 0
 	}
-	if slices.Contains(compiled.LeasePreferences, region) {
+	if regionPreferred(compiled, region) {
 		return 0.03
 	}
 	if slices.Contains(compiled.PreferredRegions, region) {
@@ -147,4 +156,54 @@ func canonicalRegion(region string) string {
 
 func max(a, b int) int {
 	return int(math.Max(float64(a), float64(b)))
+}
+
+func localityTransitionBias(compiled placement.CompiledPolicy, sourceRegion, targetRegion string) float64 {
+	sourcePreferred := regionPreferred(compiled, sourceRegion)
+	targetPreferred := regionPreferred(compiled, targetRegion)
+	switch {
+	case !sourcePreferred && targetPreferred:
+		return 0.02
+	case sourcePreferred && !targetPreferred:
+		return -0.04
+	default:
+		return 0
+	}
+}
+
+func regionPreferred(compiled placement.CompiledPolicy, region string) bool {
+	region = canonicalRegion(region)
+	if region == "" {
+		return false
+	}
+	if len(compiled.LeasePreferences) > 0 {
+		return slices.Contains(compiled.LeasePreferences, region)
+	}
+	return slices.Contains(compiled.PreferredRegions, region)
+}
+
+func preferredRegion(compiled placement.CompiledPolicy) string {
+	if len(compiled.LeasePreferences) > 0 {
+		return compiled.LeasePreferences[0]
+	}
+	if len(compiled.PreferredRegions) > 0 {
+		return compiled.PreferredRegions[0]
+	}
+	return ""
+}
+
+func rebalanceReason(source meta.ReplicaDescriptor, sourceNode, target NodeLoad, compiled placement.CompiledPolicy) string {
+	reason := fmt.Sprintf(
+		"rebalance from node %d (%s, %.2f) to node %d (%s, %.2f)",
+		source.NodeID,
+		sourceNode.Region,
+		sourceNode.LoadScore,
+		target.NodeID,
+		target.Region,
+		target.LoadScore,
+	)
+	if regionPreferred(compiled, target.Region) {
+		reason += fmt.Sprintf(" while moving toward preferred region %q", preferredRegion(compiled))
+	}
+	return reason
 }

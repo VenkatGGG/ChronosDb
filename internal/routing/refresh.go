@@ -12,13 +12,13 @@ type DescriptorSource interface {
 }
 
 // Refresh resolves the descriptor from the authoritative source and installs it into the cache.
-func Refresh(ctx context.Context, cache *RangeCache, source DescriptorSource, key []byte) (meta.RangeDescriptor, error) {
+func Refresh(ctx context.Context, cache *RangeCache, source DescriptorSource, key []byte) (ResolvedRange, error) {
 	desc, err := source.LookupMeta2(ctx, key)
 	if err != nil {
-		return meta.RangeDescriptor{}, err
+		return ResolvedRange{}, err
 	}
 	if err := cache.Upsert(desc); err != nil {
-		return meta.RangeDescriptor{}, err
+		return ResolvedRange{}, err
 	}
-	return desc, nil
+	return buildResolvedRange(desc, ResolutionSourceRefresh)
 }

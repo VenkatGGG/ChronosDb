@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/VenkatGGG/ChronosDb/internal/meta"
+	"github.com/VenkatGGG/ChronosDb/internal/placement"
 )
 
 type sequenceDescriptorSource struct {
@@ -34,6 +35,10 @@ func TestResolverUsesCacheOnSecondLookup(t *testing.T) {
 				Replicas: []meta.ReplicaDescriptor{
 					{ReplicaID: 1, NodeID: 1, Role: meta.ReplicaRoleVoter},
 				},
+				PlacementPolicy: &placement.Policy{
+					PlacementMode:    placement.ModeRegional,
+					PreferredRegions: []string{"us-east1"},
+				},
 			},
 		},
 	}
@@ -43,15 +48,15 @@ func TestResolverUsesCacheOnSecondLookup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first resolve: %v", err)
 	}
-	if desc.RangeID != 1 {
-		t.Fatalf("first resolve range = %d, want 1", desc.RangeID)
+	if desc.Descriptor.RangeID != 1 || desc.Source != ResolutionSourceRefresh {
+		t.Fatalf("first resolve = %+v, want refreshed range 1", desc)
 	}
 	desc, err = resolver.Resolve(context.Background(), []byte("b"))
 	if err != nil {
 		t.Fatalf("second resolve: %v", err)
 	}
-	if desc.RangeID != 1 {
-		t.Fatalf("second resolve range = %d, want 1", desc.RangeID)
+	if desc.Descriptor.RangeID != 1 || desc.Source != ResolutionSourceCache || desc.PreferredRegion != "us-east1" {
+		t.Fatalf("second resolve = %+v, want cached range 1 with preferred region us-east1", desc)
 	}
 	if source.calls != 1 {
 		t.Fatalf("source calls = %d, want 1", source.calls)
@@ -89,17 +94,17 @@ func TestResolverRefreshesAfterRoutingError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("initial resolve: %v", err)
 	}
-	if first.Generation != 1 {
-		t.Fatalf("initial generation = %d, want 1", first.Generation)
+	if first.Descriptor.Generation != 1 {
+		t.Fatalf("initial generation = %d, want 1", first.Descriptor.Generation)
 	}
 	second, err := resolver.ResolveAfterRoutingError(context.Background(), []byte("b"), RoutingError{
 		Code:    ErrorCodeDescriptorStale,
-		RangeID: first.RangeID,
+		RangeID: first.Descriptor.RangeID,
 	})
 	if err != nil {
 		t.Fatalf("resolve after routing error: %v", err)
 	}
-	if second.Generation != 2 || second.RangeID != 2 {
+	if second.Descriptor.Generation != 2 || second.Descriptor.RangeID != 2 || second.Source != ResolutionSourceRefresh {
 		t.Fatalf("refreshed descriptor = %+v, want generation 2 range 2", second)
 	}
 	if source.calls != 2 {

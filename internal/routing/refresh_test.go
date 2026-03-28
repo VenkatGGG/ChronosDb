@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/VenkatGGG/ChronosDb/internal/meta"
+	"github.com/VenkatGGG/ChronosDb/internal/placement"
 )
 
 type stubDescriptorSource struct {
@@ -28,13 +29,20 @@ func TestRefreshInstallsDescriptorIntoCache(t *testing.T) {
 		Replicas: []meta.ReplicaDescriptor{
 			{ReplicaID: 1, NodeID: 1, Role: meta.ReplicaRoleVoter},
 		},
+		PlacementPolicy: &placement.Policy{
+			PlacementMode:    placement.ModeRegional,
+			PreferredRegions: []string{"us-east1"},
+		},
 	}
 	got, err := Refresh(context.Background(), cache, stubDescriptorSource{desc: desc}, []byte("b"))
 	if err != nil {
 		t.Fatalf("refresh: %v", err)
 	}
-	if got.RangeID != desc.RangeID {
-		t.Fatalf("descriptor range = %d, want %d", got.RangeID, desc.RangeID)
+	if got.Descriptor.RangeID != desc.RangeID {
+		t.Fatalf("descriptor range = %d, want %d", got.Descriptor.RangeID, desc.RangeID)
+	}
+	if got.Source != ResolutionSourceRefresh || got.PreferredRegion != "us-east1" {
+		t.Fatalf("resolved range = %+v, want refresh source and preferred region us-east1", got)
 	}
 	cached, ok := cache.Lookup([]byte("b"))
 	if !ok {
