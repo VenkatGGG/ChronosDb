@@ -120,6 +120,24 @@ func (o *Optimizer) costAggregate(table TableDescriptor, projection []ColumnDesc
 	}
 }
 
+func (o *Optimizer) costHashJoin(left, right TableDescriptor, leftProjection, rightProjection []ColumnDescriptor) CostEstimate {
+	leftStats := left.StatsOrDefaults()
+	rightStats := right.StatsOrDefaults()
+	leftRows := max(1, leftStats.EstimatedRows)
+	rightRows := max(1, rightStats.EstimatedRows)
+	outputRows := max(1, min(leftRows, rightRows))
+	bytes := outputRows * (projectedBytes(leftStats, leftProjection) + projectedBytes(rightStats, rightProjection))
+	cpu := 5.0 + math.Log2(float64(leftRows)+1) + math.Log2(float64(rightRows)+1)
+	score := float64(leftRows+rightRows) + cpu + float64(bytes)/4096.0
+	return CostEstimate{
+		KVReads:        leftRows + rightRows,
+		EstimatedRows:  outputRows,
+		EstimatedBytes: bytes,
+		CPUCost:        cpu,
+		Score:          score,
+	}
+}
+
 func projectedBytes(stats TableStats, projection []ColumnDescriptor) uint64 {
 	if len(projection) == 0 {
 		return stats.AverageRowBytes
@@ -217,6 +235,21 @@ func makeAggregateCandidates(o *Optimizer, table TableDescriptor, projection []C
 	}, nil
 }
 
+func makeHashJoinCandidate(o *Optimizer, left BoundTable, leftScan RangeScanPlan, right BoundTable, rightScan RangeScanPlan, join JoinSpec, projection []JoinProjection) PlanCandidate {
+	return PlanCandidate{
+		Name: "hash_join",
+		Plan: HashJoinPlan{
+			Left:       left,
+			LeftScan:   leftScan,
+			Right:      right,
+			RightScan:  rightScan,
+			Join:       join,
+			Projection: append([]JoinProjection(nil), projection...),
+		},
+		Cost: o.costHashJoin(left.Table, right.Table, leftScan.Projection, rightScan.Projection),
+	}
+}
+
 func makeInsertCandidate(o *Optimizer, table TableDescriptor, plan InsertPlan) PlanCandidate {
 	return PlanCandidate{
 		Name: "insert_put",
@@ -282,6 +315,13 @@ func buildRangeScanPlan(table TableDescriptor, projection []ColumnDescriptor, pr
 
 func max(a, b uint64) uint64 {
 	if a > b {
+		return a
+	}
+	return b
+}
+
+func min(a, b uint64) uint64 {
+	if a < b {
 		return a
 	}
 	return b

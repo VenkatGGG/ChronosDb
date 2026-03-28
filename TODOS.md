@@ -200,8 +200,10 @@ vocabulary reserved for future join and aggregation planning. The pgwire layer
 now also has a real connection-serving loop with startup negotiation, SSL
 rejection, simple-query dispatch, and listener integration. Single-table
 aggregate planning for `GROUP BY`, `COUNT`, and `SUM` now exists and maps onto
-distributed partial/final aggregate flow stages. Full distributed query flows
-are still open.
+distributed partial/final aggregate flow stages. Two-table inner equi-join
+planning now also exists, with alias-aware binding and distributed hash-join
+flow stages over independently distributed left/right scans. Full distributed
+query flows are still open.
 
 ### [ ] Phase 7: Locality and Follower Reads
 
@@ -280,7 +282,7 @@ Rule:
 ### [ ] Phase 6 Remaining Execution
 
 - [x] 6.1 Add single-table aggregate planning (`GROUP BY`, `COUNT`, `SUM`) and map it to distributed flow stages
-- [ ] 6.2 Add join-aware logical planning and distributed hash-join flow stages for supported equi-joins
+- [x] 6.2 Add join-aware logical planning and distributed hash-join flow stages for supported equi-joins
 - [ ] 6.3 Add explicit flow-fragment boundaries and result schemas so distributed plans can move toward execution
 
 ### [ ] Phase 7 Remaining Execution

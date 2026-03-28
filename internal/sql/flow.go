@@ -99,6 +99,8 @@ func (p *FlowPlanner) Build(plan Plan) (FlowPlan, error) {
 		return p.buildInsert(typed), nil
 	case AggregatePlan:
 		return p.buildAggregate(typed), nil
+	case HashJoinPlan:
+		return p.buildHashJoin(typed), nil
 	default:
 		return FlowPlan{}, fmt.Errorf("sql flow planner: unsupported plan type %T", plan)
 	}
@@ -269,6 +271,80 @@ func (p *FlowPlanner) buildAggregate(plan AggregatePlan) FlowPlan {
 	}
 }
 
+func (p *FlowPlanner) buildHashJoin(plan HashJoinPlan) FlowPlan {
+	leftStage := FlowStage{
+		ID:               1,
+		Name:             "left_join_scan",
+		Distribution:     DistributionByRange,
+		PreferredRegions: scanPreferredRegions(plan.Left.Table),
+		HomeRegion:       homeRegion(plan.Left.Table),
+		Processors: []ProcessorSpec{
+			{
+				Kind:       OperatorKVScan,
+				Table:      &plan.Left.Table,
+				Projection: append([]ColumnDescriptor(nil), plan.LeftScan.Projection...),
+				Spans: []KeySpan{
+					{
+						StartKey:       append([]byte(nil), plan.LeftScan.StartKey...),
+						EndKey:         append([]byte(nil), plan.LeftScan.EndKey...),
+						StartInclusive: plan.LeftScan.StartInclusive,
+						EndInclusive:   plan.LeftScan.EndInclusive,
+					},
+				},
+			},
+		},
+	}
+	rightStage := FlowStage{
+		ID:               2,
+		Name:             "right_join_scan",
+		Distribution:     DistributionByRange,
+		PreferredRegions: scanPreferredRegions(plan.Right.Table),
+		HomeRegion:       homeRegion(plan.Right.Table),
+		Processors: []ProcessorSpec{
+			{
+				Kind:       OperatorKVScan,
+				Table:      &plan.Right.Table,
+				Projection: append([]ColumnDescriptor(nil), plan.RightScan.Projection...),
+				Spans: []KeySpan{
+					{
+						StartKey:       append([]byte(nil), plan.RightScan.StartKey...),
+						EndKey:         append([]byte(nil), plan.RightScan.EndKey...),
+						StartInclusive: plan.RightScan.StartInclusive,
+						EndInclusive:   plan.RightScan.EndInclusive,
+					},
+				},
+			},
+		},
+	}
+	joinStage := FlowStage{
+		ID:            3,
+		Name:          "gateway_hash_join",
+		Distribution:  DistributionGatewayOnly,
+		InputStageIDs: []int{1, 2},
+		Processors: []ProcessorSpec{
+			{
+				Kind: OperatorMerge,
+			},
+			{
+				Kind: OperatorMerge,
+			},
+			{
+				Kind: OperatorHashJoin,
+				Join: &JoinSpec{
+					Type:      plan.Join.Type,
+					LeftKeys:  append([]string(nil), plan.Join.LeftKeys...),
+					RightKeys: append([]string(nil), plan.Join.RightKeys...),
+				},
+				Projection: joinProjectionColumns(plan.Projection),
+			},
+		},
+	}
+	return FlowPlan{
+		RootStageID: joinStage.ID,
+		Stages:      []FlowStage{leftStage, rightStage, joinStage},
+	}
+}
+
 func leasePreferredRegions(table TableDescriptor) []string {
 	compiled, ok, err := table.CompiledPlacement()
 	if !ok || err != nil {
@@ -306,4 +382,12 @@ func aggregateFuncNames(aggregates []AggregateExpr) []string {
 		names = append(names, aggregate.String())
 	}
 	return names
+}
+
+func joinProjectionColumns(projection []JoinProjection) []ColumnDescriptor {
+	columns := make([]ColumnDescriptor, 0, len(projection))
+	for _, item := range projection {
+		columns = append(columns, item.Output)
+	}
+	return columns
 }

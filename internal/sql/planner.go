@@ -114,10 +114,34 @@ type AggregatePlan struct {
 	Aggregates []AggregateExpr
 }
 
+// BoundTable binds one SQL table descriptor to the alias visible in the statement.
+type BoundTable struct {
+	Alias string
+	Table TableDescriptor
+}
+
+// JoinProjection describes one output column sourced from one side of the join.
+type JoinProjection struct {
+	Output       ColumnDescriptor
+	SourceAlias  string
+	SourceColumn ColumnDescriptor
+}
+
+// HashJoinPlan maps two KV scans onto an equi-join boundary.
+type HashJoinPlan struct {
+	Left       BoundTable
+	LeftScan   RangeScanPlan
+	Right      BoundTable
+	RightScan  RangeScanPlan
+	Join       JoinSpec
+	Projection []JoinProjection
+}
+
 func (PointLookupPlan) isPlan() {}
 func (RangeScanPlan) isPlan()   {}
 func (InsertPlan) isPlan()      {}
 func (AggregatePlan) isPlan()   {}
+func (HashJoinPlan) isPlan()    {}
 
 type boundPredicate struct {
 	equality *Value
@@ -142,6 +166,9 @@ func (p *Planner) optimizeSelect(stmt *vsqlparser.Select) (OptimizedPlan, error)
 	if stmt.Distinct || stmt.Having != nil || stmt.Limit != nil || len(stmt.OrderBy) > 0 {
 		return OptimizedPlan{}, fmt.Errorf("sql planner: unsupported SELECT shape")
 	}
+	if isJoinSelect(stmt.From) {
+		return p.optimizeJoinSelect(stmt)
+	}
 	if stmt.GroupBy != nil || hasAggregateExprs(stmt.SelectExprs) {
 		return p.optimizeAggregateSelect(stmt)
 	}
@@ -160,6 +187,38 @@ func (p *Planner) optimizeSelect(stmt *vsqlparser.Select) (OptimizedPlan, error)
 	candidates, err := makeSelectCandidates(p.optimizer, table, projection, predicate)
 	if err != nil {
 		return OptimizedPlan{}, err
+	}
+	return p.optimizer.Choose(candidates)
+}
+
+func (p *Planner) optimizeJoinSelect(stmt *vsqlparser.Select) (OptimizedPlan, error) {
+	if stmt.GroupBy != nil || hasAggregateExprs(stmt.SelectExprs) {
+		return OptimizedPlan{}, fmt.Errorf("sql planner: aggregate joins are unsupported")
+	}
+	left, right, joinExpr, err := p.resolveJoinTables(stmt.From)
+	if err != nil {
+		return OptimizedPlan{}, err
+	}
+	projection, leftProjection, rightProjection, err := bindJoinProjection(left, right, stmt.SelectExprs)
+	if err != nil {
+		return OptimizedPlan{}, err
+	}
+	joinSpec, leftJoinColumn, rightJoinColumn, err := bindEquiJoin(left, right, joinExpr)
+	if err != nil {
+		return OptimizedPlan{}, err
+	}
+	leftProjection = ensureColumnProjection(leftProjection, leftJoinColumn)
+	rightProjection = ensureColumnProjection(rightProjection, rightJoinColumn)
+	leftScan, _, err := buildRangeScanPlan(left.Table, leftProjection, boundPredicate{})
+	if err != nil {
+		return OptimizedPlan{}, err
+	}
+	rightScan, _, err := buildRangeScanPlan(right.Table, rightProjection, boundPredicate{})
+	if err != nil {
+		return OptimizedPlan{}, err
+	}
+	candidates := []PlanCandidate{
+		makeHashJoinCandidate(p.optimizer, left, leftScan, right, rightScan, joinSpec, projection),
 	}
 	return p.optimizer.Choose(candidates)
 }
@@ -231,11 +290,62 @@ func (p *Planner) resolveSingleTable(from []vsqlparser.TableExpr) (TableDescript
 	if !ok {
 		return TableDescriptor{}, fmt.Errorf("sql planner: unsupported table expression %T", from[0])
 	}
-	tableName, err := aliased.TableName()
+	tableName, err := baseTableName(aliased)
 	if err != nil {
 		return TableDescriptor{}, err
 	}
-	return p.catalog.ResolveTable(tableName.Name.String())
+	return p.catalog.ResolveTable(tableName)
+}
+
+func (p *Planner) resolveJoinTables(from []vsqlparser.TableExpr) (BoundTable, BoundTable, *vsqlparser.JoinTableExpr, error) {
+	if len(from) != 1 {
+		return BoundTable{}, BoundTable{}, nil, fmt.Errorf("sql planner: only one top-level join expression is supported")
+	}
+	joinExpr, ok := from[0].(*vsqlparser.JoinTableExpr)
+	if !ok {
+		return BoundTable{}, BoundTable{}, nil, fmt.Errorf("sql planner: expected join expression, got %T", from[0])
+	}
+	if !joinExpr.Join.IsInner() {
+		return BoundTable{}, BoundTable{}, nil, fmt.Errorf("sql planner: only inner joins are supported")
+	}
+	if joinExpr.Condition == nil {
+		return BoundTable{}, BoundTable{}, nil, fmt.Errorf("sql planner: join condition is required")
+	}
+	left, err := p.resolveBoundTable(joinExpr.LeftExpr)
+	if err != nil {
+		return BoundTable{}, BoundTable{}, nil, err
+	}
+	right, err := p.resolveBoundTable(joinExpr.RightExpr)
+	if err != nil {
+		return BoundTable{}, BoundTable{}, nil, err
+	}
+	if canonicalName(left.Alias) == canonicalName(right.Alias) {
+		return BoundTable{}, BoundTable{}, nil, fmt.Errorf("sql planner: duplicate join alias %q", left.Alias)
+	}
+	return left, right, joinExpr, nil
+}
+
+func (p *Planner) resolveBoundTable(expr vsqlparser.TableExpr) (BoundTable, error) {
+	aliased, ok := expr.(*vsqlparser.AliasedTableExpr)
+	if !ok {
+		return BoundTable{}, fmt.Errorf("sql planner: unsupported joined table expression %T", expr)
+	}
+	tableName, err := baseTableName(aliased)
+	if err != nil {
+		return BoundTable{}, err
+	}
+	table, err := p.catalog.ResolveTable(tableName)
+	if err != nil {
+		return BoundTable{}, err
+	}
+	alias := aliased.As.String()
+	if strings.TrimSpace(alias) == "" {
+		alias = table.Name
+	}
+	return BoundTable{
+		Alias: alias,
+		Table: table,
+	}, nil
 }
 
 func bindProjection(table TableDescriptor, exprs *vsqlparser.SelectExprs) ([]ColumnDescriptor, error) {
@@ -264,6 +374,55 @@ func bindProjection(table TableDescriptor, exprs *vsqlparser.SelectExprs) ([]Col
 		projection = append(projection, descriptor)
 	}
 	return projection, nil
+}
+
+func bindJoinProjection(left, right BoundTable, exprs *vsqlparser.SelectExprs) ([]JoinProjection, []ColumnDescriptor, []ColumnDescriptor, error) {
+	if exprs == nil || len(exprs.Exprs) == 0 {
+		return nil, nil, nil, fmt.Errorf("sql planner: SELECT list must not be empty")
+	}
+	outputs := make([]JoinProjection, 0, len(exprs.Exprs))
+	leftProjection := make([]ColumnDescriptor, 0, len(exprs.Exprs))
+	rightProjection := make([]ColumnDescriptor, 0, len(exprs.Exprs))
+	seenOutputs := make(map[string]struct{}, len(exprs.Exprs))
+
+	for _, expr := range exprs.Exprs {
+		aliased, ok := expr.(*vsqlparser.AliasedExpr)
+		if !ok {
+			return nil, nil, nil, fmt.Errorf("sql planner: unsupported join projection %T", expr)
+		}
+		col, ok := aliased.Expr.(*vsqlparser.ColName)
+		if !ok {
+			return nil, nil, nil, fmt.Errorf("sql planner: join projections must be columns")
+		}
+		sourceAlias, sourceColumn, err := resolveJoinColumn(left, right, col)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		outputName := aliased.ColumnName()
+		if strings.TrimSpace(outputName) == "" {
+			outputName = sourceColumn.Name
+		}
+		key := canonicalName(outputName)
+		if _, exists := seenOutputs[key]; exists {
+			return nil, nil, nil, fmt.Errorf("sql planner: duplicate output column %q", outputName)
+		}
+		seenOutputs[key] = struct{}{}
+
+		output := sourceColumn
+		output.Name = outputName
+		outputs = append(outputs, JoinProjection{
+			Output:       output,
+			SourceAlias:  sourceAlias,
+			SourceColumn: sourceColumn,
+		})
+		if canonicalName(sourceAlias) == canonicalName(left.Alias) {
+			leftProjection = ensureColumnProjection(leftProjection, sourceColumn)
+		} else {
+			rightProjection = ensureColumnProjection(rightProjection, sourceColumn)
+		}
+	}
+
+	return outputs, leftProjection, rightProjection, nil
 }
 
 func bindGroupBy(table TableDescriptor, groupBy *vsqlparser.GroupBy) ([]ColumnDescriptor, error) {
@@ -391,6 +550,66 @@ func bindAggregateExpr(table TableDescriptor, aliased *vsqlparser.AliasedExpr, e
 	}
 }
 
+func bindEquiJoin(left, right BoundTable, joinExpr *vsqlparser.JoinTableExpr) (JoinSpec, ColumnDescriptor, ColumnDescriptor, error) {
+	if len(joinExpr.Condition.Using) > 0 {
+		if len(joinExpr.Condition.Using) != 1 {
+			return JoinSpec{}, ColumnDescriptor{}, ColumnDescriptor{}, fmt.Errorf("sql planner: only single-column USING joins are supported")
+		}
+		columnName := joinExpr.Condition.Using[0].String()
+		leftColumn, ok := left.Table.ColumnByName(columnName)
+		if !ok {
+			return JoinSpec{}, ColumnDescriptor{}, ColumnDescriptor{}, fmt.Errorf("sql planner: left table %q has no join column %q", left.Table.Name, columnName)
+		}
+		rightColumn, ok := right.Table.ColumnByName(columnName)
+		if !ok {
+			return JoinSpec{}, ColumnDescriptor{}, ColumnDescriptor{}, fmt.Errorf("sql planner: right table %q has no join column %q", right.Table.Name, columnName)
+		}
+		return JoinSpec{
+			Type:      "inner",
+			LeftKeys:  []string{qualifiedColumnName(left.Alias, leftColumn.Name)},
+			RightKeys: []string{qualifiedColumnName(right.Alias, rightColumn.Name)},
+		}, leftColumn, rightColumn, nil
+	}
+	if joinExpr.Condition.On == nil {
+		return JoinSpec{}, ColumnDescriptor{}, ColumnDescriptor{}, fmt.Errorf("sql planner: join ON condition is required")
+	}
+	cmp, ok := joinExpr.Condition.On.(*vsqlparser.ComparisonExpr)
+	if !ok || cmp.Operator != vsqlparser.EqualOp {
+		return JoinSpec{}, ColumnDescriptor{}, ColumnDescriptor{}, fmt.Errorf("sql planner: only equi-join ON conditions are supported")
+	}
+	leftColExpr, ok := cmp.Left.(*vsqlparser.ColName)
+	if !ok {
+		return JoinSpec{}, ColumnDescriptor{}, ColumnDescriptor{}, fmt.Errorf("sql planner: join left condition must be a column")
+	}
+	rightColExpr, ok := cmp.Right.(*vsqlparser.ColName)
+	if !ok {
+		return JoinSpec{}, ColumnDescriptor{}, ColumnDescriptor{}, fmt.Errorf("sql planner: join right condition must be a column")
+	}
+	leftAlias, leftColumn, err := resolveJoinColumn(left, right, leftColExpr)
+	if err != nil {
+		return JoinSpec{}, ColumnDescriptor{}, ColumnDescriptor{}, err
+	}
+	rightAlias, rightColumn, err := resolveJoinColumn(left, right, rightColExpr)
+	if err != nil {
+		return JoinSpec{}, ColumnDescriptor{}, ColumnDescriptor{}, err
+	}
+	if canonicalName(leftAlias) == canonicalName(rightAlias) {
+		return JoinSpec{}, ColumnDescriptor{}, ColumnDescriptor{}, fmt.Errorf("sql planner: join columns must come from opposite sides")
+	}
+	if canonicalName(leftAlias) == canonicalName(right.Alias) {
+		leftAlias, rightAlias = rightAlias, leftAlias
+		leftColumn, rightColumn = rightColumn, leftColumn
+	}
+	if canonicalName(leftAlias) != canonicalName(left.Alias) || canonicalName(rightAlias) != canonicalName(right.Alias) {
+		return JoinSpec{}, ColumnDescriptor{}, ColumnDescriptor{}, fmt.Errorf("sql planner: join columns must come from the left and right tables")
+	}
+	return JoinSpec{
+		Type:      "inner",
+		LeftKeys:  []string{qualifiedColumnName(left.Alias, leftColumn.Name)},
+		RightKeys: []string{qualifiedColumnName(right.Alias, rightColumn.Name)},
+	}, leftColumn, rightColumn, nil
+}
+
 func resolveAggregateColumn(table TableDescriptor, expr vsqlparser.Expr) (ColumnDescriptor, error) {
 	col, ok := expr.(*vsqlparser.ColName)
 	if !ok {
@@ -408,6 +627,75 @@ func aggregateAlias(alias, fallback string) string {
 		return alias
 	}
 	return fallback
+}
+
+func resolveJoinColumn(left, right BoundTable, col *vsqlparser.ColName) (string, ColumnDescriptor, error) {
+	qualifier := canonicalName(col.Qualifier.Name.String())
+	columnName := col.Name.String()
+	if qualifier != "" {
+		switch qualifier {
+		case canonicalName(left.Alias), canonicalName(left.Table.Name):
+			column, ok := left.Table.ColumnByName(columnName)
+			if !ok {
+				return "", ColumnDescriptor{}, fmt.Errorf("sql planner: unknown column %q on %q", columnName, left.Alias)
+			}
+			return left.Alias, column, nil
+		case canonicalName(right.Alias), canonicalName(right.Table.Name):
+			column, ok := right.Table.ColumnByName(columnName)
+			if !ok {
+				return "", ColumnDescriptor{}, fmt.Errorf("sql planner: unknown column %q on %q", columnName, right.Alias)
+			}
+			return right.Alias, column, nil
+		default:
+			return "", ColumnDescriptor{}, fmt.Errorf("sql planner: unknown table qualifier %q", col.Qualifier.Name.String())
+		}
+	}
+
+	leftColumn, leftOK := left.Table.ColumnByName(columnName)
+	rightColumn, rightOK := right.Table.ColumnByName(columnName)
+	switch {
+	case leftOK && rightOK:
+		return "", ColumnDescriptor{}, fmt.Errorf("sql planner: ambiguous column %q", columnName)
+	case leftOK:
+		return left.Alias, leftColumn, nil
+	case rightOK:
+		return right.Alias, rightColumn, nil
+	default:
+		return "", ColumnDescriptor{}, fmt.Errorf("sql planner: unknown join column %q", columnName)
+	}
+}
+
+func ensureColumnProjection(columns []ColumnDescriptor, column ColumnDescriptor) []ColumnDescriptor {
+	for _, existing := range columns {
+		if canonicalName(existing.Name) == canonicalName(column.Name) {
+			return columns
+		}
+	}
+	return append(columns, column)
+}
+
+func isJoinSelect(from []vsqlparser.TableExpr) bool {
+	return len(from) == 1 && isJoinExpr(from[0])
+}
+
+func isJoinExpr(expr vsqlparser.TableExpr) bool {
+	_, ok := expr.(*vsqlparser.JoinTableExpr)
+	return ok
+}
+
+func qualifiedColumnName(alias, column string) string {
+	return canonicalName(alias) + "." + canonicalName(column)
+}
+
+func baseTableName(aliased *vsqlparser.AliasedTableExpr) (string, error) {
+	switch typed := aliased.Expr.(type) {
+	case vsqlparser.TableName:
+		return typed.Name.String(), nil
+	case *vsqlparser.TableName:
+		return typed.Name.String(), nil
+	default:
+		return "", fmt.Errorf("sql planner: unsupported table source %T", aliased.Expr)
+	}
 }
 
 func hasAggregateExprs(exprs *vsqlparser.SelectExprs) bool {

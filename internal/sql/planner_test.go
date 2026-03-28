@@ -130,6 +130,44 @@ func TestPlannerAggregateSumSelect(t *testing.T) {
 	}
 }
 
+func TestPlannerHashJoinSelect(t *testing.T) {
+	t.Parallel()
+
+	planner := testPlanner(t)
+	plan, err := planner.Plan("select u.name, o.sales from users u join orders o on u.id = o.user_id")
+	if err != nil {
+		t.Fatalf("plan join select: %v", err)
+	}
+	join, ok := plan.(HashJoinPlan)
+	if !ok {
+		t.Fatalf("plan type = %T, want HashJoinPlan", plan)
+	}
+	if join.Left.Alias != "u" || join.Right.Alias != "o" {
+		t.Fatalf("join aliases = (%q,%q), want (u,o)", join.Left.Alias, join.Right.Alias)
+	}
+	if join.Join.Type != "inner" {
+		t.Fatalf("join type = %q, want inner", join.Join.Type)
+	}
+	if len(join.Join.LeftKeys) != 1 || join.Join.LeftKeys[0] != "u.id" {
+		t.Fatalf("left join keys = %+v, want [u.id]", join.Join.LeftKeys)
+	}
+	if len(join.Join.RightKeys) != 1 || join.Join.RightKeys[0] != "o.user_id" {
+		t.Fatalf("right join keys = %+v, want [o.user_id]", join.Join.RightKeys)
+	}
+	if len(join.LeftScan.Projection) != 2 {
+		t.Fatalf("left projection count = %d, want 2", len(join.LeftScan.Projection))
+	}
+	if len(join.RightScan.Projection) != 2 {
+		t.Fatalf("right projection count = %d, want 2", len(join.RightScan.Projection))
+	}
+	if len(join.Projection) != 2 {
+		t.Fatalf("join projection count = %d, want 2", len(join.Projection))
+	}
+	if join.Projection[0].Output.Name != "name" || join.Projection[1].Output.Name != "sales" {
+		t.Fatalf("join outputs = %+v, want [name sales]", join.Projection)
+	}
+}
+
 func TestPlannerRejectsNonPrimaryKeyPredicate(t *testing.T) {
 	t.Parallel()
 
@@ -145,6 +183,15 @@ func TestPlannerRejectsUngroupedAggregateProjection(t *testing.T) {
 	planner := testPlanner(t)
 	if _, err := planner.Plan("select email, count(*) from users group by name"); err == nil {
 		t.Fatalf("expected planner error for ungrouped aggregate projection")
+	}
+}
+
+func TestPlannerRejectsUnsupportedJoinPredicate(t *testing.T) {
+	t.Parallel()
+
+	planner := testPlanner(t)
+	if _, err := planner.Plan("select u.name, o.sales from users u join orders o on u.id > o.user_id"); err == nil {
+		t.Fatalf("expected planner error for non-equi join")
 	}
 }
 
@@ -223,8 +270,9 @@ func testPlanner(t *testing.T) *Planner {
 		Name: "orders",
 		Columns: []ColumnDescriptor{
 			{ID: 1, Name: "id", Type: ColumnTypeInt},
-			{ID: 2, Name: "region", Type: ColumnTypeString},
-			{ID: 3, Name: "sales", Type: ColumnTypeInt},
+			{ID: 2, Name: "user_id", Type: ColumnTypeInt},
+			{ID: 3, Name: "region", Type: ColumnTypeString},
+			{ID: 4, Name: "sales", Type: ColumnTypeInt},
 		},
 		PrimaryKey: []string{"id"},
 		Stats: TableStats{

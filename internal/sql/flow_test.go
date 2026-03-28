@@ -146,3 +146,46 @@ func TestFlowPlannerBuildAggregate(t *testing.T) {
 		t.Fatalf("final aggregate spec = %+v, want final mode", finalStage.Processors[1].Aggregation)
 	}
 }
+
+func TestFlowPlannerBuildHashJoin(t *testing.T) {
+	t.Parallel()
+
+	planner := testPlanner(t)
+	plan, err := planner.Plan("select u.name, o.sales from users u join orders o on u.id = o.user_id")
+	if err != nil {
+		t.Fatalf("plan query: %v", err)
+	}
+
+	flow, err := NewFlowPlanner().Build(plan)
+	if err != nil {
+		t.Fatalf("build flow: %v", err)
+	}
+	if flow.RootStageID != 3 || len(flow.Stages) != 3 {
+		t.Fatalf("unexpected hash-join flow shape: %+v", flow)
+	}
+	if flow.Stages[0].Distribution != DistributionByRange || flow.Stages[1].Distribution != DistributionByRange {
+		t.Fatalf("join scan distributions = (%q,%q), want by_range", flow.Stages[0].Distribution, flow.Stages[1].Distribution)
+	}
+	joinStage := flow.Stages[2]
+	if joinStage.Distribution != DistributionGatewayOnly {
+		t.Fatalf("join stage distribution = %q, want %q", joinStage.Distribution, DistributionGatewayOnly)
+	}
+	if len(joinStage.InputStageIDs) != 2 || joinStage.InputStageIDs[0] != 1 || joinStage.InputStageIDs[1] != 2 {
+		t.Fatalf("join inputs = %+v, want [1 2]", joinStage.InputStageIDs)
+	}
+	if len(joinStage.Processors) != 3 {
+		t.Fatalf("join stage processors = %d, want 3", len(joinStage.Processors))
+	}
+	if joinStage.Processors[2].Kind != OperatorHashJoin {
+		t.Fatalf("join operator kind = %q, want %q", joinStage.Processors[2].Kind, OperatorHashJoin)
+	}
+	if joinStage.Processors[2].Join == nil {
+		t.Fatalf("join spec is nil")
+	}
+	if joinStage.Processors[2].Join.LeftKeys[0] != "u.id" || joinStage.Processors[2].Join.RightKeys[0] != "o.user_id" {
+		t.Fatalf("join keys = %+v, %+v", joinStage.Processors[2].Join.LeftKeys, joinStage.Processors[2].Join.RightKeys)
+	}
+	if len(joinStage.Processors[2].Projection) != 2 {
+		t.Fatalf("join projection count = %d, want 2", len(joinStage.Processors[2].Projection))
+	}
+}
