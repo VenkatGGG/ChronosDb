@@ -75,12 +75,76 @@ func TestPlannerInsertMapsToKV(t *testing.T) {
 	}
 }
 
+func TestPlannerAggregateSelect(t *testing.T) {
+	t.Parallel()
+
+	planner := testPlanner(t)
+	plan, err := planner.Plan("select name, count(*) from users group by name")
+	if err != nil {
+		t.Fatalf("plan aggregate select: %v", err)
+	}
+	aggregate, ok := plan.(AggregatePlan)
+	if !ok {
+		t.Fatalf("plan type = %T, want AggregatePlan", plan)
+	}
+	if len(aggregate.GroupBy) != 1 || aggregate.GroupBy[0].Name != "name" {
+		t.Fatalf("group by = %+v, want [name]", aggregate.GroupBy)
+	}
+	if len(aggregate.Aggregates) != 1 || aggregate.Aggregates[0].Func != AggregateFuncCount {
+		t.Fatalf("aggregates = %+v, want one count aggregate", aggregate.Aggregates)
+	}
+	if aggregate.Aggregates[0].Input != nil {
+		t.Fatalf("count(*) input = %+v, want nil", aggregate.Aggregates[0].Input)
+	}
+	if len(aggregate.Input.Projection) != 1 || aggregate.Input.Projection[0].Name != "name" {
+		t.Fatalf("input projection = %+v, want [name]", aggregate.Input.Projection)
+	}
+	if !bytes.Equal(aggregate.Input.StartKey, storage.GlobalTablePrimaryPrefix(7)) {
+		t.Fatalf("aggregate start key = %q, want table prefix", aggregate.Input.StartKey)
+	}
+}
+
+func TestPlannerAggregateSumSelect(t *testing.T) {
+	t.Parallel()
+
+	planner := testPlanner(t)
+	plan, err := planner.Plan("select region, sum(sales) from orders group by region")
+	if err != nil {
+		t.Fatalf("plan aggregate sum select: %v", err)
+	}
+	aggregate, ok := plan.(AggregatePlan)
+	if !ok {
+		t.Fatalf("plan type = %T, want AggregatePlan", plan)
+	}
+	if len(aggregate.GroupBy) != 1 || aggregate.GroupBy[0].Name != "region" {
+		t.Fatalf("group by = %+v, want [region]", aggregate.GroupBy)
+	}
+	if len(aggregate.Aggregates) != 1 || aggregate.Aggregates[0].Func != AggregateFuncSum {
+		t.Fatalf("aggregates = %+v, want one sum aggregate", aggregate.Aggregates)
+	}
+	if aggregate.Aggregates[0].Input == nil || aggregate.Aggregates[0].Input.Name != "sales" {
+		t.Fatalf("sum input = %+v, want sales column", aggregate.Aggregates[0].Input)
+	}
+	if len(aggregate.Input.Projection) != 2 {
+		t.Fatalf("input projection count = %d, want 2", len(aggregate.Input.Projection))
+	}
+}
+
 func TestPlannerRejectsNonPrimaryKeyPredicate(t *testing.T) {
 	t.Parallel()
 
 	planner := testPlanner(t)
 	if _, err := planner.Plan("select id from users where name = 'alice'"); err == nil {
 		t.Fatalf("expected planner error for non-primary-key predicate")
+	}
+}
+
+func TestPlannerRejectsUngroupedAggregateProjection(t *testing.T) {
+	t.Parallel()
+
+	planner := testPlanner(t)
+	if _, err := planner.Plan("select email, count(*) from users group by name"); err == nil {
+		t.Fatalf("expected planner error for ungrouped aggregate projection")
 	}
 }
 
@@ -153,6 +217,26 @@ func testPlanner(t *testing.T) *Planner {
 		},
 	}); err != nil {
 		t.Fatalf("add users descriptor: %v", err)
+	}
+	if err := catalog.AddTable(TableDescriptor{
+		ID:   9,
+		Name: "orders",
+		Columns: []ColumnDescriptor{
+			{ID: 1, Name: "id", Type: ColumnTypeInt},
+			{ID: 2, Name: "region", Type: ColumnTypeString},
+			{ID: 3, Name: "sales", Type: ColumnTypeInt},
+		},
+		PrimaryKey: []string{"id"},
+		Stats: TableStats{
+			EstimatedRows:   250000,
+			AverageRowBytes: 96,
+		},
+		PlacementPolicy: &placement.Policy{
+			PlacementMode:    placement.ModeRegional,
+			PreferredRegions: []string{"us-east1"},
+		},
+	}); err != nil {
+		t.Fatalf("add orders descriptor: %v", err)
 	}
 	return NewPlanner(NewParser(), catalog)
 }

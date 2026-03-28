@@ -89,3 +89,60 @@ func TestFlowPlannerBuildInsert(t *testing.T) {
 		t.Fatalf("insert operator kind = %q, want %q", flow.Stages[0].Processors[0].Kind, OperatorKVInsert)
 	}
 }
+
+func TestFlowPlannerBuildAggregate(t *testing.T) {
+	t.Parallel()
+
+	planner := testPlanner(t)
+	plan, err := planner.Plan("select name, count(*) from users group by name")
+	if err != nil {
+		t.Fatalf("plan query: %v", err)
+	}
+
+	flow, err := NewFlowPlanner().Build(plan)
+	if err != nil {
+		t.Fatalf("build flow: %v", err)
+	}
+	if flow.RootStageID != 2 || len(flow.Stages) != 2 {
+		t.Fatalf("unexpected aggregate flow shape: %+v", flow)
+	}
+	stage := flow.Stages[0]
+	if stage.Distribution != DistributionByRange {
+		t.Fatalf("aggregate scan distribution = %q, want %q", stage.Distribution, DistributionByRange)
+	}
+	if len(stage.Processors) != 2 {
+		t.Fatalf("aggregate partial stage processors = %d, want 2", len(stage.Processors))
+	}
+	if stage.Processors[0].Kind != OperatorKVScan {
+		t.Fatalf("first partial operator = %q, want %q", stage.Processors[0].Kind, OperatorKVScan)
+	}
+	if stage.Processors[1].Kind != OperatorAggregate {
+		t.Fatalf("second partial operator = %q, want %q", stage.Processors[1].Kind, OperatorAggregate)
+	}
+	if stage.Processors[1].Aggregation == nil || stage.Processors[1].Aggregation.Mode != AggregateModePartial {
+		t.Fatalf("partial aggregate spec = %+v, want partial mode", stage.Processors[1].Aggregation)
+	}
+	if len(stage.Processors[1].Aggregation.GroupBy) != 1 || stage.Processors[1].Aggregation.GroupBy[0] != "name" {
+		t.Fatalf("partial aggregate group by = %+v, want [name]", stage.Processors[1].Aggregation.GroupBy)
+	}
+	if len(stage.Processors[1].Aggregation.Funcs) != 1 || stage.Processors[1].Aggregation.Funcs[0] != "count(*)" {
+		t.Fatalf("partial aggregate funcs = %+v, want [count(*)]", stage.Processors[1].Aggregation.Funcs)
+	}
+
+	finalStage := flow.Stages[1]
+	if finalStage.Distribution != DistributionGatewayOnly {
+		t.Fatalf("final aggregate distribution = %q, want %q", finalStage.Distribution, DistributionGatewayOnly)
+	}
+	if len(finalStage.Processors) != 2 {
+		t.Fatalf("final aggregate stage processors = %d, want 2", len(finalStage.Processors))
+	}
+	if finalStage.Processors[0].Kind != OperatorMerge {
+		t.Fatalf("first final operator = %q, want %q", finalStage.Processors[0].Kind, OperatorMerge)
+	}
+	if finalStage.Processors[1].Kind != OperatorAggregate {
+		t.Fatalf("second final operator = %q, want %q", finalStage.Processors[1].Kind, OperatorAggregate)
+	}
+	if finalStage.Processors[1].Aggregation == nil || finalStage.Processors[1].Aggregation.Mode != AggregateModeFinal {
+		t.Fatalf("final aggregate spec = %+v, want final mode", finalStage.Processors[1].Aggregation)
+	}
+}

@@ -198,8 +198,10 @@ row-description metadata, and the distributed SQL layer has a first
 flow-planner boundary for scan and mutation plans with stage/operator
 vocabulary reserved for future join and aggregation planning. The pgwire layer
 now also has a real connection-serving loop with startup negotiation, SSL
-rejection, simple-query dispatch, and listener integration. Full distributed
-query flows are still open.
+rejection, simple-query dispatch, and listener integration. Single-table
+aggregate planning for `GROUP BY`, `COUNT`, and `SUM` now exists and maps onto
+distributed partial/final aggregate flow stages. Full distributed query flows
+are still open.
 
 ### [ ] Phase 7: Locality and Follower Reads
 
@@ -272,3 +274,23 @@ Rule:
 - every code commit must map to a phase or sub-phase
 - tests for a behavior land in the same change as the behavior
 - no mixed current-phase and future-phase implementation commits
+
+## Remaining Execution Plan
+
+### [ ] Phase 6 Remaining Execution
+
+- [x] 6.1 Add single-table aggregate planning (`GROUP BY`, `COUNT`, `SUM`) and map it to distributed flow stages
+- [ ] 6.2 Add join-aware logical planning and distributed hash-join flow stages for supported equi-joins
+- [ ] 6.3 Add explicit flow-fragment boundaries and result schemas so distributed plans can move toward execution
+
+### [ ] Phase 7 Remaining Execution
+
+- [ ] 7.1 Push placement and home-region policy deeper into live routing decisions, not only descriptors and flow hints
+- [ ] 7.2 Make leaseholder/follower read routing expose locality reasons and freshness gaps as first-class outputs
+- [ ] 7.3 Thread locality policy through more replica movement and cache-refresh surfaces
+
+### [ ] Phase 8 Remaining Execution
+
+- [ ] 8.1 Expand deterministic simulation to cover split races, lease churn, and multi-range transaction recovery
+- [ ] 8.2 Add snapshot-pressure and allocator-observability metrics around the new operator HTTP surface
+- [ ] 8.3 Add a chaos/system-test harness skeleton for partitions, crash/restart, and ambiguous commit timing

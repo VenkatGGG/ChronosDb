@@ -101,6 +101,25 @@ func (o *Optimizer) costInsert(table TableDescriptor, valueSize int) CostEstimat
 	}
 }
 
+func (o *Optimizer) costAggregate(table TableDescriptor, projection []ColumnDescriptor, predicate boundPredicate, singleton bool, groupByCount, aggregateCount int) CostEstimate {
+	stats := table.StatsOrDefaults()
+	inputRows := estimateRangeRows(stats, predicate, singleton)
+	outputRows := uint64(1)
+	if groupByCount > 0 {
+		outputRows = max(1, inputRows/10)
+	}
+	bytes := outputRows * projectedBytes(stats, projection)
+	cpu := 3.0 + math.Log2(float64(inputRows)+1) + float64(aggregateCount)
+	score := float64(inputRows)/2.0 + cpu + float64(bytes)/4096.0
+	return CostEstimate{
+		KVReads:        max(1, inputRows),
+		EstimatedRows:  outputRows,
+		EstimatedBytes: bytes,
+		CPUCost:        cpu,
+		Score:          score,
+	}
+}
+
 func projectedBytes(stats TableStats, projection []ColumnDescriptor) uint64 {
 	if len(projection) == 0 {
 		return stats.AverageRowBytes
@@ -140,13 +159,15 @@ func estimateRangeRows(stats TableStats, predicate boundPredicate, singleton boo
 }
 
 func makeSelectCandidates(o *Optimizer, table TableDescriptor, projection []ColumnDescriptor, predicate boundPredicate) ([]PlanCandidate, error) {
-	prefix := storage.GlobalTablePrimaryPrefix(table.ID)
 	if predicate.equality != nil {
-		encoded, err := encodePrimaryKeyValue(*predicate.equality)
+		key, err := buildPointLookupKey(table, *predicate.equality)
 		if err != nil {
 			return nil, err
 		}
-		key := storage.GlobalTablePrimaryKey(table.ID, encoded)
+		scanPlan, _, err := buildRangeScanPlan(table, projection, predicate)
+		if err != nil {
+			return nil, err
+		}
 		return []PlanCandidate{
 			{
 				Name: "point_lookup",
@@ -159,51 +180,39 @@ func makeSelectCandidates(o *Optimizer, table TableDescriptor, projection []Colu
 			},
 			{
 				Name: "singleton_range_scan",
-				Plan: RangeScanPlan{
-					Table:          table,
-					Projection:     projection,
-					StartKey:       key,
-					EndKey:         storage.PrefixEnd(key),
-					StartInclusive: true,
-					EndInclusive:   false,
-				},
+				Plan: scanPlan,
 				Cost: o.costRangeScan(table, projection, predicate, true),
 			},
 		}, nil
 	}
 
-	startKey := prefix
-	endKey := storage.PrefixEnd(prefix)
-	startInclusive := true
-	endInclusive := false
-	if predicate.lower != nil {
-		encoded, err := encodePrimaryKeyValue(predicate.lower.value)
-		if err != nil {
-			return nil, err
-		}
-		startKey = storage.GlobalTablePrimaryKey(table.ID, encoded)
-		startInclusive = predicate.lower.inclusive
-	}
-	if predicate.upper != nil {
-		encoded, err := encodePrimaryKeyValue(predicate.upper.value)
-		if err != nil {
-			return nil, err
-		}
-		endKey = storage.GlobalTablePrimaryKey(table.ID, encoded)
-		endInclusive = predicate.upper.inclusive
+	scanPlan, _, err := buildRangeScanPlan(table, projection, predicate)
+	if err != nil {
+		return nil, err
 	}
 	return []PlanCandidate{
 		{
 			Name: "range_scan",
-			Plan: RangeScanPlan{
-				Table:          table,
-				Projection:     projection,
-				StartKey:       startKey,
-				EndKey:         endKey,
-				StartInclusive: startInclusive,
-				EndInclusive:   endInclusive,
-			},
+			Plan: scanPlan,
 			Cost: o.costRangeScan(table, projection, predicate, false),
+		},
+	}, nil
+}
+
+func makeAggregateCandidates(o *Optimizer, table TableDescriptor, projection []ColumnDescriptor, predicate boundPredicate, groupBy []ColumnDescriptor, aggregates []AggregateExpr) ([]PlanCandidate, error) {
+	scanPlan, singleton, err := buildRangeScanPlan(table, projection, predicate)
+	if err != nil {
+		return nil, err
+	}
+	return []PlanCandidate{
+		{
+			Name: "distributed_aggregate",
+			Plan: AggregatePlan{
+				Input:      scanPlan,
+				GroupBy:    append([]ColumnDescriptor(nil), groupBy...),
+				Aggregates: append([]AggregateExpr(nil), aggregates...),
+			},
+			Cost: o.costAggregate(table, projection, predicate, singleton, len(groupBy), len(aggregates)),
 		},
 	}, nil
 }
@@ -214,6 +223,61 @@ func makeInsertCandidate(o *Optimizer, table TableDescriptor, plan InsertPlan) P
 		Plan: plan,
 		Cost: o.costInsert(table, len(plan.Value)),
 	}
+}
+
+func buildPointLookupKey(table TableDescriptor, value Value) ([]byte, error) {
+	encoded, err := encodePrimaryKeyValue(value)
+	if err != nil {
+		return nil, err
+	}
+	return storage.GlobalTablePrimaryKey(table.ID, encoded), nil
+}
+
+func buildRangeScanPlan(table TableDescriptor, projection []ColumnDescriptor, predicate boundPredicate) (RangeScanPlan, bool, error) {
+	if predicate.equality != nil {
+		key, err := buildPointLookupKey(table, *predicate.equality)
+		if err != nil {
+			return RangeScanPlan{}, false, err
+		}
+		return RangeScanPlan{
+			Table:          table,
+			Projection:     append([]ColumnDescriptor(nil), projection...),
+			StartKey:       key,
+			EndKey:         storage.PrefixEnd(key),
+			StartInclusive: true,
+			EndInclusive:   false,
+		}, true, nil
+	}
+
+	prefix := storage.GlobalTablePrimaryPrefix(table.ID)
+	startKey := prefix
+	endKey := storage.PrefixEnd(prefix)
+	startInclusive := true
+	endInclusive := false
+	if predicate.lower != nil {
+		encoded, err := encodePrimaryKeyValue(predicate.lower.value)
+		if err != nil {
+			return RangeScanPlan{}, false, err
+		}
+		startKey = storage.GlobalTablePrimaryKey(table.ID, encoded)
+		startInclusive = predicate.lower.inclusive
+	}
+	if predicate.upper != nil {
+		encoded, err := encodePrimaryKeyValue(predicate.upper.value)
+		if err != nil {
+			return RangeScanPlan{}, false, err
+		}
+		endKey = storage.GlobalTablePrimaryKey(table.ID, encoded)
+		endInclusive = predicate.upper.inclusive
+	}
+	return RangeScanPlan{
+		Table:          table,
+		Projection:     append([]ColumnDescriptor(nil), projection...),
+		StartKey:       startKey,
+		EndKey:         endKey,
+		StartInclusive: startInclusive,
+		EndInclusive:   endInclusive,
+	}, false, nil
 }
 
 func max(a, b uint64) uint64 {

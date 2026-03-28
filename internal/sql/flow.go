@@ -23,6 +23,14 @@ const (
 	OperatorProjection OperatorKind = "projection"
 )
 
+// AggregateMode identifies whether an aggregate stage is partial or final.
+type AggregateMode string
+
+const (
+	AggregateModePartial AggregateMode = "partial"
+	AggregateModeFinal   AggregateMode = "final"
+)
+
 // KeySpan is the KV span assigned to a scan or mutation processor.
 type KeySpan struct {
 	StartKey       []byte
@@ -33,6 +41,7 @@ type KeySpan struct {
 
 // AggregationSpec is the future aggregation contract for distributed SQL.
 type AggregationSpec struct {
+	Mode    AggregateMode
 	GroupBy []string
 	Funcs   []string
 }
@@ -88,6 +97,8 @@ func (p *FlowPlanner) Build(plan Plan) (FlowPlan, error) {
 		return p.buildRangeScan(typed), nil
 	case InsertPlan:
 		return p.buildInsert(typed), nil
+	case AggregatePlan:
+		return p.buildAggregate(typed), nil
 	default:
 		return FlowPlan{}, fmt.Errorf("sql flow planner: unsupported plan type %T", plan)
 	}
@@ -199,6 +210,65 @@ func (p *FlowPlanner) buildInsert(plan InsertPlan) FlowPlan {
 	}
 }
 
+func (p *FlowPlanner) buildAggregate(plan AggregatePlan) FlowPlan {
+	scanStage := FlowStage{
+		ID:               1,
+		Name:             "distributed_partial_aggregate",
+		Distribution:     DistributionByRange,
+		PreferredRegions: scanPreferredRegions(plan.Input.Table),
+		HomeRegion:       homeRegion(plan.Input.Table),
+		Processors: []ProcessorSpec{
+			{
+				Kind:       OperatorKVScan,
+				Table:      &plan.Input.Table,
+				Projection: append([]ColumnDescriptor(nil), plan.Input.Projection...),
+				Spans: []KeySpan{
+					{
+						StartKey:       append([]byte(nil), plan.Input.StartKey...),
+						EndKey:         append([]byte(nil), plan.Input.EndKey...),
+						StartInclusive: plan.Input.StartInclusive,
+						EndInclusive:   plan.Input.EndInclusive,
+					},
+				},
+			},
+			{
+				Kind:  OperatorAggregate,
+				Table: &plan.Input.Table,
+				Aggregation: &AggregationSpec{
+					Mode:    AggregateModePartial,
+					GroupBy: aggregateColumnNames(plan.GroupBy),
+					Funcs:   aggregateFuncNames(plan.Aggregates),
+				},
+			},
+		},
+	}
+	finalStage := FlowStage{
+		ID:            2,
+		Name:          "gateway_finalize_aggregate",
+		Distribution:  DistributionGatewayOnly,
+		InputStageIDs: []int{1},
+		Processors: []ProcessorSpec{
+			{
+				Kind:  OperatorMerge,
+				Table: &plan.Input.Table,
+			},
+			{
+				Kind:  OperatorAggregate,
+				Table: &plan.Input.Table,
+				Aggregation: &AggregationSpec{
+					Mode:    AggregateModeFinal,
+					GroupBy: aggregateColumnNames(plan.GroupBy),
+					Funcs:   aggregateFuncNames(plan.Aggregates),
+				},
+			},
+		},
+	}
+	return FlowPlan{
+		RootStageID: finalStage.ID,
+		Stages:      []FlowStage{scanStage, finalStage},
+	}
+}
+
 func leasePreferredRegions(table TableDescriptor) []string {
 	compiled, ok, err := table.CompiledPlacement()
 	if !ok || err != nil {
@@ -220,4 +290,20 @@ func homeRegion(table TableDescriptor) string {
 		return ""
 	}
 	return table.PlacementPolicy.HomeRegion
+}
+
+func aggregateColumnNames(columns []ColumnDescriptor) []string {
+	names := make([]string, 0, len(columns))
+	for _, column := range columns {
+		names = append(names, column.Name)
+	}
+	return names
+}
+
+func aggregateFuncNames(aggregates []AggregateExpr) []string {
+	names := make([]string, 0, len(aggregates))
+	for _, aggregate := range aggregates {
+		names = append(names, aggregate.String())
+	}
+	return names
 }

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
+	"strings"
 
 	"github.com/VenkatGGG/ChronosDb/internal/storage"
 	vsqlparser "vitess.io/vitess/go/vt/sqlparser"
@@ -57,6 +58,31 @@ type Plan interface {
 	isPlan()
 }
 
+// AggregateFunc names one supported SQL aggregation function.
+type AggregateFunc string
+
+const (
+	AggregateFuncCount AggregateFunc = "count"
+	AggregateFuncSum   AggregateFunc = "sum"
+)
+
+// AggregateExpr is one validated SQL aggregate bound against a table descriptor.
+type AggregateExpr struct {
+	Func  AggregateFunc
+	Input *ColumnDescriptor
+	Alias string
+}
+
+// String returns the normalized SQL label for the aggregate expression.
+func (a AggregateExpr) String() string {
+	switch {
+	case a.Input == nil:
+		return fmt.Sprintf("%s(*)", a.Func)
+	default:
+		return fmt.Sprintf("%s(%s)", a.Func, canonicalName(a.Input.Name))
+	}
+}
+
 // PointLookupPlan maps a primary-key point read to one KV key.
 type PointLookupPlan struct {
 	Table      TableDescriptor
@@ -81,9 +107,17 @@ type InsertPlan struct {
 	Value []byte
 }
 
+// AggregatePlan maps a scan onto distributed grouping/aggregation stages.
+type AggregatePlan struct {
+	Input      RangeScanPlan
+	GroupBy    []ColumnDescriptor
+	Aggregates []AggregateExpr
+}
+
 func (PointLookupPlan) isPlan() {}
 func (RangeScanPlan) isPlan()   {}
 func (InsertPlan) isPlan()      {}
+func (AggregatePlan) isPlan()   {}
 
 type boundPredicate struct {
 	equality *Value
@@ -105,8 +139,11 @@ type Value struct {
 }
 
 func (p *Planner) optimizeSelect(stmt *vsqlparser.Select) (OptimizedPlan, error) {
-	if stmt.Distinct || stmt.GroupBy != nil || stmt.Having != nil || stmt.Limit != nil || len(stmt.OrderBy) > 0 {
+	if stmt.Distinct || stmt.Having != nil || stmt.Limit != nil || len(stmt.OrderBy) > 0 {
 		return OptimizedPlan{}, fmt.Errorf("sql planner: unsupported SELECT shape")
+	}
+	if stmt.GroupBy != nil || hasAggregateExprs(stmt.SelectExprs) {
+		return p.optimizeAggregateSelect(stmt)
 	}
 	table, err := p.resolveSingleTable(stmt.From)
 	if err != nil {
@@ -121,6 +158,30 @@ func (p *Planner) optimizeSelect(stmt *vsqlparser.Select) (OptimizedPlan, error)
 		return OptimizedPlan{}, err
 	}
 	candidates, err := makeSelectCandidates(p.optimizer, table, projection, predicate)
+	if err != nil {
+		return OptimizedPlan{}, err
+	}
+	return p.optimizer.Choose(candidates)
+}
+
+func (p *Planner) optimizeAggregateSelect(stmt *vsqlparser.Select) (OptimizedPlan, error) {
+	table, err := p.resolveSingleTable(stmt.From)
+	if err != nil {
+		return OptimizedPlan{}, err
+	}
+	groupBy, err := bindGroupBy(table, stmt.GroupBy)
+	if err != nil {
+		return OptimizedPlan{}, err
+	}
+	inputProjection, aggregates, err := bindAggregateProjection(table, stmt.SelectExprs, groupBy)
+	if err != nil {
+		return OptimizedPlan{}, err
+	}
+	predicate, err := bindPrimaryKeyPredicate(table, stmt.Where)
+	if err != nil {
+		return OptimizedPlan{}, err
+	}
+	candidates, err := makeAggregateCandidates(p.optimizer, table, inputProjection, predicate, groupBy, aggregates)
 	if err != nil {
 		return OptimizedPlan{}, err
 	}
@@ -203,6 +264,166 @@ func bindProjection(table TableDescriptor, exprs *vsqlparser.SelectExprs) ([]Col
 		projection = append(projection, descriptor)
 	}
 	return projection, nil
+}
+
+func bindGroupBy(table TableDescriptor, groupBy *vsqlparser.GroupBy) ([]ColumnDescriptor, error) {
+	if groupBy == nil || len(groupBy.Exprs) == 0 {
+		return nil, nil
+	}
+	if groupBy.WithRollup {
+		return nil, fmt.Errorf("sql planner: GROUP BY WITH ROLLUP is unsupported")
+	}
+	seen := make(map[string]struct{}, len(groupBy.Exprs))
+	columns := make([]ColumnDescriptor, 0, len(groupBy.Exprs))
+	for _, expr := range groupBy.Exprs {
+		col, ok := expr.(*vsqlparser.ColName)
+		if !ok {
+			return nil, fmt.Errorf("sql planner: GROUP BY expressions must be columns")
+		}
+		descriptor, exists := table.ColumnByName(col.Name.String())
+		if !exists {
+			return nil, fmt.Errorf("sql planner: unknown GROUP BY column %q", col.Name.String())
+		}
+		name := canonicalName(descriptor.Name)
+		if _, exists := seen[name]; exists {
+			return nil, fmt.Errorf("sql planner: duplicate GROUP BY column %q", descriptor.Name)
+		}
+		seen[name] = struct{}{}
+		columns = append(columns, descriptor)
+	}
+	return columns, nil
+}
+
+func bindAggregateProjection(table TableDescriptor, exprs *vsqlparser.SelectExprs, groupBy []ColumnDescriptor) ([]ColumnDescriptor, []AggregateExpr, error) {
+	if exprs == nil || len(exprs.Exprs) == 0 {
+		return nil, nil, fmt.Errorf("sql planner: SELECT list must not be empty")
+	}
+	groupSet := make(map[string]ColumnDescriptor, len(groupBy))
+	projectionSet := make(map[string]struct{}, len(groupBy))
+	inputProjection := make([]ColumnDescriptor, 0, len(groupBy))
+	addProjection := func(column ColumnDescriptor) {
+		name := canonicalName(column.Name)
+		if _, exists := projectionSet[name]; exists {
+			return
+		}
+		projectionSet[name] = struct{}{}
+		inputProjection = append(inputProjection, column)
+	}
+	for _, column := range groupBy {
+		groupSet[canonicalName(column.Name)] = column
+		addProjection(column)
+	}
+
+	aggregates := make([]AggregateExpr, 0, len(exprs.Exprs))
+	for _, expr := range exprs.Exprs {
+		aliased, ok := expr.(*vsqlparser.AliasedExpr)
+		if !ok {
+			return nil, nil, fmt.Errorf("sql planner: unsupported aggregate projection %T", expr)
+		}
+		switch typed := aliased.Expr.(type) {
+		case *vsqlparser.ColName:
+			column, exists := table.ColumnByName(typed.Name.String())
+			if !exists {
+				return nil, nil, fmt.Errorf("sql planner: unknown column %q", typed.Name.String())
+			}
+			if _, grouped := groupSet[canonicalName(column.Name)]; !grouped {
+				return nil, nil, fmt.Errorf("sql planner: selected column %q must appear in GROUP BY or be aggregated", column.Name)
+			}
+			addProjection(column)
+		case vsqlparser.AggrFunc:
+			aggregate, err := bindAggregateExpr(table, aliased, typed)
+			if err != nil {
+				return nil, nil, err
+			}
+			aggregates = append(aggregates, aggregate)
+			if aggregate.Input != nil {
+				addProjection(*aggregate.Input)
+			}
+		default:
+			return nil, nil, fmt.Errorf("sql planner: unsupported aggregate expression %T", aliased.Expr)
+		}
+	}
+	if len(aggregates) == 0 && len(groupBy) == 0 {
+		return nil, nil, fmt.Errorf("sql planner: aggregate planning requires GROUP BY columns or aggregate functions")
+	}
+	return inputProjection, aggregates, nil
+}
+
+func bindAggregateExpr(table TableDescriptor, aliased *vsqlparser.AliasedExpr, expr vsqlparser.AggrFunc) (AggregateExpr, error) {
+	alias := aliased.As.String()
+	switch typed := expr.(type) {
+	case *vsqlparser.CountStar:
+		return AggregateExpr{
+			Func:  AggregateFuncCount,
+			Alias: aggregateAlias(alias, "count"),
+		}, nil
+	case *vsqlparser.Count:
+		if typed.Distinct {
+			return AggregateExpr{}, fmt.Errorf("sql planner: DISTINCT aggregates are unsupported")
+		}
+		column, err := resolveAggregateColumn(table, typed.GetArg())
+		if err != nil {
+			return AggregateExpr{}, err
+		}
+		return AggregateExpr{
+			Func:  AggregateFuncCount,
+			Input: &column,
+			Alias: aggregateAlias(alias, "count"),
+		}, nil
+	case *vsqlparser.Sum:
+		if typed.Distinct {
+			return AggregateExpr{}, fmt.Errorf("sql planner: DISTINCT aggregates are unsupported")
+		}
+		column, err := resolveAggregateColumn(table, typed.GetArg())
+		if err != nil {
+			return AggregateExpr{}, err
+		}
+		if column.Type != ColumnTypeInt {
+			return AggregateExpr{}, fmt.Errorf("sql planner: SUM requires an INT column, got %s", column.Type)
+		}
+		return AggregateExpr{
+			Func:  AggregateFuncSum,
+			Input: &column,
+			Alias: aggregateAlias(alias, "sum"),
+		}, nil
+	default:
+		return AggregateExpr{}, fmt.Errorf("sql planner: unsupported aggregate function %q", expr.AggrName())
+	}
+}
+
+func resolveAggregateColumn(table TableDescriptor, expr vsqlparser.Expr) (ColumnDescriptor, error) {
+	col, ok := expr.(*vsqlparser.ColName)
+	if !ok {
+		return ColumnDescriptor{}, fmt.Errorf("sql planner: aggregate arguments must be columns")
+	}
+	column, exists := table.ColumnByName(col.Name.String())
+	if !exists {
+		return ColumnDescriptor{}, fmt.Errorf("sql planner: unknown aggregate column %q", col.Name.String())
+	}
+	return column, nil
+}
+
+func aggregateAlias(alias, fallback string) string {
+	if strings.TrimSpace(alias) != "" {
+		return alias
+	}
+	return fallback
+}
+
+func hasAggregateExprs(exprs *vsqlparser.SelectExprs) bool {
+	if exprs == nil {
+		return false
+	}
+	for _, expr := range exprs.Exprs {
+		aliased, ok := expr.(*vsqlparser.AliasedExpr)
+		if !ok {
+			continue
+		}
+		if _, ok := aliased.Expr.(vsqlparser.AggrFunc); ok {
+			return true
+		}
+	}
+	return false
 }
 
 func bindPrimaryKeyPredicate(table TableDescriptor, where *vsqlparser.Where) (boundPredicate, error) {
