@@ -1,3 +1,6 @@
 ui/node_modules/
 ui/dist/
 ui/.vite/
+ui/*.tsbuildinfo
+ui/vite.config.js
+ui/vite.config.d.ts
