@@ -193,10 +193,11 @@ binding/semantic validation, primary-key KV mapping, and an explicit
 cost-based planning skeleton with candidate ranking over physical KV access
 paths. A standalone PostgreSQL wire-protocol foundation now exists in
 `internal/pgwire` for startup, simple-query framing, and backend responses. The
-distributed SQL layer now also has a first flow-planner boundary for scan and
-mutation plans, with stage/operator vocabulary reserved for future join and
-aggregation planning, but listener integration and full distributed query flows
-are still open.
+wire layer is now connected to the SQL planner for simple-query validation and
+row-description metadata, and the distributed SQL layer has a first
+flow-planner boundary for scan and mutation plans with stage/operator
+vocabulary reserved for future join and aggregation planning. Listener
+integration and full distributed query flows are still open.
 
 ### [ ] Phase 7: Locality and Follower Reads
 
