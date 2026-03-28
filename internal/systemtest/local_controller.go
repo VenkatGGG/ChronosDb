@@ -592,6 +592,19 @@ func (c *LocalController) SnapshotNodeLogs() map[uint64][]NodeLogEntry {
 	return out
 }
 
+// RecordNodeLog appends one explicit system-test observation to the node log.
+func (c *LocalController) RecordNodeLog(nodeID uint64, message string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	node, ok := c.nodes[nodeID]
+	if !ok {
+		return fmt.Errorf("systemtest: unknown node %d", nodeID)
+	}
+	c.appendLogLocked(node, message)
+	return nil
+}
+
 func (c *LocalController) recordNodeEvent(nodeID uint64, message string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()

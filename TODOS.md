@@ -349,6 +349,8 @@ top-level outcomes without starting that work yet.
   timestamp, deterministic `STAGING` recovery outcome, and lease/descriptor
   generation monotonicity under churn
 - [ ] 9.4 Execute a first fault matrix over the real cluster controller
+- [x] 9.4 Execute a first fault matrix over the real cluster controller
+  Status: complete via `ExecuteFaultMatrix`, which now runs the built-in Phase 8 scenario set over fresh `LocalController` instances, validates each persisted artifact bundle with the correctness assertion pack, and writes a root `fault-matrix.json` plus per-scenario artifact directories.
   covering minority partition, majority partition, crash during lease transfer,
   crash during learner snapshot catch-up, crash during `STAGING`, ambiguous
   commit response loss, and split/rebalance during concurrent traffic
