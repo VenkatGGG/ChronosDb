@@ -8,6 +8,19 @@ import (
 	"time"
 )
 
+type stubScenarioReader struct {
+	runs   []ScenarioRunView
+	detail ScenarioRunDetail
+}
+
+func (s stubScenarioReader) ListRuns() ([]ScenarioRunView, error) {
+	return append([]ScenarioRunView(nil), s.runs...), nil
+}
+
+func (s stubScenarioReader) LoadRun(string) (ScenarioRunDetail, error) {
+	return s.detail, nil
+}
+
 func TestHTTPHandlerServesMergedClusterAPI(t *testing.T) {
 	t.Parallel()
 
@@ -47,7 +60,62 @@ func TestHTTPHandlerServesMergedClusterAPI(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new aggregator: %v", err)
 	}
-	handler := NewHTTPHandler(aggregator)
+	handler := NewHTTPHandlerWithOptions(aggregator, HTTPHandlerOptions{Scenarios: stubScenarioReader{
+		runs: []ScenarioRunView{{
+			RunID:        "minority-partition",
+			ScenarioName: "minority-partition",
+			Status:       "pass",
+			StartedAt:    time.Unix(10, 0).UTC(),
+			FinishedAt:   time.Unix(11, 0).UTC(),
+			StepCount:    3,
+			NodeCount:    3,
+			NodeLogCount: 4,
+		}},
+		detail: ScenarioRunDetail{
+			Run: ScenarioRunView{
+				RunID:        "minority-partition",
+				ScenarioName: "minority-partition",
+				Status:       "pass",
+				StartedAt:    time.Unix(10, 0).UTC(),
+				FinishedAt:   time.Unix(11, 0).UTC(),
+				StepCount:    3,
+				NodeCount:    3,
+				NodeLogCount: 4,
+			},
+			Manifest: ScenarioManifest{
+				Version:  "chronosdb.systemtest.v1",
+				Scenario: "minority-partition",
+				Nodes:    []uint64{1, 2, 3},
+				Steps:    []ScenarioManifestStep{{Index: 1, Action: "wait", Duration: "10ms"}},
+			},
+			Handoff: &ScenarioHandoffBundle{
+				Version: "chronosdb.systemtest.handoff.v1",
+				Manifest: ScenarioManifest{
+					Version:  "chronosdb.systemtest.v1",
+					Scenario: "minority-partition",
+					Nodes:    []uint64{1, 2, 3},
+				},
+			},
+			Report: ScenarioRunReport{
+				ScenarioName: "minority-partition",
+				StartedAt:    time.Unix(10, 0).UTC(),
+				FinishedAt:   time.Unix(11, 0).UTC(),
+			},
+			Summary: ScenarioRunSummary{
+				Version:      "chronosdb.systemtest.artifacts.v1",
+				ScenarioName: "minority-partition",
+				Status:       "pass",
+				StartedAt:    time.Unix(10, 0).UTC(),
+				FinishedAt:   time.Unix(11, 0).UTC(),
+				StepCount:    3,
+				NodeCount:    3,
+				NodeLogCount: 4,
+			},
+			NodeLogs: map[uint64][]ScenarioNodeLogEntry{
+				1: {{Timestamp: time.Unix(10, 0).UTC(), Message: "node up"}},
+			},
+		},
+	}})
 
 	t.Run("cluster", func(t *testing.T) {
 		rec := httptest.NewRecorder()
@@ -110,6 +178,63 @@ func TestHTTPHandlerServesMergedClusterAPI(t *testing.T) {
 		}
 		if len(events) != 1 || events[0].Type != "node_started" {
 			t.Fatalf("events = %+v", events)
+		}
+	})
+
+	t.Run("locate", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/locate?key=b", nil)
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("locate status = %d", rec.Code)
+		}
+		var location KeyLocationView
+		if err := json.NewDecoder(rec.Body).Decode(&location); err != nil {
+			t.Fatalf("decode locate: %v", err)
+		}
+		if location.Range.RangeID != 11 || location.Key != "62" || location.Encoding != "utf8" {
+			t.Fatalf("location = %+v", location)
+		}
+	})
+
+	t.Run("locate bad input", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/locate?key=hex:not-hex", nil)
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("locate bad input status = %d, want %d", rec.Code, http.StatusBadRequest)
+		}
+	})
+
+	t.Run("scenario list", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/scenarios", nil)
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("scenarios status = %d", rec.Code)
+		}
+		var runs []ScenarioRunView
+		if err := json.NewDecoder(rec.Body).Decode(&runs); err != nil {
+			t.Fatalf("decode scenarios: %v", err)
+		}
+		if len(runs) != 1 || runs[0].RunID != "minority-partition" {
+			t.Fatalf("runs = %+v", runs)
+		}
+	})
+
+	t.Run("scenario detail", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/scenarios/minority-partition", nil)
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("scenario detail status = %d", rec.Code)
+		}
+		var detail ScenarioRunDetail
+		if err := json.NewDecoder(rec.Body).Decode(&detail); err != nil {
+			t.Fatalf("decode scenario detail: %v", err)
+		}
+		if detail.Run.RunID != "minority-partition" || detail.Handoff == nil {
+			t.Fatalf("detail = %+v", detail)
 		}
 	})
 }

@@ -395,7 +395,7 @@ checkbox.
   covering stale hints, GC-pause false suspicion, and disagreement with
   authoritative metadata so the feature stays non-authoritative by construction
 
-### [ ] 11. Cluster Console and Real-Time Operations UI
+### [x] 11. Cluster Console and Real-Time Operations UI
 
 Deliver:
 
@@ -416,14 +416,16 @@ Exit criteria:
   of inference
 - the UI can drill into scenario runs and retained artifacts
 
-**Status:** In progress. The frontend shell now exists as a real React/TypeScript
+**Status:** Complete. The frontend shell now exists as a real React/TypeScript
 console app with overview, nodes, ranges, and events surfaces, and
 `chronos-console` can optionally serve the built UI with SPA fallback. The
 range placement surface now also visualizes leaseholder and replica residency
-from merged range descriptors. The remaining work is now key-location drilldown
-and retained scenario browsing.
+from merged range descriptors, and the console now supports key-location lookup
+that drives the placement drilldown from the containing range. Retained
+scenario browsing is also exposed through the console API and UI, including
+manifest/report/handoff surfaces and recent node-log evidence.
 
-### [ ] Phase 11 Remaining Execution
+### [x] Phase 11 Remaining Execution
 
 - [x] 11.1 Freeze admin API contracts and typed view models for nodes, ranges, replicas, key location, cluster snapshots, and events
 - [x] 11.2 Add node-level admin read endpoints for node summary, range inventory, and recent events
@@ -431,5 +433,5 @@ and retained scenario browsing.
 - [x] 11.4 Add an SSE event stream for cluster operations and scenario activity
 - [x] 11.5 Add a frontend shell with overview, nodes, ranges, and events pages
 - [x] 11.6 Add range placement and leaseholder visualization from authoritative descriptors
-- [ ] 11.7 Add key-location lookup and placement drilldown
-- [ ] 11.8 Add scenario/artifact browsing for retained fault runs
+- [x] 11.7 Add key-location lookup and placement drilldown
+- [x] 11.8 Add scenario/artifact browsing for retained fault runs

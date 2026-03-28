@@ -48,3 +48,96 @@ export interface ClusterSnapshot {
   ranges: RangeView[];
   events?: ClusterEvent[];
 }
+
+export interface KeyLocationView {
+  key: string;
+  encoding?: string;
+  range: RangeView;
+}
+
+export interface ManifestStep {
+  index: number;
+  action: string;
+  partition_left?: number[];
+  partition_right?: number[];
+  node_id?: number;
+  duration?: string;
+  gateway_node_id?: number;
+  txn_label?: string;
+  ack_delay?: string;
+  drop_response?: boolean;
+}
+
+export interface Manifest {
+  version: string;
+  scenario: string;
+  nodes: number[];
+  steps: ManifestStep[];
+}
+
+export interface HandoffOperation {
+  action: string;
+  external_operation: string;
+  description: string;
+}
+
+export interface HandoffBundle {
+  version: string;
+  manifest: Manifest;
+  operations: HandoffOperation[];
+}
+
+export interface StepReport {
+  index: number;
+  action: string;
+  started_at: string;
+  finished_at: string;
+  error?: string;
+}
+
+export interface RunReport {
+  scenario_name: string;
+  started_at: string;
+  finished_at: string;
+  steps: StepReport[];
+}
+
+export interface RunArtifactSummary {
+  version: string;
+  scenario_name: string;
+  status: string;
+  started_at: string;
+  finished_at: string;
+  step_count: number;
+  failed_step?: number;
+  failure?: string;
+  node_count: number;
+  node_log_count: number;
+}
+
+export interface NodeLogEntry {
+  timestamp: string;
+  message: string;
+}
+
+export interface ScenarioRunView {
+  run_id: string;
+  scenario_name: string;
+  status: string;
+  started_at: string;
+  finished_at: string;
+  step_count: number;
+  failed_step?: number;
+  failure?: string;
+  node_count: number;
+  node_log_count: number;
+}
+
+export interface ScenarioRunDetail {
+  run: ScenarioRunView;
+  manifest: Manifest;
+  handoff?: HandoffBundle;
+  report: RunReport;
+  summary: RunArtifactSummary;
+  node_logs: Record<string, NodeLogEntry[]>;
+}

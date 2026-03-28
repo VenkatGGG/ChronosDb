@@ -1,6 +1,7 @@
 package adminapi
 
 import (
+	"bytes"
 	"crypto/sha1"
 	"encoding/hex"
 	"encoding/json"
@@ -68,10 +69,114 @@ type ClusterSnapshot struct {
 	Events      []ClusterEvent `json:"events,omitempty"`
 }
 
+// ScenarioManifest is the console-facing export of a retained chaos manifest.
+type ScenarioManifest struct {
+	Version  string                 `json:"version"`
+	Scenario string                 `json:"scenario"`
+	Nodes    []uint64               `json:"nodes"`
+	Steps    []ScenarioManifestStep `json:"steps"`
+}
+
+// ScenarioManifestStep is the console-facing form of one retained scenario step.
+type ScenarioManifestStep struct {
+	Index          int      `json:"index"`
+	Action         string   `json:"action"`
+	PartitionLeft  []uint64 `json:"partition_left,omitempty"`
+	PartitionRight []uint64 `json:"partition_right,omitempty"`
+	NodeID         uint64   `json:"node_id,omitempty"`
+	Duration       string   `json:"duration,omitempty"`
+	GatewayNodeID  uint64   `json:"gateway_node_id,omitempty"`
+	TxnLabel       string   `json:"txn_label,omitempty"`
+	AckDelay       string   `json:"ack_delay,omitempty"`
+	DropResponse   bool     `json:"drop_response,omitempty"`
+}
+
+// ScenarioHandoffOperation is the console-facing form of one external handoff mapping.
+type ScenarioHandoffOperation struct {
+	Action            string `json:"action"`
+	ExternalOperation string `json:"external_operation"`
+	Description       string `json:"description"`
+}
+
+// ScenarioHandoffBundle is the console-facing handoff contract for one retained run.
+type ScenarioHandoffBundle struct {
+	Version    string                     `json:"version"`
+	Manifest   ScenarioManifest           `json:"manifest"`
+	Operations []ScenarioHandoffOperation `json:"operations"`
+}
+
+// ScenarioStepReport is the console-facing form of one executed scenario step.
+type ScenarioStepReport struct {
+	Index      int       `json:"index"`
+	Action     string    `json:"action"`
+	StartedAt  time.Time `json:"started_at"`
+	FinishedAt time.Time `json:"finished_at"`
+	Error      string    `json:"error,omitempty"`
+}
+
+// ScenarioRunReport is the console-facing retained execution report.
+type ScenarioRunReport struct {
+	ScenarioName string               `json:"scenario_name"`
+	StartedAt    time.Time            `json:"started_at"`
+	FinishedAt   time.Time            `json:"finished_at"`
+	Steps        []ScenarioStepReport `json:"steps"`
+}
+
+// ScenarioNodeLogEntry is one retained node log entry for a scenario run.
+type ScenarioNodeLogEntry struct {
+	Timestamp time.Time `json:"timestamp"`
+	Message   string    `json:"message"`
+}
+
+// ScenarioRunSummary is the console-facing pass/fail synopsis for one retained run.
+type ScenarioRunSummary struct {
+	Version      string    `json:"version"`
+	ScenarioName string    `json:"scenario_name"`
+	Status       string    `json:"status"`
+	StartedAt    time.Time `json:"started_at"`
+	FinishedAt   time.Time `json:"finished_at"`
+	StepCount    int       `json:"step_count"`
+	FailedStep   int       `json:"failed_step,omitempty"`
+	Failure      string    `json:"failure,omitempty"`
+	NodeCount    int       `json:"node_count"`
+	NodeLogCount int       `json:"node_log_count"`
+}
+
+// ScenarioRunView is the console-facing summary for one retained scenario run.
+type ScenarioRunView struct {
+	RunID        string    `json:"run_id"`
+	ScenarioName string    `json:"scenario_name"`
+	Status       string    `json:"status"`
+	StartedAt    time.Time `json:"started_at"`
+	FinishedAt   time.Time `json:"finished_at"`
+	StepCount    int       `json:"step_count"`
+	FailedStep   int       `json:"failed_step,omitempty"`
+	Failure      string    `json:"failure,omitempty"`
+	NodeCount    int       `json:"node_count"`
+	NodeLogCount int       `json:"node_log_count"`
+}
+
+// ScenarioRunDetail is the console-facing detail surface for one retained run.
+type ScenarioRunDetail struct {
+	Run      ScenarioRunView                   `json:"run"`
+	Manifest ScenarioManifest                  `json:"manifest"`
+	Handoff  *ScenarioHandoffBundle            `json:"handoff,omitempty"`
+	Report   ScenarioRunReport                 `json:"report"`
+	Summary  ScenarioRunSummary                `json:"summary"`
+	NodeLogs map[uint64][]ScenarioNodeLogEntry `json:"node_logs"`
+}
+
+// ScenarioReader exposes retained scenario summaries and detail bundles to the console API.
+type ScenarioReader interface {
+	ListRuns() ([]ScenarioRunView, error)
+	LoadRun(runID string) (ScenarioRunDetail, error)
+}
+
 // KeyLocationView is the authoritative lookup result for one logical key.
 type KeyLocationView struct {
-	Key   string    `json:"key"`
-	Range RangeView `json:"range"`
+	Key      string    `json:"key"`
+	Encoding string    `json:"encoding,omitempty"`
+	Range    RangeView `json:"range"`
 }
 
 // RangeViewFromDescriptor converts a meta descriptor into an API-safe range view.
@@ -129,6 +234,31 @@ func encodeKey(key []byte) string {
 		return ""
 	}
 	return hex.EncodeToString(key)
+}
+
+func decodeKey(raw string) ([]byte, error) {
+	if raw == "" {
+		return nil, nil
+	}
+	return hex.DecodeString(raw)
+}
+
+func rangeContainsKey(view RangeView, key []byte) (bool, error) {
+	startKey, err := decodeKey(view.StartKey)
+	if err != nil {
+		return false, fmt.Errorf("adminapi: decode start key for range %d: %w", view.RangeID, err)
+	}
+	if bytes.Compare(key, startKey) < 0 {
+		return false, nil
+	}
+	if view.EndKey == "" {
+		return true, nil
+	}
+	endKey, err := decodeKey(view.EndKey)
+	if err != nil {
+		return false, fmt.Errorf("adminapi: decode end key for range %d: %w", view.RangeID, err)
+	}
+	return bytes.Compare(key, endKey) < 0, nil
 }
 
 func eventID(event ClusterEvent) string {

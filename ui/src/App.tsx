@@ -1,8 +1,17 @@
-import { useDeferredValue, useState } from "react";
+import { startTransition, useDeferredValue, useEffect, useEffectEvent, useState } from "react";
 import { BrowserRouter, NavLink, Navigate, Route, Routes } from "react-router-dom";
+import { fetchKeyLocation, fetchScenarioRun, fetchScenarioRuns } from "./lib/api";
 import { useClusterSnapshot } from "./hooks/useClusterSnapshot";
 import { useEventStream } from "./hooks/useEventStream";
-import type { ClusterEvent, ClusterSnapshot, NodeView, RangeView } from "./types";
+import type {
+  ClusterEvent,
+  ClusterSnapshot,
+  KeyLocationView,
+  NodeView,
+  RangeView,
+  ScenarioRunDetail,
+  ScenarioRunView,
+} from "./types";
 
 const snapshotRefreshMs = 2500;
 
@@ -29,6 +38,7 @@ export function App() {
             <NavItem to="/nodes" label="Nodes" subtitle="Health and residency" />
             <NavItem to="/ranges" label="Ranges" subtitle="Descriptors and placement" />
             <NavItem to="/events" label="Events" subtitle="Live operations stream" />
+            <NavItem to="/scenarios" label="Scenarios" subtitle="Retained chaos runs" />
           </nav>
           <div className="rail-footer">
             <StatusPill
@@ -87,6 +97,7 @@ export function App() {
             <Route path="/nodes" element={<NodesPage nodes={snapshot?.nodes ?? []} />} />
             <Route path="/ranges" element={<RangesPage nodes={snapshot?.nodes ?? []} ranges={snapshot?.ranges ?? []} />} />
             <Route path="/events" element={<EventsPage events={streamState.events} />} />
+            <Route path="/scenarios" element={<ScenariosPage />} />
             <Route path="*" element={<Navigate to="/overview" replace />} />
           </Routes>
         </main>
@@ -245,6 +256,10 @@ function NodesPage(props: { nodes: NodeView[] }) {
 function RangesPage(props: { nodes: NodeView[]; ranges: RangeView[] }) {
   const [filter, setFilter] = useState("");
   const [selectedRangeID, setSelectedRangeID] = useState<number | null>(null);
+  const [lookupKey, setLookupKey] = useState("");
+  const [lookupResult, setLookupResult] = useState<KeyLocationView | null>(null);
+  const [lookupError, setLookupError] = useState<string | null>(null);
+  const [lookupLoading, setLookupLoading] = useState(false);
   const deferredFilter = useDeferredValue(filter.trim().toLowerCase());
   const filtered = props.ranges.filter((range) => matchesRange(range, deferredFilter));
   const selectedRange = filtered.find((range) => range.range_id === selectedRangeID) ?? filtered[0] ?? null;
@@ -335,6 +350,61 @@ function RangesPage(props: { nodes: NodeView[]; ranges: RangeView[] }) {
                 />
               ) : null}
             </div>
+            <form
+              className="lookup-form"
+              onSubmit={(event) => {
+                event.preventDefault();
+                if (!lookupKey.trim()) {
+                  startTransition(() => {
+                    setLookupError("Enter a key to locate.");
+                    setLookupResult(null);
+                  });
+                  return;
+                }
+                setLookupLoading(true);
+                void fetchKeyLocation(lookupKey.trim())
+                  .then((location) => {
+                    startTransition(() => {
+                      setLookupLoading(false);
+                      setLookupError(null);
+                      setLookupResult(location);
+                      setFilter("");
+                      setSelectedRangeID(location.range.range_id);
+                    });
+                  })
+                  .catch((error) => {
+                    const message = error instanceof Error ? error.message : "key lookup failed";
+                    startTransition(() => {
+                      setLookupLoading(false);
+                      setLookupResult(null);
+                      setLookupError(message);
+                    });
+                  });
+              }}
+            >
+              <label className="filter-box lookup-form-field">
+                <span>Locate key</span>
+                <div className="lookup-form-row">
+                  <input
+                    aria-label="Locate logical key"
+                    onChange={(event) => setLookupKey(event.target.value)}
+                    placeholder="customer/42 or hex:637573746f6d65722f3432"
+                    value={lookupKey}
+                  />
+                  <button className="refresh-button" disabled={lookupLoading} type="submit">
+                    {lookupLoading ? "Locating…" : "Locate"}
+                  </button>
+                </div>
+              </label>
+              {lookupError ? <p className="lookup-error">{lookupError}</p> : null}
+              {lookupResult ? (
+                <p className="lookup-result">
+                  key <span className="subtle-mono">{lookupResult.key}</span> resolved via{" "}
+                  <strong>{lookupResult.encoding ?? "unknown"}</strong> into range{" "}
+                  <strong>{lookupResult.range.range_id}</strong>
+                </p>
+              ) : null}
+            </form>
             {!selectedRange ? <EmptyState label="Choose a range to inspect placement." /> : null}
             {selectedRange ? (
               <div className="placement-detail-stack">
@@ -356,6 +426,10 @@ function RangesPage(props: { nodes: NodeView[]; ranges: RangeView[] }) {
                   <div>
                     <dt>regions</dt>
                     <dd>{selectedRange.preferred_regions?.join(", ") || "none declared"}</dd>
+                  </div>
+                  <div>
+                    <dt>lookup</dt>
+                    <dd>{lookupResult?.range.range_id === selectedRange.range_id ? "selected by key lookup" : "manual selection"}</dd>
                   </div>
                 </dl>
 
@@ -426,6 +500,192 @@ function EventsPage(props: { events: ClusterEvent[] }) {
           {filtered.map((event) => (
             <EventRow event={event} key={event.id ?? `${event.timestamp}-${event.type}-${event.message}`} />
           ))}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function ScenariosPage() {
+  const [runs, setRuns] = useState<ScenarioRunView[]>([]);
+  const [selectedRunID, setSelectedRunID] = useState<string | null>(null);
+  const [detail, setDetail] = useState<ScenarioRunDetail | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const loadRuns = useEffectEvent(async () => {
+    setLoading(true);
+    try {
+      const nextRuns = await fetchScenarioRuns();
+      startTransition(() => {
+        setRuns(nextRuns);
+        setSelectedRunID((current) => current ?? nextRuns[0]?.run_id ?? null);
+        setError(null);
+        setLoading(false);
+      });
+    } catch (loadError) {
+      const message = loadError instanceof Error ? loadError.message : "failed to load scenario runs";
+      startTransition(() => {
+        setError(message);
+        setLoading(false);
+      });
+    }
+  });
+
+  const loadDetail = useEffectEvent(async (runID: string) => {
+    try {
+      const nextDetail = await fetchScenarioRun(runID);
+      startTransition(() => {
+        setDetail(nextDetail);
+        setError(null);
+      });
+    } catch (loadError) {
+      const message = loadError instanceof Error ? loadError.message : "failed to load scenario detail";
+      startTransition(() => {
+        setDetail(null);
+        setError(message);
+      });
+    }
+  });
+
+  useEffect(() => {
+    void loadRuns();
+  }, []);
+
+  useEffect(() => {
+    if (!selectedRunID) {
+      setDetail(null);
+      return;
+    }
+    void loadDetail(selectedRunID);
+  }, [selectedRunID]);
+
+  return (
+    <section className="page-grid">
+      <div className="scenario-layout">
+        <div className="panel">
+          <div className="panel-header">
+            <div>
+              <p className="eyebrow">Scenarios</p>
+              <h3>Retained fault campaigns</h3>
+            </div>
+            <button className="refresh-button" type="button" onClick={() => void loadRuns()}>
+              Refresh runs
+            </button>
+          </div>
+          {loading ? <EmptyState label="Loading retained scenario runs…" /> : null}
+          {!loading && error ? <p className="lookup-error">{error}</p> : null}
+          {!loading && runs.length === 0 && !error ? <EmptyState label="No retained scenario artifacts configured." /> : null}
+          <div className="scenario-list">
+            {runs.map((run) => (
+              <button
+                className={`scenario-list-item${run.run_id === selectedRunID ? " scenario-list-item-active" : ""}`}
+                key={run.run_id}
+                onClick={() => setSelectedRunID(run.run_id)}
+                type="button"
+              >
+                <div className="scenario-list-header">
+                  <strong>{run.scenario_name}</strong>
+                  <StatusPill tone={run.status === "pass" ? "good" : "bad"} label={run.status} />
+                </div>
+                <p>{formatInstant(run.finished_at)}</p>
+                <span>
+                  {run.step_count} steps, {run.node_log_count} node logs
+                </span>
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="panel">
+          <div className="panel-header">
+            <div>
+              <p className="eyebrow">Artifacts</p>
+              <h3>Manifest, report, and node evidence</h3>
+            </div>
+            {detail ? <StatusPill tone={detail.run.status === "pass" ? "good" : "bad"} label={detail.run.run_id} /> : null}
+          </div>
+          {!detail ? <EmptyState label="Choose a retained run to inspect its artifacts." /> : null}
+          {detail ? (
+            <div className="scenario-detail-stack">
+              <dl className="metric-list">
+                <div>
+                  <dt>status</dt>
+                  <dd>{detail.summary.status}</dd>
+                </div>
+                <div>
+                  <dt>steps</dt>
+                  <dd>{detail.summary.step_count}</dd>
+                </div>
+                <div>
+                  <dt>nodes</dt>
+                  <dd>{detail.summary.node_count}</dd>
+                </div>
+                <div>
+                  <dt>finished</dt>
+                  <dd>{formatInstant(detail.summary.finished_at)}</dd>
+                </div>
+              </dl>
+
+              {detail.summary.failure ? <p className="lookup-error">{detail.summary.failure}</p> : null}
+
+              <div className="detail-section">
+                <h4>Manifest steps</h4>
+                <div className="event-stack">
+                  {detail.manifest.steps.map((step) => (
+                    <article className="event-row" key={`${detail.run.run_id}-${step.index}`}>
+                      <div className="event-row-header">
+                        <div>
+                          <p className="event-type">
+                            step {step.index}: {step.action}
+                          </p>
+                          <p className="event-copy">
+                            {step.duration ? `duration ${step.duration}` : "fault action"}
+                          </p>
+                        </div>
+                      </div>
+                    </article>
+                  ))}
+                </div>
+              </div>
+
+              <div className="detail-section">
+                <h4>Node logs</h4>
+                <div className="event-stack">
+                  {Object.entries(detail.node_logs).map(([nodeID, entries]) => (
+                    <article className="event-row" key={nodeID}>
+                      <div className="event-row-header">
+                        <div>
+                          <p className="event-type">node {nodeID}</p>
+                          <p className="event-copy">{entries.length} retained entries</p>
+                        </div>
+                      </div>
+                      <div className="field-chip-row">
+                        {entries.slice(-4).map((entry) => (
+                          <span className="field-chip" key={`${nodeID}-${entry.timestamp}-${entry.message}`}>
+                            {formatInstant(entry.timestamp)} {entry.message}
+                          </span>
+                        ))}
+                      </div>
+                    </article>
+                  ))}
+                </div>
+              </div>
+
+              {detail.handoff ? (
+                <div className="detail-section">
+                  <h4>External handoff</h4>
+                  <div className="field-chip-row">
+                    {detail.handoff.operations.map((operation) => (
+                      <span className="field-chip" key={operation.action}>
+                        {operation.action} → {operation.external_operation}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+            </div>
+          ) : null}
         </div>
       </div>
     </section>

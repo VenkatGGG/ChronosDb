@@ -22,6 +22,7 @@ func main() {
 	streamPollInterval := flag.Duration("event-poll-interval", time.Second, "cluster event polling interval")
 	streamReplayLimit := flag.Int("event-replay-limit", 256, "recent events retained for SSE replay")
 	uiDir := flag.String("ui-dir", "", "optional built UI directory to serve alongside the console API")
+	artifactRoot := flag.String("artifact-root", "", "optional retained chaos artifact root to expose via the console API")
 	flag.Parse()
 
 	rawTargets := splitAndTrim(*nodeURLs)
@@ -48,9 +49,17 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	var scenarios *scenarioStore
+	if *artifactRoot != "" {
+		scenarios, err = newScenarioStore(*artifactRoot)
+		if err != nil {
+			log.Fatal(err)
+		}
+	}
 
 	apiHandler := adminapi.NewHTTPHandlerWithOptions(aggregator, adminapi.HTTPHandlerOptions{
-		Stream: stream,
+		Stream:    stream,
+		Scenarios: scenarios,
 	})
 	handler, err := buildHandler(apiHandler, *uiDir)
 	if err != nil {

@@ -1,8 +1,11 @@
 package adminapi
 
 import (
+	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -11,6 +14,9 @@ import (
 	"sync"
 	"time"
 )
+
+// ErrKeyNotLocated reports that no merged range descriptor spans the requested key.
+var ErrKeyNotLocated = errors.New("key not located")
 
 // NodeTarget identifies one node admin endpoint for snapshot polling.
 type NodeTarget struct {
@@ -131,6 +137,32 @@ func (a *Aggregator) Snapshot(ctx context.Context) (ClusterSnapshot, error) {
 	return merged, nil
 }
 
+// LocateKey resolves a logical key to the merged containing range descriptor.
+func (a *Aggregator) LocateKey(ctx context.Context, raw string) (KeyLocationView, error) {
+	key, encoding, err := parseLookupKey(raw)
+	if err != nil {
+		return KeyLocationView{}, err
+	}
+	snapshot, err := a.Snapshot(ctx)
+	if err != nil {
+		return KeyLocationView{}, err
+	}
+	for _, view := range snapshot.Ranges {
+		match, err := rangeContainsKey(view, key)
+		if err != nil {
+			return KeyLocationView{}, err
+		}
+		if match {
+			return KeyLocationView{
+				Key:      hex.EncodeToString(key),
+				Encoding: encoding,
+				Range:    view,
+			}, nil
+		}
+	}
+	return KeyLocationView{}, ErrKeyNotLocated
+}
+
 func (a *Aggregator) fetchSnapshot(ctx context.Context, target NodeTarget) (ClusterSnapshot, error) {
 	path := target.BaseURL + "/admin/snapshot"
 	if a.eventLimitPerNode > 0 {
@@ -219,4 +251,18 @@ func cloneRangeView(view RangeView) RangeView {
 	copyView.PreferredRegions = append([]string(nil), view.PreferredRegions...)
 	copyView.LeasePreferences = append([]string(nil), view.LeasePreferences...)
 	return copyView
+}
+
+func parseLookupKey(raw string) ([]byte, string, error) {
+	if raw == "" {
+		return nil, "", fmt.Errorf("adminapi: lookup key must not be empty")
+	}
+	if strings.HasPrefix(raw, "hex:") {
+		key, err := hex.DecodeString(strings.TrimPrefix(raw, "hex:"))
+		if err != nil {
+			return nil, "", fmt.Errorf("adminapi: invalid hex lookup key: %w", err)
+		}
+		return key, "hex", nil
+	}
+	return bytes.Clone([]byte(raw)), "utf8", nil
 }
