@@ -338,6 +338,8 @@ top-level outcomes without starting that work yet.
   so manifests and built-in scenarios can run against an actual multi-process
   ChronosDB cluster instead of only a recording stub
 - [ ] 9.2 Add a persistent run artifact format for chaos runs
+- [x] 9.2 Add a persistent run artifact format for chaos runs
+  Status: complete via `RunArtifacts`, which now persists `manifest.json`, `report.json`, `summary.json`, and per-node `node-logs/node-<id>.json` files, with `LocalController` exposing structured node-event logs for bundle export.
   including scenario manifest, structured runner report, per-node logs, and a
   final pass/fail summary that can be attached to CI or retained for manual review
 - [ ] 9.3 Define and implement assertion packs for external correctness checks

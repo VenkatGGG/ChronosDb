@@ -43,12 +43,14 @@ type localNode struct {
 	handler      *faultInjectingHandler
 	partitionSet map[uint64]struct{}
 	lastError    string
+	logs         []NodeLogEntry
 }
 
 type faultInjectingHandler struct {
 	mu       sync.Mutex
 	delegate pgwire.QueryHandler
 	fault    *AmbiguousCommitSpec
+	record   func(string)
 }
 
 type terminateSessionError struct {
@@ -157,6 +159,7 @@ func (c *LocalController) Partition(_ context.Context, spec PartitionSpec) error
 		for _, right := range spec.Right {
 			node.partitionSet[right] = struct{}{}
 		}
+		c.appendLogLocked(node, "partition applied against nodes "+formatNodeSlice(spec.Right))
 	}
 	for _, right := range spec.Right {
 		node := c.nodes[right]
@@ -166,6 +169,7 @@ func (c *LocalController) Partition(_ context.Context, spec PartitionSpec) error
 		for _, left := range spec.Left {
 			node.partitionSet[left] = struct{}{}
 		}
+		c.appendLogLocked(node, "partition applied against nodes "+formatNodeSlice(spec.Left))
 	}
 	return nil
 }
@@ -176,6 +180,9 @@ func (c *LocalController) Heal(context.Context) error {
 	defer c.mu.Unlock()
 
 	for _, node := range c.nodes {
+		if len(node.partitionSet) > 0 {
+			c.appendLogLocked(node, "partition healed")
+		}
 		clear(node.partitionSet)
 	}
 	return nil
@@ -192,6 +199,7 @@ func (c *LocalController) CrashNode(_ context.Context, nodeID uint64) error {
 	if !node.running {
 		return fmt.Errorf("systemtest: node %d is already crashed", nodeID)
 	}
+	c.recordNodeEvent(nodeID, "crash requested")
 	return c.stopNode(node)
 }
 
@@ -221,6 +229,7 @@ func (c *LocalController) InjectAmbiguousCommit(_ context.Context, spec Ambiguou
 		return fmt.Errorf("systemtest: gateway node %d is not running", spec.GatewayNodeID)
 	}
 	node.handler.Install(spec)
+	c.recordNodeEvent(spec.GatewayNodeID, fmt.Sprintf("ambiguous commit fault armed for label %q", spec.TxnLabel))
 	return nil
 }
 
@@ -264,6 +273,9 @@ func (c *LocalController) startNode(nodeID uint64) error {
 			chronossql.NewPlanner(chronossql.NewParser(), c.catalog),
 			chronossql.NewFlowPlanner(),
 		),
+		record: func(message string) {
+			c.recordNodeEvent(nodeID, message)
+		},
 	}
 	metrics := observability.NewMetrics()
 	nodeCtx, cancel := context.WithCancel(context.Background())
@@ -285,6 +297,7 @@ func (c *LocalController) startNode(nodeID uint64) error {
 	node.obsURL = "http://" + obsListener.Addr().String()
 	node.running = true
 	node.lastError = ""
+	c.appendLogLocked(node, fmt.Sprintf("node started pgwire=%s observability=%s", node.pgAddr, node.obsURL))
 
 	go c.servePG(nodeCtx, nodeID, handler, pgListener)
 	go c.serveObservability(nodeCtx, nodeID, obsServer, obsListener)
@@ -301,6 +314,7 @@ func (c *LocalController) stopNode(node *localNode) error {
 		c.mu.Unlock()
 		return nil
 	}
+	c.appendLogLocked(node, "node stopping")
 	node.running = false
 	cancel := node.cancel
 	pgListener := node.pgListener
@@ -365,6 +379,7 @@ func (c *LocalController) recordServeError(nodeID uint64, component string, err 
 		return
 	}
 	node.lastError = fmt.Sprintf("%s: %v", component, err)
+	c.appendLogLocked(node, "serve error "+node.lastError)
 }
 
 func (c *LocalController) probe(nodeID uint64) observability.Probe {
@@ -434,6 +449,9 @@ func (c *LocalController) validatePartitionNodes(spec PartitionSpec) error {
 func (h *faultInjectingHandler) HandleSimpleQuery(ctx context.Context, query string) (pgwire.QueryResult, error) {
 	spec, match := h.matchingFault(query)
 	if match {
+		if h.record != nil {
+			h.record(fmt.Sprintf("ambiguous commit fault triggered for label %q", spec.TxnLabel))
+		}
 		timer := time.NewTimer(spec.AckDelay)
 		defer timer.Stop()
 		select {
@@ -442,6 +460,9 @@ func (h *faultInjectingHandler) HandleSimpleQuery(ctx context.Context, query str
 		case <-timer.C:
 		}
 		if spec.DropResponse {
+			if h.record != nil {
+				h.record(fmt.Sprintf("ambiguous commit response dropped for label %q", spec.TxnLabel))
+			}
 			return pgwire.QueryResult{}, terminateSessionError{
 				message: fmt.Sprintf("systemtest: dropped response for %q", spec.TxnLabel),
 			}
@@ -549,4 +570,42 @@ func formatNodeSet(nodes map[uint64]struct{}) string {
 		parts = append(parts, fmt.Sprintf("%d", nodeID))
 	}
 	return "[" + strings.Join(parts, " ") + "]"
+}
+
+func formatNodeSlice(nodes []uint64) string {
+	set := make(map[uint64]struct{}, len(nodes))
+	for _, nodeID := range nodes {
+		set[nodeID] = struct{}{}
+	}
+	return formatNodeSet(set)
+}
+
+// SnapshotNodeLogs returns a deep copy of the per-node event log stream.
+func (c *LocalController) SnapshotNodeLogs() map[uint64][]NodeLogEntry {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	out := make(map[uint64][]NodeLogEntry, len(c.nodes))
+	for nodeID, node := range c.nodes {
+		out[nodeID] = append([]NodeLogEntry(nil), node.logs...)
+	}
+	return out
+}
+
+func (c *LocalController) recordNodeEvent(nodeID uint64, message string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	node, ok := c.nodes[nodeID]
+	if !ok {
+		return
+	}
+	c.appendLogLocked(node, message)
+}
+
+func (c *LocalController) appendLogLocked(node *localNode, message string) {
+	node.logs = append(node.logs, NodeLogEntry{
+		Timestamp: time.Now().UTC(),
+		Message:   message,
+	})
 }
