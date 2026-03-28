@@ -13,31 +13,42 @@ import (
 
 // Planner performs parser-backed SQL binding and logical-to-KV mapping.
 type Planner struct {
-	parser  *Parser
-	catalog *Catalog
+	parser    *Parser
+	catalog   *Catalog
+	optimizer *Optimizer
 }
 
 // NewPlanner constructs a planner backed by the parser and catalog.
 func NewPlanner(parser *Parser, catalog *Catalog) *Planner {
 	return &Planner{
-		parser:  parser,
-		catalog: catalog,
+		parser:    parser,
+		catalog:   catalog,
+		optimizer: NewOptimizer(),
 	}
 }
 
 // Plan parses, binds, and maps one SQL statement onto the KV substrate.
 func (p *Planner) Plan(query string) (Plan, error) {
-	stmt, err := p.parser.Parse(query)
+	optimized, err := p.Optimize(query)
 	if err != nil {
 		return nil, err
 	}
+	return optimized.Selected.Plan, nil
+}
+
+// Optimize parses, binds, and cost-ranks one SQL statement.
+func (p *Planner) Optimize(query string) (OptimizedPlan, error) {
+	stmt, err := p.parser.Parse(query)
+	if err != nil {
+		return OptimizedPlan{}, err
+	}
 	switch typed := stmt.(type) {
 	case *vsqlparser.Select:
-		return p.planSelect(typed)
+		return p.optimizeSelect(typed)
 	case *vsqlparser.Insert:
-		return p.planInsert(typed)
+		return p.optimizeInsert(typed)
 	default:
-		return nil, fmt.Errorf("sql planner: unsupported statement type %T", stmt)
+		return OptimizedPlan{}, fmt.Errorf("sql planner: unsupported statement type %T", stmt)
 	}
 }
 
@@ -93,57 +104,62 @@ type Value struct {
 	Bytes  []byte
 }
 
-func (p *Planner) planSelect(stmt *vsqlparser.Select) (Plan, error) {
+func (p *Planner) optimizeSelect(stmt *vsqlparser.Select) (OptimizedPlan, error) {
 	if stmt.Distinct || stmt.GroupBy != nil || stmt.Having != nil || stmt.Limit != nil || len(stmt.OrderBy) > 0 {
-		return nil, fmt.Errorf("sql planner: unsupported SELECT shape")
+		return OptimizedPlan{}, fmt.Errorf("sql planner: unsupported SELECT shape")
 	}
 	table, err := p.resolveSingleTable(stmt.From)
 	if err != nil {
-		return nil, err
+		return OptimizedPlan{}, err
 	}
 	projection, err := bindProjection(table, stmt.SelectExprs)
 	if err != nil {
-		return nil, err
+		return OptimizedPlan{}, err
 	}
 	predicate, err := bindPrimaryKeyPredicate(table, stmt.Where)
 	if err != nil {
-		return nil, err
+		return OptimizedPlan{}, err
 	}
-	return planSelectKV(table, projection, predicate)
+	candidates, err := makeSelectCandidates(p.optimizer, table, projection, predicate)
+	if err != nil {
+		return OptimizedPlan{}, err
+	}
+	return p.optimizer.Choose(candidates)
 }
 
-func (p *Planner) planInsert(stmt *vsqlparser.Insert) (Plan, error) {
+func (p *Planner) optimizeInsert(stmt *vsqlparser.Insert) (OptimizedPlan, error) {
 	if stmt.Ignore || len(stmt.OnDup) > 0 || stmt.Rows == nil {
-		return nil, fmt.Errorf("sql planner: unsupported INSERT shape")
+		return OptimizedPlan{}, fmt.Errorf("sql planner: unsupported INSERT shape")
 	}
 	tableName, err := stmt.Table.TableName()
 	if err != nil {
-		return nil, err
+		return OptimizedPlan{}, err
 	}
 	table, err := p.catalog.ResolveTable(tableName.Name.String())
 	if err != nil {
-		return nil, err
+		return OptimizedPlan{}, err
 	}
 	values, ok := stmt.Rows.(vsqlparser.Values)
 	if !ok {
-		return nil, fmt.Errorf("sql planner: only VALUES inserts are supported")
+		return OptimizedPlan{}, fmt.Errorf("sql planner: only VALUES inserts are supported")
 	}
 	if len(values) != 1 {
-		return nil, fmt.Errorf("sql planner: only single-row inserts are supported")
+		return OptimizedPlan{}, fmt.Errorf("sql planner: only single-row inserts are supported")
 	}
 	row, err := bindInsertRow(table, stmt.Columns, values[0])
 	if err != nil {
-		return nil, err
+		return OptimizedPlan{}, err
 	}
 	key, value, err := encodeInsert(table, row)
 	if err != nil {
-		return nil, err
+		return OptimizedPlan{}, err
 	}
-	return InsertPlan{
+	plan := InsertPlan{
 		Table: table,
 		Key:   key,
 		Value: value,
-	}, nil
+	}
+	return p.optimizer.Choose([]PlanCandidate{makeInsertCandidate(p.optimizer, table, plan)})
 }
 
 func (p *Planner) resolveSingleTable(from []vsqlparser.TableExpr) (TableDescriptor, error) {
@@ -311,50 +327,6 @@ func bindInsertRow(table TableDescriptor, columns vsqlparser.Columns, tuple vsql
 		return nil, fmt.Errorf("sql planner: primary key column %q is required", pkColumn.Name)
 	}
 	return row, nil
-}
-
-func planSelectKV(table TableDescriptor, projection []ColumnDescriptor, predicate boundPredicate) (Plan, error) {
-	prefix := storage.GlobalTablePrimaryPrefix(table.ID)
-	if predicate.equality != nil {
-		encoded, err := encodePrimaryKeyValue(*predicate.equality)
-		if err != nil {
-			return nil, err
-		}
-		return PointLookupPlan{
-			Table:      table,
-			Projection: projection,
-			Key:        storage.GlobalTablePrimaryKey(table.ID, encoded),
-		}, nil
-	}
-
-	startKey := prefix
-	endKey := storage.PrefixEnd(prefix)
-	startInclusive := true
-	endInclusive := false
-	if predicate.lower != nil {
-		encoded, err := encodePrimaryKeyValue(predicate.lower.value)
-		if err != nil {
-			return nil, err
-		}
-		startKey = storage.GlobalTablePrimaryKey(table.ID, encoded)
-		startInclusive = predicate.lower.inclusive
-	}
-	if predicate.upper != nil {
-		encoded, err := encodePrimaryKeyValue(predicate.upper.value)
-		if err != nil {
-			return nil, err
-		}
-		endKey = storage.GlobalTablePrimaryKey(table.ID, encoded)
-		endInclusive = predicate.upper.inclusive
-	}
-	return RangeScanPlan{
-		Table:          table,
-		Projection:     projection,
-		StartKey:       startKey,
-		EndKey:         endKey,
-		StartInclusive: startInclusive,
-		EndInclusive:   endInclusive,
-	}, nil
 }
 
 func encodeInsert(table TableDescriptor, row map[string]Value) ([]byte, []byte, error) {

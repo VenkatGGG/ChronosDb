@@ -178,7 +178,7 @@ Deliver:
 - [x] parser integration
 - [x] catalog descriptors
 - [x] binder and semantic analysis
-- cost-based planning skeleton
+- [x] cost-based planning skeleton
 - [x] logical-to-KV mapping
 - distributed flow planning for scans, joins, and aggregations
 
@@ -187,10 +187,11 @@ Exit criteria:
 - SQL uses the existing KV/routing/txn substrate
 - SQL layers do not bypass protocol contracts
 
-**Status:** In progress. The first SQL front-door slice now has parser-backed
-planning for simple single-table `SELECT` and `INSERT`, catalog descriptors,
-binding/semantic validation, and primary-key KV mapping. PostgreSQL wire
-protocol, cost-based planning, and distributed query flows are still open.
+**Status:** In progress. The SQL front-door now has parser-backed planning for
+simple single-table `SELECT` and `INSERT`, catalog descriptors,
+binding/semantic validation, primary-key KV mapping, and an explicit
+cost-based planning skeleton with candidate ranking over physical KV access
+paths. PostgreSQL wire protocol and distributed query flows are still open.
 
 ### [ ] Phase 7: Locality and Follower Reads
 

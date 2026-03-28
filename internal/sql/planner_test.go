@@ -83,6 +83,51 @@ func TestPlannerRejectsNonPrimaryKeyPredicate(t *testing.T) {
 	}
 }
 
+func TestPlannerOptimizePrefersPointLookupForEquality(t *testing.T) {
+	t.Parallel()
+
+	planner := testPlanner(t)
+	optimized, err := planner.Optimize("select id, name from users where id = 7")
+	if err != nil {
+		t.Fatalf("optimize select: %v", err)
+	}
+	if len(optimized.Candidates) != 2 {
+		t.Fatalf("candidate count = %d, want 2", len(optimized.Candidates))
+	}
+	if optimized.Selected.Name != "point_lookup" {
+		t.Fatalf("selected candidate = %q, want point_lookup", optimized.Selected.Name)
+	}
+	if _, ok := optimized.Selected.Plan.(PointLookupPlan); !ok {
+		t.Fatalf("selected plan type = %T, want PointLookupPlan", optimized.Selected.Plan)
+	}
+	if optimized.Candidates[0].Cost.Score >= optimized.Candidates[1].Cost.Score {
+		t.Fatalf("expected strictly cheaper winner, got %v >= %v", optimized.Candidates[0].Cost.Score, optimized.Candidates[1].Cost.Score)
+	}
+}
+
+func TestPlannerOptimizeOpenEndedSelectUsesRangeScan(t *testing.T) {
+	t.Parallel()
+
+	planner := testPlanner(t)
+	optimized, err := planner.Optimize("select * from users")
+	if err != nil {
+		t.Fatalf("optimize select: %v", err)
+	}
+	if len(optimized.Candidates) != 1 {
+		t.Fatalf("candidate count = %d, want 1", len(optimized.Candidates))
+	}
+	if optimized.Selected.Name != "range_scan" {
+		t.Fatalf("selected candidate = %q, want range_scan", optimized.Selected.Name)
+	}
+	scan, ok := optimized.Selected.Plan.(RangeScanPlan)
+	if !ok {
+		t.Fatalf("selected plan type = %T, want RangeScanPlan", optimized.Selected.Plan)
+	}
+	if len(scan.StartKey) == 0 || len(scan.EndKey) == 0 {
+		t.Fatalf("range scan should carry a bounded key span")
+	}
+}
+
 func testPlanner(t *testing.T) *Planner {
 	t.Helper()
 
@@ -96,6 +141,10 @@ func testPlanner(t *testing.T) *Planner {
 			{ID: 3, Name: "email", Type: ColumnTypeString, Nullable: true},
 		},
 		PrimaryKey: []string{"id"},
+		Stats: TableStats{
+			EstimatedRows:   10000,
+			AverageRowBytes: 192,
+		},
 	}); err != nil {
 		t.Fatalf("add users descriptor: %v", err)
 	}

@@ -22,12 +22,19 @@ type ColumnDescriptor struct {
 	Nullable bool
 }
 
+// TableStats carries coarse planning statistics for the optimizer.
+type TableStats struct {
+	EstimatedRows   uint64
+	AverageRowBytes uint64
+}
+
 // TableDescriptor describes one SQL table descriptor.
 type TableDescriptor struct {
 	ID         uint64
 	Name       string
 	Columns    []ColumnDescriptor
 	PrimaryKey []string
+	Stats      TableStats
 }
 
 // Catalog stores SQL table descriptors for the binder and planner.
@@ -123,6 +130,18 @@ func (t TableDescriptor) PrimaryKeyColumn() (ColumnDescriptor, error) {
 		return ColumnDescriptor{}, fmt.Errorf("table descriptor: primary key column %q not found", t.PrimaryKey[0])
 	}
 	return column, nil
+}
+
+// StatsOrDefaults returns usable planning stats even before the catalog is fully populated.
+func (t TableDescriptor) StatsOrDefaults() TableStats {
+	stats := t.Stats
+	if stats.EstimatedRows == 0 {
+		stats.EstimatedRows = 1000
+	}
+	if stats.AverageRowBytes == 0 {
+		stats.AverageRowBytes = 256
+	}
+	return stats
 }
 
 func canonicalName(name string) string {
