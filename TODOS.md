@@ -238,7 +238,12 @@ live replica/routing surfaces. Closed timestamp publications can now also be
 encoded and persisted through the storage engine under the global system
 namespace, and the replica state machine now applies lease-bound closed
 timestamp publications as live replica state and can serve exact historical
-reads when the closed-timestamp proof permits it.
+reads when the closed-timestamp proof permits it. Live routing decisions now
+also consult descriptor placement policy instead of treating locality as
+descriptor-only metadata. Historical read routing exposes local vs.
+leaseholder region, the chosen target region, preferred-region alignment, the
+closed/applied frontier, and an explicit freshness gap when a follower read
+must fall back to the leaseholder.
 
 ### [ ] Phase 8: Hardening and Operability
 
@@ -290,8 +295,8 @@ Rule:
 
 ### [ ] Phase 7 Remaining Execution
 
-- [ ] 7.1 Push placement and home-region policy deeper into live routing decisions, not only descriptors and flow hints
-- [ ] 7.2 Make leaseholder/follower read routing expose locality reasons and freshness gaps as first-class outputs
+- [x] 7.1 Push placement and home-region policy deeper into live routing decisions, not only descriptors and flow hints
+- [x] 7.2 Make leaseholder/follower read routing expose locality reasons and freshness gaps as first-class outputs
 - [ ] 7.3 Thread locality policy through more replica movement and cache-refresh surfaces
 
 ### [ ] Phase 8 Remaining Execution
