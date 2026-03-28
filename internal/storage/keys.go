@@ -118,12 +118,16 @@ func Meta2LookupKey(key []byte) []byte {
 	return metaKey(prefixMeta2, key)
 }
 
-// GlobalTablePrimaryKey returns the logical MVCC key for a table primary row.
-func GlobalTablePrimaryKey(tableID uint64, encodedPrimaryKey []byte) []byte {
+// GlobalTablePrimaryPrefix returns the logical key prefix for a table's primary rows.
+func GlobalTablePrimaryPrefix(tableID uint64) []byte {
 	dst := append(bytes.Clone(prefixMVCCGlobal), []byte("table/")...)
 	dst = append(dst, encodeUint64(tableID)...)
-	dst = append(dst, []byte("/primary/")...)
-	return appendEscapedBytes(dst, encodedPrimaryKey)
+	return append(dst, []byte("/primary/")...)
+}
+
+// GlobalTablePrimaryKey returns the logical MVCC key for a table primary row.
+func GlobalTablePrimaryKey(tableID uint64, encodedPrimaryKey []byte) []byte {
+	return appendEscapedBytes(GlobalTablePrimaryPrefix(tableID), encodedPrimaryKey)
 }
 
 // GlobalTableIndexKey returns the logical MVCC key for a table secondary index row.
@@ -190,6 +194,11 @@ func DecodeMVCCKey(encoded []byte) (DecodedMVCCKey, error) {
 		}, nil
 	}
 	return DecodedMVCCKey{}, fmt.Errorf("decode mvcc key: unrecognized suffix")
+}
+
+// PrefixEnd returns an exclusive upper bound for all keys sharing prefix.
+func PrefixEnd(prefix []byte) []byte {
+	return append(bytes.Clone(prefix), 0xff)
 }
 
 func encodeUint64(v uint64) []byte {
