@@ -59,9 +59,6 @@ func (r Record) Validate() error {
 	if !r.MinCommitTS.IsZero() && r.MinCommitTS.Compare(r.WriteTS) > 0 && r.Status != StatusPending && r.Status != StatusStaging {
 		return fmt.Errorf("txn: terminal write timestamp must not trail min commit timestamp")
 	}
-	if !r.LastHeartbeatTS.IsZero() && r.Status != StatusPending && r.Status != StatusStaging {
-		return fmt.Errorf("txn: terminal transactions must not accept new heartbeats")
-	}
 	return nil
 }
 

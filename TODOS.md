@@ -154,20 +154,21 @@ client-visible retry/error mapping.
 Deliver:
 
 - [x] anchored `TxnRecord`
-- distributed intents
-- coordinator recovery
-- async intent resolution
-- `STAGING` recovery
-- parallel commit
+- [x] distributed intents
+- [x] coordinator recovery
+- [x] async intent resolution
+- [x] `STAGING` recovery
+- [x] parallel commit
 
 Exit criteria:
 
 - encountering-request and async recovery produce deterministic outcomes
 - `STAGING -> COMMITTED/ABORTED` follows the written state-machine rule
 
-**Status:** In progress. The canonical transaction record now carries anchor
-range identity, touched-range tracking, and heartbeat semantics. Distributed
-intents, recovery, and `STAGING` resolution are still open.
+**Status:** Core deliverables are complete. The canonical transaction layer now
+owns anchored records, required distributed intents, `PENDING -> STAGING`
+transitions, coordinator-death recovery, async intent-resolution planning, and
+the deterministic `STAGING -> COMMITTED/ABORTED` decision rule.
 
 ### [ ] Phase 6: SQL Front Door
 
