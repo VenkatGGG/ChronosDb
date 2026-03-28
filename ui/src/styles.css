@@ -234,6 +234,12 @@ a {
   gap: 1rem;
 }
 
+.range-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(320px, 0.8fr);
+  gap: 1rem;
+}
+
 .stats-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -268,6 +274,10 @@ a {
 
 .panel {
   padding: 1.2rem;
+}
+
+.placement-panel {
+  min-height: 100%;
 }
 
 .panel-header {
@@ -482,6 +492,58 @@ a {
   background: rgba(255, 255, 255, 0.03);
 }
 
+.data-row-selected {
+  background: rgba(110, 240, 194, 0.08);
+}
+
+.data-table tbody tr {
+  cursor: pointer;
+}
+
+.placement-detail-stack {
+  display: grid;
+  gap: 1rem;
+}
+
+.placement-board {
+  display: grid;
+  gap: 0.85rem;
+}
+
+.placement-node {
+  padding: 1rem;
+  border-radius: 20px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.placement-node-hosting {
+  border-color: rgba(110, 240, 194, 0.24);
+}
+
+.placement-node-leaseholder {
+  border-color: rgba(110, 240, 194, 0.42);
+  box-shadow: inset 0 0 0 1px rgba(110, 240, 194, 0.14);
+}
+
+.placement-node-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.placement-role-copy {
+  margin: 0.65rem 0 0;
+  color: var(--text-muted);
+}
+
+.field-chip-leaseholder {
+  border: 1px solid rgba(110, 240, 194, 0.3);
+  background: rgba(110, 240, 194, 0.12);
+  color: var(--text);
+}
+
 @media (max-width: 1080px) {
   .console-shell {
     grid-template-columns: 1fr;
@@ -494,6 +556,10 @@ a {
 
   .stats-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .range-layout {
+    grid-template-columns: 1fr;
   }
 }
 

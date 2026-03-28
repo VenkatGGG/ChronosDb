@@ -85,7 +85,7 @@ export function App() {
               }
             />
             <Route path="/nodes" element={<NodesPage nodes={snapshot?.nodes ?? []} />} />
-            <Route path="/ranges" element={<RangesPage ranges={snapshot?.ranges ?? []} />} />
+            <Route path="/ranges" element={<RangesPage nodes={snapshot?.nodes ?? []} ranges={snapshot?.ranges ?? []} />} />
             <Route path="/events" element={<EventsPage events={streamState.events} />} />
             <Route path="*" element={<Navigate to="/overview" replace />} />
           </Routes>
@@ -242,76 +242,154 @@ function NodesPage(props: { nodes: NodeView[] }) {
   );
 }
 
-function RangesPage(props: { ranges: RangeView[] }) {
+function RangesPage(props: { nodes: NodeView[]; ranges: RangeView[] }) {
   const [filter, setFilter] = useState("");
+  const [selectedRangeID, setSelectedRangeID] = useState<number | null>(null);
   const deferredFilter = useDeferredValue(filter.trim().toLowerCase());
   const filtered = props.ranges.filter((range) => matchesRange(range, deferredFilter));
+  const selectedRange = filtered.find((range) => range.range_id === selectedRangeID) ?? filtered[0] ?? null;
+  const placementNodes = placementNodesForRange(props.nodes, selectedRange);
 
   return (
     <section className="page-grid">
-      <div className="panel">
-        <div className="panel-header panel-header-with-control">
-          <div>
-            <p className="eyebrow">Ranges</p>
-            <h3>Descriptors, replicas, and leaseholders</h3>
+      <div className="range-layout">
+        <div className="panel">
+          <div className="panel-header panel-header-with-control">
+            <div>
+              <p className="eyebrow">Ranges</p>
+              <h3>Descriptors, replicas, and leaseholders</h3>
+            </div>
+            <label className="filter-box">
+              <span>Filter</span>
+              <input
+                aria-label="Filter ranges"
+                onChange={(event) => setFilter(event.target.value)}
+                placeholder="range id, node id, key prefix, placement"
+                value={filter}
+              />
+            </label>
           </div>
-          <label className="filter-box">
-            <span>Filter</span>
-            <input
-              aria-label="Filter ranges"
-              onChange={(event) => setFilter(event.target.value)}
-              placeholder="range id, node id, key prefix, placement"
-              value={filter}
-            />
-          </label>
-        </div>
-        {filtered.length === 0 ? <EmptyState label="No ranges match the current filter." /> : null}
-        {filtered.length > 0 ? (
-          <div className="table-wrap">
-            <table className="data-table">
-              <thead>
-                <tr>
-                  <th>range</th>
-                  <th>keys</th>
-                  <th>leaseholder</th>
-                  <th>replicas</th>
-                  <th>placement</th>
-                  <th>source</th>
-                </tr>
-              </thead>
-              <tbody>
-                {filtered.map((range) => (
-                  <tr key={range.range_id}>
-                    <td>
-                      <strong>{range.range_id}</strong>
-                      <span className="subtle-mono">gen {range.generation}</span>
-                    </td>
-                    <td className="subtle-mono">
-                      {range.start_key || "∅"} .. {range.end_key || "∞"}
-                    </td>
-                    <td>{range.leaseholder_node_id ? `node ${range.leaseholder_node_id}` : "unknown"}</td>
-                    <td>
-                      <div className="replica-chip-row">
-                        {range.replicas.map((replica) => (
-                          <span className="replica-chip" key={replica.replica_id}>
-                            n{replica.node_id}:{replica.role}
-                          </span>
-                        ))}
-                      </div>
-                    </td>
-                    <td>
-                      <strong>{range.placement_mode ?? "unplaced"}</strong>
-                      {range.preferred_regions?.length ? (
-                        <span className="subtle-copy">{range.preferred_regions.join(", ")}</span>
-                      ) : null}
-                    </td>
-                    <td>{range.source ?? "unknown"}</td>
+          {filtered.length === 0 ? <EmptyState label="No ranges match the current filter." /> : null}
+          {filtered.length > 0 ? (
+            <div className="table-wrap">
+              <table className="data-table">
+                <thead>
+                  <tr>
+                    <th>range</th>
+                    <th>keys</th>
+                    <th>leaseholder</th>
+                    <th>replicas</th>
+                    <th>placement</th>
+                    <th>source</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        ) : null}
+                </thead>
+                <tbody>
+                  {filtered.map((range) => (
+                    <tr
+                      className={range.range_id === selectedRange?.range_id ? "data-row-selected" : ""}
+                      key={range.range_id}
+                      onClick={() => setSelectedRangeID(range.range_id)}
+                    >
+                      <td>
+                        <strong>{range.range_id}</strong>
+                        <span className="subtle-mono">gen {range.generation}</span>
+                      </td>
+                      <td className="subtle-mono">
+                        {range.start_key || "∅"} .. {range.end_key || "∞"}
+                      </td>
+                      <td>{range.leaseholder_node_id ? `node ${range.leaseholder_node_id}` : "unknown"}</td>
+                      <td>
+                        <div className="replica-chip-row">
+                          {range.replicas.map((replica) => (
+                            <span className="replica-chip" key={replica.replica_id}>
+                              n{replica.node_id}:{replica.role}
+                            </span>
+                          ))}
+                        </div>
+                      </td>
+                      <td>
+                        <strong>{range.placement_mode ?? "unplaced"}</strong>
+                        {range.preferred_regions?.length ? (
+                          <span className="subtle-copy">{range.preferred_regions.join(", ")}</span>
+                        ) : null}
+                      </td>
+                      <td>{range.source ?? "unknown"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : null}
+        </div>
+
+        <div className="panel placement-panel">
+            <div className="panel-header">
+              <div>
+                <p className="eyebrow">Placement</p>
+                <h3>Leaseholder and replica residency</h3>
+              </div>
+              {selectedRange ? (
+                <StatusPill
+                  label={`range ${selectedRange.range_id}`}
+                  tone={selectedRange.placement_mode ? "good" : "neutral"}
+                />
+              ) : null}
+            </div>
+            {!selectedRange ? <EmptyState label="Choose a range to inspect placement." /> : null}
+            {selectedRange ? (
+              <div className="placement-detail-stack">
+                <dl className="metric-list">
+                  <div>
+                    <dt>keys</dt>
+                    <dd className="subtle-mono">
+                      {selectedRange.start_key || "∅"} .. {selectedRange.end_key || "∞"}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>leaseholder</dt>
+                    <dd>{selectedRange.leaseholder_node_id ? `node ${selectedRange.leaseholder_node_id}` : "unknown"}</dd>
+                  </div>
+                  <div>
+                    <dt>placement</dt>
+                    <dd>{selectedRange.placement_mode ?? "unplaced"}</dd>
+                  </div>
+                  <div>
+                    <dt>regions</dt>
+                    <dd>{selectedRange.preferred_regions?.join(", ") || "none declared"}</dd>
+                  </div>
+                </dl>
+
+                <div className="placement-board">
+                  {placementNodes.map(({ node, replica }) => {
+                    const isLeaseholder = selectedRange.leaseholder_node_id === node.node_id;
+                    return (
+                      <article
+                        className={`placement-node${replica ? " placement-node-hosting" : ""}${
+                          isLeaseholder ? " placement-node-leaseholder" : ""
+                        }`}
+                        key={node.node_id}
+                      >
+                        <div className="placement-node-header">
+                          <strong>node {node.node_id}</strong>
+                          <StatusPill tone={node.status === "ok" ? "good" : "warn"} label={node.status} />
+                        </div>
+                        <p className="placement-role-copy">
+                          {replica ? `${replica.role} replica present` : "no replica for this range"}
+                        </p>
+                        <div className="field-chip-row">
+                          <span className="field-chip">{replica ? `replica ${replica.replica_id}` : "idle"}</span>
+                          {isLeaseholder ? <span className="field-chip field-chip-leaseholder">leaseholder</span> : null}
+                          {node.partitioned_from?.length ? (
+                            <span className="field-chip">partitioned from {node.partitioned_from.join(", ")}</span>
+                          ) : null}
+                        </div>
+                      </article>
+                    );
+                  })}
+                </div>
+              </div>
+            ) : null}
+        </div>
       </div>
     </section>
   );
@@ -449,6 +527,32 @@ function matchesEvent(event: ClusterEvent, filter: string) {
     .join(" ")
     .toLowerCase();
   return haystack.includes(filter);
+}
+
+function placementNodesForRange(nodes: NodeView[], range: RangeView | null) {
+  if (!range) {
+    return [];
+  }
+  if (nodes.length === 0) {
+    return range.replicas.map((replica) => ({
+      node: {
+        node_id: replica.node_id,
+        status: "unknown",
+        partitioned_from: [],
+        notes: [],
+        replica_count: 0,
+        lease_count: 0,
+      } as NodeView,
+      replica,
+    }));
+  }
+  return nodes
+    .slice()
+    .sort((left, right) => left.node_id - right.node_id)
+    .map((node) => ({
+      node,
+      replica: range.replicas.find((replica) => replica.node_id === node.node_id) ?? null,
+    }));
 }
 
 function severityTone(severity?: string): "good" | "warn" | "bad" | "neutral" {
