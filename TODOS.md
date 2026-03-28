@@ -417,16 +417,17 @@ Exit criteria:
 - the UI can drill into scenario runs and retained artifacts
 
 **Status:** In progress. The frontend is still not the hard part; the real work
-is the backend admin plane. Typed view models, node-level admin endpoints, and
-a runnable cluster aggregator service are now in place, so the next slice
-should build the live event stream before any substantial frontend work lands.
+is the backend admin plane. Typed view models, node-level admin endpoints, a
+runnable cluster aggregator service, and a live SSE event stream are now in
+place, so the next slice can finally move into the frontend shell and
+placement/key drilldown without faking backend state.
 
 ### [ ] Phase 11 Remaining Execution
 
 - [x] 11.1 Freeze admin API contracts and typed view models for nodes, ranges, replicas, key location, cluster snapshots, and events
 - [x] 11.2 Add node-level admin read endpoints for node summary, range inventory, and recent events
 - [x] 11.3 Add a cluster snapshot aggregator service that polls nodes and exposes a unified API
-- [ ] 11.4 Add an SSE event stream for cluster operations and scenario activity
+- [x] 11.4 Add an SSE event stream for cluster operations and scenario activity
 - [ ] 11.5 Add a frontend shell with overview, nodes, ranges, and events pages
 - [ ] 11.6 Add range placement and leaseholder visualization from authoritative descriptors
 - [ ] 11.7 Add key-location lookup and placement drilldown

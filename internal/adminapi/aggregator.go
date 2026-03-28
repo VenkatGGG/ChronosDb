@@ -115,7 +115,9 @@ func (a *Aggregator) Snapshot(ctx context.Context) (ClusterSnapshot, error) {
 		for _, view := range result.snapshot.Ranges {
 			a.mergeRangeView(&merged, rangeIndex, view)
 		}
-		merged.Events = append(merged.Events, result.snapshot.Events...)
+		for _, event := range result.snapshot.Events {
+			merged.Events = append(merged.Events, NormalizeEvent(event))
+		}
 	}
 	sort.Slice(merged.Nodes, func(i, j int) bool {
 		return merged.Nodes[i].NodeID < merged.Nodes[j].NodeID

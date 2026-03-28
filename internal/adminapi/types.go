@@ -1,7 +1,12 @@
 package adminapi
 
 import (
+	"crypto/sha1"
 	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/VenkatGGG/ChronosDb/internal/meta"
@@ -45,6 +50,7 @@ type NodeView struct {
 
 // ClusterEvent is one UI-visible real-time event.
 type ClusterEvent struct {
+	ID        string            `json:"id,omitempty"`
 	Timestamp time.Time         `json:"timestamp"`
 	Type      string            `json:"type"`
 	NodeID    uint64            `json:"node_id,omitempty"`
@@ -97,9 +103,77 @@ func RangeViewFromDescriptor(desc meta.RangeDescriptor, source string) RangeView
 	return view
 }
 
+// NormalizeEvent ensures the event has a stable identity for replay and streaming.
+func NormalizeEvent(event ClusterEvent) ClusterEvent {
+	copyEvent := event
+	if copyEvent.Timestamp.IsZero() {
+		copyEvent.Timestamp = time.Now().UTC()
+	} else {
+		copyEvent.Timestamp = copyEvent.Timestamp.UTC()
+	}
+	if copyEvent.Fields != nil {
+		fields := make(map[string]string, len(copyEvent.Fields))
+		for key, value := range copyEvent.Fields {
+			fields[key] = value
+		}
+		copyEvent.Fields = fields
+	}
+	if copyEvent.ID == "" {
+		copyEvent.ID = eventID(copyEvent)
+	}
+	return copyEvent
+}
+
 func encodeKey(key []byte) string {
 	if len(key) == 0 {
 		return ""
 	}
 	return hex.EncodeToString(key)
+}
+
+func eventID(event ClusterEvent) string {
+	type fieldPair struct {
+		Key   string `json:"key"`
+		Value string `json:"value"`
+	}
+	ordered := make([]fieldPair, 0, len(event.Fields))
+	for key, value := range event.Fields {
+		ordered = append(ordered, fieldPair{Key: key, Value: value})
+	}
+	sort.Slice(ordered, func(i, j int) bool {
+		return ordered[i].Key < ordered[j].Key
+	})
+	payload, err := json.Marshal(struct {
+		Timestamp string      `json:"timestamp"`
+		Type      string      `json:"type"`
+		NodeID    uint64      `json:"node_id,omitempty"`
+		RangeID   uint64      `json:"range_id,omitempty"`
+		Severity  string      `json:"severity,omitempty"`
+		Message   string      `json:"message"`
+		Fields    []fieldPair `json:"fields,omitempty"`
+	}{
+		Timestamp: event.Timestamp.UTC().Format(time.RFC3339Nano),
+		Type:      event.Type,
+		NodeID:    event.NodeID,
+		RangeID:   event.RangeID,
+		Severity:  event.Severity,
+		Message:   event.Message,
+		Fields:    ordered,
+	})
+	if err != nil {
+		return fallbackEventID(event)
+	}
+	sum := sha1.Sum(payload)
+	return "evt_" + hex.EncodeToString(sum[:])
+}
+
+func fallbackEventID(event ClusterEvent) string {
+	return fmt.Sprintf(
+		"evt_fallback_%s_%d_%d_%d_%s",
+		strings.ReplaceAll(event.Timestamp.UTC().Format(time.RFC3339Nano), ":", "_"),
+		event.NodeID,
+		event.RangeID,
+		len(event.Message),
+		event.Type,
+	)
 }

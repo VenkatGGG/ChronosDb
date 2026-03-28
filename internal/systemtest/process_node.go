@@ -581,6 +581,7 @@ func (n *ProcessNode) recordEvent(event adminapi.ClusterEvent) error {
 	if event.NodeID == 0 {
 		event.NodeID = n.cfg.NodeID
 	}
+	event = adminapi.NormalizeEvent(event)
 	n.mu.Lock()
 	n.events = append(n.events, event)
 	if len(n.events) > n.cfg.EventBufferSize {

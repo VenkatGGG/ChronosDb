@@ -5,8 +5,18 @@ import (
 	"net/http"
 )
 
+// HTTPHandlerOptions wires optional live-stream behavior into the console API.
+type HTTPHandlerOptions struct {
+	Stream *EventStream
+}
+
 // NewHTTPHandler exposes a unified read-only cluster API for the console UI.
 func NewHTTPHandler(aggregator *Aggregator) http.Handler {
+	return NewHTTPHandlerWithOptions(aggregator, HTTPHandlerOptions{})
+}
+
+// NewHTTPHandlerWithOptions exposes the unified cluster API plus optional live endpoints.
+func NewHTTPHandlerWithOptions(aggregator *Aggregator, opts HTTPHandlerOptions) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/cluster", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -56,6 +66,9 @@ func NewHTTPHandler(aggregator *Aggregator) http.Handler {
 		}
 		writeJSONResponse(w, snapshot.Events)
 	})
+	if opts.Stream != nil {
+		mux.Handle("/api/v1/events/stream", StreamHTTPHandler(opts.Stream))
+	}
 	return mux
 }
 

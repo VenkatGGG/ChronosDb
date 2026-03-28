@@ -2,6 +2,7 @@ package adminapi
 
 import (
 	"testing"
+	"time"
 
 	"github.com/VenkatGGG/ChronosDb/internal/meta"
 	"github.com/VenkatGGG/ChronosDb/internal/placement"
@@ -41,5 +42,36 @@ func TestRangeViewFromDescriptor(t *testing.T) {
 	}
 	if view.PlacementMode == "" || len(view.PreferredRegions) != 1 || view.PreferredRegions[0] != "us-east1" {
 		t.Fatalf("placement = %+v", view)
+	}
+}
+
+func TestNormalizeEventProducesStableID(t *testing.T) {
+	t.Parallel()
+
+	left := NormalizeEvent(ClusterEvent{
+		Timestamp: time.Unix(100, 0).UTC(),
+		Type:      "partition_applied",
+		NodeID:    7,
+		Message:   "partition applied",
+		Fields: map[string]string{
+			"right": "2,3",
+			"left":  "1",
+		},
+	})
+	right := NormalizeEvent(ClusterEvent{
+		Timestamp: time.Unix(100, 0).UTC(),
+		Type:      "partition_applied",
+		NodeID:    7,
+		Message:   "partition applied",
+		Fields: map[string]string{
+			"left":  "1",
+			"right": "2,3",
+		},
+	})
+	if left.ID == "" {
+		t.Fatal("expected normalized event id to be set")
+	}
+	if left.ID != right.ID {
+		t.Fatalf("stable event ids mismatch: %q vs %q", left.ID, right.ID)
 	}
 }
