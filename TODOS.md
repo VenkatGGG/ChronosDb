@@ -248,6 +248,11 @@ Exit criteria:
 
 - the system can be operated, profiled, and failure-tested at realistic scale
 
+**Status:** In progress. A dedicated admission controller now exists with
+critical/normal/background tiers, reserved capacity for critical work, and
+compaction escalation when storage pressure crosses configured thresholds.
+Balancing, observability, simulation, and chaos validation are still open.
+
 ## Ongoing Discipline
 
 ### [ ] Keep the Plan Ahead of the Code
