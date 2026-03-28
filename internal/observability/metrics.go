@@ -23,6 +23,8 @@ type Metrics struct {
 	followerReadLag          *prometheus.GaugeVec
 	allocatorRebalanceScore  *prometheus.GaugeVec
 	allocatorDecisions       *prometheus.CounterVec
+	requestRetries           *prometheus.CounterVec
+	recoveryOutcomes         *prometheus.CounterVec
 }
 
 // NewMetrics constructs a fresh registry with ChronosDB collectors registered.
@@ -109,6 +111,16 @@ func NewMetricsWithRegistry(registry *prometheus.Registry) *Metrics {
 			Name:      "allocator_decisions_total",
 			Help:      "Allocator decisions partitioned by action and locality outcome.",
 		}, []string{"action", "preferred"}),
+		requestRetries: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: "chronosdb",
+			Name:      "request_retries_total",
+			Help:      "Request retries partitioned by reason.",
+		}, []string{"reason"}),
+		recoveryOutcomes: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: "chronosdb",
+			Name:      "recovery_outcomes_total",
+			Help:      "Observed recovery outcomes partitioned by workflow and result.",
+		}, []string{"workflow", "result"}),
 	}
 
 	registry.MustRegister(
@@ -125,6 +137,8 @@ func NewMetricsWithRegistry(registry *prometheus.Registry) *Metrics {
 		m.followerReadLag,
 		m.allocatorRebalanceScore,
 		m.allocatorDecisions,
+		m.requestRetries,
+		m.recoveryOutcomes,
 	)
 	return m
 }
@@ -204,6 +218,16 @@ func (m *Metrics) SetAllocatorRebalanceScore(scope string, preferred bool, value
 // ObserveAllocatorDecision records one allocator action and whether it aligned with locality policy.
 func (m *Metrics) ObserveAllocatorDecision(action string, preferred bool) {
 	m.allocatorDecisions.WithLabelValues(action, boolLabel(preferred)).Inc()
+}
+
+// ObserveRequestRetry records one request retry by reason.
+func (m *Metrics) ObserveRequestRetry(reason string) {
+	m.requestRetries.WithLabelValues(reason).Inc()
+}
+
+// ObserveRecoveryOutcome records one recovery workflow result.
+func (m *Metrics) ObserveRecoveryOutcome(workflow, result string) {
+	m.recoveryOutcomes.WithLabelValues(workflow, result).Inc()
 }
 
 func boolLabel(v bool) string {

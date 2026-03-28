@@ -360,6 +360,8 @@ top-level outcomes without starting that work yet.
   so exported manifests can be consumed by the external fault toolchain with a
   documented mapping from manifest steps to fault injector operations
 - [ ] 9.6 Add operator-facing observability dashboards and runbooks
+- [x] 9.6 Add operator-facing observability dashboards and runbooks
+  Status: complete via `docs/operations/DASHBOARDS.md`, `docs/operations/RUNBOOKS.md`, and the observability metric additions for retry pressure and recovery outcomes.
   for snapshot pressure, allocator decisions, closed timestamp lag, lease
   churn, retry/error rates, and recovery outcomes so Phase 8 is operationally
   complete instead of only code-complete

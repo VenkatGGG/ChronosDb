@@ -22,6 +22,8 @@ func TestHandlerServesMetricsHealthReadyOverviewAndPprof(t *testing.T) {
 	metrics.SetPebbleCompactionPressure("store-1", "critical", 0.9)
 	metrics.SetAllocatorRebalanceScore("range-7", true, 0.84)
 	metrics.ObserveAllocatorDecision("rebalance", true)
+	metrics.ObserveRequestRetry("range_not_here")
+	metrics.ObserveRecoveryOutcome("staging_recovery", "committed")
 
 	handler := NewHandler(HandlerOptions{
 		Metrics: metrics,
@@ -57,6 +59,8 @@ func TestHandlerServesMetricsHealthReadyOverviewAndPprof(t *testing.T) {
 		"chronosdb_pebble_compaction_pressure",
 		"chronosdb_allocator_rebalance_score",
 		"chronosdb_allocator_decisions_total",
+		"chronosdb_request_retries_total",
+		"chronosdb_recovery_outcomes_total",
 	} {
 		if !strings.Contains(metricsBody, want) {
 			t.Fatalf("metrics output missing %q", want)
