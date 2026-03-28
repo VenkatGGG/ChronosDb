@@ -177,6 +177,14 @@ export interface ScenarioRunView {
   node_log_count: number;
 }
 
+export interface ScenarioLiveCorrelation {
+  generated_at: string;
+  source: string;
+  nodes: NodeView[];
+  ranges: RangeView[];
+  missing_node_ids?: number[];
+}
+
 export interface ScenarioRunDetail {
   run: ScenarioRunView;
   manifest: Manifest;
@@ -184,4 +192,5 @@ export interface ScenarioRunDetail {
   report: RunReport;
   summary: RunArtifactSummary;
   node_logs: Record<string, NodeLogEntry[]>;
+  live_correlation?: ScenarioLiveCorrelation;
 }

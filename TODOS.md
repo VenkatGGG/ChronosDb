@@ -436,7 +436,7 @@ manifest/report/handoff surfaces and recent node-log evidence.
 - [x] 11.7 Add key-location lookup and placement drilldown
 - [x] 11.8 Add scenario/artifact browsing for retained fault runs
 
-### [ ] 12. Console Topology and Operational Forensics
+### [x] 12. Console Topology and Operational Forensics
 
 Deliver:
 
@@ -455,18 +455,17 @@ Exit criteria:
 - topology and drilldown views are derived from authoritative descriptors and
   live node state instead of UI-side inference
 
-**Status:** In progress. Phase 12 starts by freezing the topology and drilldown
-contracts, then adding backend APIs before deeper UI navigation and forensics
-surfaces. The topology summary plus node/range drilldown APIs now exist and
-derive their views from authoritative descriptors, live node state, and
-correlated recent events. The console now also has deep-linkable topology, node
-drilldown, and range drilldown pages wired to those backend APIs.
+**Status:** Complete. Phase 12 now exposes topology summary, node/range
+drilldown APIs, correlated recent events, deep-linkable drilldown pages,
+retained-scenario live correlation, and route-level UI tests. The console can
+now move directly from cluster posture to node/range investigation and back
+through retained scenario evidence without requiring UI-side inference.
 
-### [ ] Phase 12 Remaining Execution
+### [x] Phase 12 Remaining Execution
 
 - [x] 12.1 Freeze topology and drilldown view contracts plus HTTP endpoints
 - [x] 12.2 Add backend topology summary, node detail, and range detail APIs
 - [x] 12.3 Correlate recent events by node and range on the backend
 - [x] 12.4 Add console topology and drilldown pages with deep-linkable routes
-- [ ] 12.5 Link retained scenario artifacts to affected nodes and ranges in the console
-- [ ] 12.6 Add focused tests for topology merges, drilldown correctness, and deep-link behavior
+- [x] 12.5 Link retained scenario artifacts to affected nodes and ranges in the console
+- [x] 12.6 Add focused tests for topology merges, drilldown correctness, and deep-link behavior

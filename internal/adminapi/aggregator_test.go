@@ -369,3 +369,73 @@ func TestAggregatorTopologyAndDetails(t *testing.T) {
 		t.Fatalf("range detail err = %v, want ErrRangeNotFound", err)
 	}
 }
+
+func TestAggregatorCorrelateScenarioDetail(t *testing.T) {
+	t.Parallel()
+
+	server1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(ClusterSnapshot{
+			GeneratedAt: time.Unix(300, 0).UTC(),
+			Nodes:       []NodeView{{NodeID: 1, Status: "ok", ReplicaCount: 2, LeaseCount: 1}},
+			Ranges: []RangeView{{
+				RangeID:              11,
+				Generation:           4,
+				StartKey:             "61",
+				EndKey:               "6d",
+				Replicas:             []ReplicaView{{ReplicaID: 1, NodeID: 1, Role: "voter"}},
+				LeaseholderReplicaID: 1,
+				LeaseholderNodeID:    1,
+			}},
+		})
+	}))
+	defer server1.Close()
+
+	server2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(ClusterSnapshot{
+			GeneratedAt: time.Unix(300, 0).UTC(),
+			Nodes:       []NodeView{{NodeID: 2, Status: "ok", ReplicaCount: 1, LeaseCount: 0}},
+			Ranges: []RangeView{{
+				RangeID:              12,
+				Generation:           4,
+				StartKey:             "6d",
+				EndKey:               "",
+				Replicas:             []ReplicaView{{ReplicaID: 2, NodeID: 2, Role: "voter"}},
+				LeaseholderReplicaID: 2,
+				LeaseholderNodeID:    2,
+			}},
+		})
+	}))
+	defer server2.Close()
+
+	aggregator, err := NewAggregator(AggregatorConfig{
+		Targets: []NodeTarget{
+			{NodeID: 1, BaseURL: server1.URL},
+			{NodeID: 2, BaseURL: server2.URL},
+		},
+	})
+	if err != nil {
+		t.Fatalf("new aggregator: %v", err)
+	}
+
+	correlation, err := aggregator.CorrelateScenarioDetail(context.Background(), ScenarioRunDetail{
+		Manifest: ScenarioManifest{
+			Scenario: "minority-partition",
+			Nodes:    []uint64{1, 3},
+		},
+	})
+	if err != nil {
+		t.Fatalf("correlate scenario detail: %v", err)
+	}
+	if correlation.Source != "manifest_nodes_current_topology" {
+		t.Fatalf("correlation source = %q", correlation.Source)
+	}
+	if len(correlation.Nodes) != 1 || correlation.Nodes[0].NodeID != 1 {
+		t.Fatalf("correlation nodes = %+v, want node 1 only", correlation.Nodes)
+	}
+	if len(correlation.MissingNodeIDs) != 1 || correlation.MissingNodeIDs[0] != 3 {
+		t.Fatalf("missing nodes = %+v, want [3]", correlation.MissingNodeIDs)
+	}
+	if len(correlation.Ranges) != 1 || correlation.Ranges[0].RangeID != 11 {
+		t.Fatalf("correlation ranges = %+v, want range 11", correlation.Ranges)
+	}
+}

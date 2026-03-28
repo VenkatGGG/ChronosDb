@@ -294,6 +294,56 @@ func (a *Aggregator) RangeDetail(ctx context.Context, rangeID uint64) (RangeDeta
 	return RangeDetailView{}, ErrRangeNotFound
 }
 
+// CorrelateScenarioDetail projects one retained scenario onto the current live topology.
+func (a *Aggregator) CorrelateScenarioDetail(ctx context.Context, detail ScenarioRunDetail) (ScenarioLiveCorrelation, error) {
+	snapshot, err := a.Snapshot(ctx)
+	if err != nil {
+		return ScenarioLiveCorrelation{}, err
+	}
+	nodeIndex := make(map[uint64]NodeView, len(snapshot.Nodes))
+	for _, node := range snapshot.Nodes {
+		nodeIndex[node.NodeID] = node
+	}
+	nodes := make([]NodeView, 0, len(detail.Manifest.Nodes))
+	missing := make([]uint64, 0)
+	relatedNodeSet := make(map[uint64]struct{}, len(detail.Manifest.Nodes))
+	for _, nodeID := range detail.Manifest.Nodes {
+		if node, ok := nodeIndex[nodeID]; ok {
+			nodes = append(nodes, node)
+			relatedNodeSet[nodeID] = struct{}{}
+			continue
+		}
+		missing = append(missing, nodeID)
+	}
+	sort.Slice(nodes, func(i, j int) bool {
+		return nodes[i].NodeID < nodes[j].NodeID
+	})
+	sort.Slice(missing, func(i, j int) bool {
+		return missing[i] < missing[j]
+	})
+	ranges := make([]RangeView, 0)
+	seenRanges := make(map[uint64]struct{})
+	for _, view := range snapshot.Ranges {
+		if rangeTouchesNodes(view, relatedNodeSet) {
+			if _, ok := seenRanges[view.RangeID]; ok {
+				continue
+			}
+			seenRanges[view.RangeID] = struct{}{}
+			ranges = append(ranges, cloneRangeView(view))
+		}
+	}
+	sort.Slice(ranges, func(i, j int) bool {
+		return ranges[i].RangeID < ranges[j].RangeID
+	})
+	return ScenarioLiveCorrelation{
+		GeneratedAt:    snapshot.GeneratedAt,
+		Source:         "manifest_nodes_current_topology",
+		Nodes:          nodes,
+		Ranges:         ranges,
+		MissingNodeIDs: missing,
+	}, nil
+}
+
 func (a *Aggregator) fetchSnapshot(ctx context.Context, target NodeTarget) (ClusterSnapshot, error) {
 	path := target.BaseURL + "/admin/snapshot"
 	if a.eventLimitPerNode > 0 {
@@ -419,6 +469,18 @@ func correlateEvents(events []ClusterEvent, match func(ClusterEvent) bool) []Clu
 		return correlated[i].Timestamp.After(correlated[j].Timestamp)
 	})
 	return correlated
+}
+
+func rangeTouchesNodes(view RangeView, nodeIDs map[uint64]struct{}) bool {
+	if len(nodeIDs) == 0 {
+		return false
+	}
+	for _, replica := range view.Replicas {
+		if _, ok := nodeIDs[replica.NodeID]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 func parseLookupKey(raw string) ([]byte, string, error) {

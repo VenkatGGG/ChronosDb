@@ -176,6 +176,12 @@ func NewHTTPHandlerWithOptions(aggregator *Aggregator, opts HTTPHandlerOptions) 
 				http.Error(w, err.Error(), http.StatusBadGateway)
 				return
 			}
+			correlation, err := aggregator.CorrelateScenarioDetail(r.Context(), detail)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadGateway)
+				return
+			}
+			detail.LiveCorrelation = &correlation
 			writeJSONResponse(w, detail)
 		})
 	}

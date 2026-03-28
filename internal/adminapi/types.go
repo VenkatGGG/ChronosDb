@@ -206,14 +206,24 @@ type ScenarioRunView struct {
 	NodeLogCount int       `json:"node_log_count"`
 }
 
+// ScenarioLiveCorrelation ties one retained run to the current live topology.
+type ScenarioLiveCorrelation struct {
+	GeneratedAt    time.Time   `json:"generated_at"`
+	Source         string      `json:"source"`
+	Nodes          []NodeView  `json:"nodes"`
+	Ranges         []RangeView `json:"ranges"`
+	MissingNodeIDs []uint64    `json:"missing_node_ids,omitempty"`
+}
+
 // ScenarioRunDetail is the console-facing detail surface for one retained run.
 type ScenarioRunDetail struct {
-	Run      ScenarioRunView                   `json:"run"`
-	Manifest ScenarioManifest                  `json:"manifest"`
-	Handoff  *ScenarioHandoffBundle            `json:"handoff,omitempty"`
-	Report   ScenarioRunReport                 `json:"report"`
-	Summary  ScenarioRunSummary                `json:"summary"`
-	NodeLogs map[uint64][]ScenarioNodeLogEntry `json:"node_logs"`
+	Run             ScenarioRunView                   `json:"run"`
+	Manifest        ScenarioManifest                  `json:"manifest"`
+	Handoff         *ScenarioHandoffBundle            `json:"handoff,omitempty"`
+	Report          ScenarioRunReport                 `json:"report"`
+	Summary         ScenarioRunSummary                `json:"summary"`
+	NodeLogs        map[uint64][]ScenarioNodeLogEntry `json:"node_logs"`
+	LiveCorrelation *ScenarioLiveCorrelation          `json:"live_correlation,omitempty"`
 }
 
 // ScenarioReader exposes retained scenario summaries and detail bundles to the console API.

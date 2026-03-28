@@ -491,7 +491,7 @@ function RangesPage(props: { nodes: NodeView[]; ranges: RangeView[] }) {
   );
 }
 
-function TopologyPage() {
+export function TopologyPage() {
   const [topology, setTopology] = useState<ClusterTopologyView | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -576,7 +576,7 @@ function TopologyPage() {
   );
 }
 
-function NodeDetailPage() {
+export function NodeDetailPage() {
   const params = useParams();
   const nodeID = Number(params.nodeId);
   const [detail, setDetail] = useState<NodeDetailView | null>(null);
@@ -675,7 +675,7 @@ function NodeDetailPage() {
   );
 }
 
-function RangeDetailPage() {
+export function RangeDetailPage() {
   const params = useParams();
   const rangeID = Number(params.rangeId);
   const [detail, setDetail] = useState<RangeDetailView | null>(null);
@@ -824,7 +824,7 @@ function EventsPage(props: { events: ClusterEvent[] }) {
   );
 }
 
-function ScenariosPage() {
+export function ScenariosPage() {
   const [runs, setRuns] = useState<ScenarioRunView[]>([]);
   const [selectedRunID, setSelectedRunID] = useState<string | null>(null);
   const [detail, setDetail] = useState<ScenarioRunDetail | null>(null);
@@ -962,10 +962,53 @@ function ScenariosPage() {
                           </p>
                         </div>
                       </div>
+                      <div className="field-chip-row">
+                        {step.node_id ? (
+                          <Link className="field-chip field-chip-link" to={`/nodes/${step.node_id}`}>
+                            node {step.node_id}
+                          </Link>
+                        ) : null}
+                        {step.gateway_node_id ? (
+                          <Link className="field-chip field-chip-link" to={`/nodes/${step.gateway_node_id}`}>
+                            gateway node {step.gateway_node_id}
+                          </Link>
+                        ) : null}
+                      </div>
                     </article>
                   ))}
                 </div>
               </div>
+
+              {detail.live_correlation ? (
+                <div className="detail-section">
+                  <h4>Live topology correlation</h4>
+                  <p className="subtle-copy">
+                    Derived from current authoritative topology for nodes named in the retained manifest.
+                  </p>
+                  <div className="field-chip-row">
+                    {detail.live_correlation.nodes.map((node) => (
+                      <Link className="field-chip field-chip-link" key={`scenario-node-${node.node_id}`} to={`/nodes/${node.node_id}`}>
+                        node {node.node_id}
+                      </Link>
+                    ))}
+                    {detail.live_correlation.missing_node_ids?.map((nodeID) => (
+                      <span className="field-chip" key={`missing-node-${nodeID}`}>
+                        node {nodeID} missing
+                      </span>
+                    ))}
+                  </div>
+                  <div className="field-chip-row">
+                    {detail.live_correlation.ranges.map((range) => (
+                      <Link className="field-chip field-chip-link" key={`scenario-range-${range.range_id}`} to={`/ranges/${range.range_id}`}>
+                        range {range.range_id}
+                      </Link>
+                    ))}
+                    {detail.live_correlation.ranges.length === 0 ? (
+                      <span className="field-chip">no live ranges correlated</span>
+                    ) : null}
+                  </div>
+                </div>
+              ) : null}
 
               <div className="detail-section">
                 <h4>Node logs</h4>
@@ -974,7 +1017,11 @@ function ScenariosPage() {
                     <article className="event-row" key={nodeID}>
                       <div className="event-row-header">
                         <div>
-                          <p className="event-type">node {nodeID}</p>
+                          <p className="event-type">
+                            <Link className="detail-link" to={`/nodes/${nodeID}`}>
+                              node {nodeID}
+                            </Link>
+                          </p>
                           <p className="event-copy">{entries.length} retained entries</p>
                         </div>
                       </div>

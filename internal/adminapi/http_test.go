@@ -293,5 +293,11 @@ func TestHTTPHandlerServesMergedClusterAPI(t *testing.T) {
 		if detail.Run.RunID != "minority-partition" || detail.Handoff == nil {
 			t.Fatalf("detail = %+v", detail)
 		}
+		if detail.LiveCorrelation == nil || len(detail.LiveCorrelation.Nodes) != 1 || detail.LiveCorrelation.Nodes[0].NodeID != 1 {
+			t.Fatalf("live correlation = %+v, want node 1 correlation", detail.LiveCorrelation)
+		}
+		if len(detail.LiveCorrelation.Ranges) != 1 || detail.LiveCorrelation.Ranges[0].RangeID != 11 {
+			t.Fatalf("live correlation ranges = %+v, want range 11", detail.LiveCorrelation.Ranges)
+		}
 	})
 }
