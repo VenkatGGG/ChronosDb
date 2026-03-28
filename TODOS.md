@@ -219,7 +219,8 @@ eligibility checks now exist as a dedicated package, including monotonic
 publication, lease-sequence invalidation, intent-backlog stalling, and
 fail-closed behavior under clock-offset violations. Placement policy
 normalization and allocator-facing compilation now exist as a dedicated package
-for `REGIONAL`, `HOME_REGION`, and `GLOBAL` declarations. SQL-visible locality
+for `REGIONAL`, `HOME_REGION`, and `GLOBAL` declarations, and leaseholder
+selection can now follow compiled region preferences. SQL-visible locality
 semantics and descriptor integration are still open.
 
 ### [ ] Phase 8: Hardening and Operability
