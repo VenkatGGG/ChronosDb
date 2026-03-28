@@ -149,7 +149,7 @@ now owns the base transaction record, retry/restart rules, lock table state,
 wait queues, wound-wait decisions, refresh spans, one-phase commit, and
 client-visible retry/error mapping.
 
-### [ ] Phase 5: Multi-Range Transactions
+### [x] Phase 5: Multi-Range Transactions
 
 Deliver:
 
@@ -298,7 +298,7 @@ Rule:
 
 ## Remaining Execution Plan
 
-### [ ] Phase 6 Remaining Execution
+### [x] Phase 6 Remaining Execution
 
 - [x] 6.1 Add single-table aggregate planning (`GROUP BY`, `COUNT`, `SUM`) and map it to distributed flow stages
 - [x] 6.2 Add join-aware logical planning and distributed hash-join flow stages for supported equi-joins
