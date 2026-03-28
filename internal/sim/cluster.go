@@ -26,6 +26,12 @@ type ReplicaNode struct {
 	State     *replica.StateMachine
 }
 
+// ReplicaSnapshot is a snapshot image plus the raw MVCC/user span it covers.
+type ReplicaSnapshot struct {
+	Image replica.SnapshotImage
+	Data  []storage.RawKV
+}
+
 // RangeCluster is a deterministic multi-replica harness for one range.
 type RangeCluster struct {
 	rangeID   uint64
@@ -145,4 +151,71 @@ func (c *RangeCluster) ApplyEntry(replicaIDs []uint64, entry raftpb.Entry) error
 		}
 	}
 	return nil
+}
+
+// SnapshotImage captures the current replica image for snapshot-style learner catch-up.
+func (c *RangeCluster) SnapshotImage(replicaID uint64) (replica.SnapshotImage, error) {
+	node, ok := c.replicas[replicaID]
+	if !ok {
+		return replica.SnapshotImage{}, fmt.Errorf("sim: replica %d not found", replicaID)
+	}
+	image := replica.SnapshotImage{
+		AppliedIndex:     node.State.AppliedIndex(),
+		Descriptor:       node.State.Descriptor(),
+		SafeReadFrontier: node.State.SafeReadFrontier(),
+	}
+	if leaseRecord := node.State.Lease(); leaseRecord.Sequence != 0 {
+		image.Lease = leaseRecord
+		image.HasLease = true
+	}
+	if publication, ok := node.State.ClosedTimestamp(); ok {
+		image.ClosedTimestamp = publication
+		image.HasClosedTS = true
+	}
+	return image, nil
+}
+
+// CaptureSnapshot captures the current replica image plus its raw key/value span.
+func (c *RangeCluster) CaptureSnapshot(replicaID uint64) (ReplicaSnapshot, error) {
+	node, ok := c.replicas[replicaID]
+	if !ok {
+		return ReplicaSnapshot{}, fmt.Errorf("sim: replica %d not found", replicaID)
+	}
+	image, err := c.SnapshotImage(replicaID)
+	if err != nil {
+		return ReplicaSnapshot{}, err
+	}
+	if err := image.Descriptor.Validate(); err != nil {
+		return ReplicaSnapshot{}, err
+	}
+	data, err := node.Engine.ScanRawRange(image.Descriptor.StartKey, image.Descriptor.EndKey)
+	if err != nil {
+		return ReplicaSnapshot{}, err
+	}
+	return ReplicaSnapshot{
+		Image: image,
+		Data:  data,
+	}, nil
+}
+
+// InstallSnapshot applies a captured snapshot image and its raw key/value span to the target replica.
+func (c *RangeCluster) InstallSnapshot(replicaID uint64, snapshot ReplicaSnapshot) error {
+	node, ok := c.replicas[replicaID]
+	if !ok {
+		return fmt.Errorf("sim: replica %d not found", replicaID)
+	}
+	if err := node.State.ApplySnapshot(snapshot.Image); err != nil {
+		return err
+	}
+	if len(snapshot.Data) == 0 {
+		return nil
+	}
+	batch := node.Engine.NewWriteBatch()
+	defer batch.Close()
+	for _, kv := range snapshot.Data {
+		if err := batch.SetRaw(kv.Key, kv.Value); err != nil {
+			return err
+		}
+	}
+	return batch.Commit(true)
 }

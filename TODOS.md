@@ -255,8 +255,9 @@ allocator now also has a placement-aware rebalance scorer that avoids violating
 survival-region constraints while moving replicas off hotter nodes. A new
 deterministic `internal/sim` replica harness now exists for applying real
 replica commands across multiple in-memory engines, including lease changes and
-closed-timestamp-gated follower reads. Observability, broader simulation
-coverage, and chaos validation are still open.
+closed-timestamp-gated follower reads, snapshot-style learner catch-up, and
+promotion through the replicated membership state machine. Observability,
+broader simulation coverage, and chaos validation are still open.
 
 ## Ongoing Discipline
 

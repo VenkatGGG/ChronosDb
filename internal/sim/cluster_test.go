@@ -30,11 +30,13 @@ func TestRangeClusterReplicatesDescriptorLeaseWriteAndFollowerRead(t *testing.T)
 	}
 	defer cluster.Close()
 
+	rangeStart := storage.GlobalTablePrimaryPrefix(7)
+	rangeEnd := storage.GlobalTablePrimaryPrefix(8)
 	desc := meta.RangeDescriptor{
 		RangeID:    5,
 		Generation: 1,
-		StartKey:   []byte("a"),
-		EndKey:     []byte("z"),
+		StartKey:   rangeStart,
+		EndKey:     rangeEnd,
 		Replicas: []meta.ReplicaDescriptor{
 			{ReplicaID: 1, NodeID: 1, Role: meta.ReplicaRoleVoter},
 			{ReplicaID: 2, NodeID: 2, Role: meta.ReplicaRoleVoter},
@@ -146,11 +148,13 @@ func TestRangeClusterLeaseTransferRequiresFreshClosedTimestamp(t *testing.T) {
 	}
 	defer cluster.Close()
 
+	rangeStart := storage.GlobalTablePrimaryPrefix(11)
+	rangeEnd := storage.GlobalTablePrimaryPrefix(12)
 	initialDesc := meta.RangeDescriptor{
 		RangeID:    9,
 		Generation: 1,
-		StartKey:   []byte("m"),
-		EndKey:     []byte("z"),
+		StartKey:   rangeStart,
+		EndKey:     rangeEnd,
 		Replicas: []meta.ReplicaDescriptor{
 			{ReplicaID: 1, NodeID: 1, Role: meta.ReplicaRoleVoter},
 			{ReplicaID: 2, NodeID: 2, Role: meta.ReplicaRoleVoter},
@@ -307,6 +311,148 @@ func TestNewRangeClusterRejectsInvalidMembers(t *testing.T) {
 	}
 }
 
+func TestRangeClusterLearnerSnapshotCatchUpAndPromotion(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	cluster, err := NewRangeCluster(12, []Member{
+		{NodeID: 1, ReplicaID: 1},
+		{NodeID: 2, ReplicaID: 2},
+		{NodeID: 3, ReplicaID: 3},
+	})
+	if err != nil {
+		t.Fatalf("new range cluster: %v", err)
+	}
+	defer cluster.Close()
+
+	rangeStart := storage.GlobalTablePrimaryPrefix(21)
+	rangeEnd := storage.GlobalTablePrimaryPrefix(22)
+	desc := meta.RangeDescriptor{
+		RangeID:    12,
+		Generation: 1,
+		StartKey:   rangeStart,
+		EndKey:     rangeEnd,
+		Replicas: []meta.ReplicaDescriptor{
+			{ReplicaID: 1, NodeID: 1, Role: meta.ReplicaRoleVoter},
+			{ReplicaID: 2, NodeID: 2, Role: meta.ReplicaRoleVoter},
+		},
+		LeaseholderReplicaID: 1,
+	}
+	applyReplicatedCommand(t, cluster, []uint64{1, 2}, replica.Command{
+		Version: 1,
+		Type:    replica.CommandTypeUpdateDescriptor,
+		Descriptor: &replica.UpdateDescriptor{
+			ExpectedGeneration: 0,
+			Descriptor:         desc,
+		},
+	})
+
+	leaseRecord, err := lease.NewRecord(
+		1,
+		1,
+		hlc.Timestamp{WallTime: 100, Logical: 0},
+		hlc.Timestamp{WallTime: 400, Logical: 0},
+		1,
+	)
+	if err != nil {
+		t.Fatalf("new lease record: %v", err)
+	}
+	applyReplicatedCommand(t, cluster, []uint64{1, 2}, replica.Command{
+		Version: 1,
+		Type:    replica.CommandTypeSetLease,
+		Lease:   &replica.SetLease{Record: leaseRecord},
+	})
+
+	logicalKey := storage.GlobalTablePrimaryKey(21, []byte("warehouse"))
+	valueTS := hlc.Timestamp{WallTime: 180, Logical: 3}
+	applyReplicatedCommand(t, cluster, []uint64{1, 2}, replica.Command{
+		Version: 1,
+		Type:    replica.CommandTypePutValue,
+		Put: &replica.PutValue{
+			LogicalKey: logicalKey,
+			Timestamp:  valueTS,
+			Value:      []byte("reserved"),
+		},
+	})
+	applyReplicatedCommand(t, cluster, []uint64{1, 2}, replica.Command{
+		Version: 1,
+		Type:    replica.CommandTypeSetClosedTS,
+		ClosedTS: &replica.SetClosedTS{
+			Record: closedts.Record{
+				RangeID:       12,
+				LeaseSequence: leaseRecord.Sequence,
+				ClosedTS:      valueTS,
+				PublishedAt:   hlc.Timestamp{WallTime: 190, Logical: 0},
+			},
+		},
+	})
+
+	applyReplicatedCommand(t, cluster, []uint64{1, 2}, replica.Command{
+		Version: 1,
+		Type:    replica.CommandTypeChangeReplicas,
+		Replica: &replica.ChangeReplicas{
+			ExpectedGeneration: 1,
+			MetaLevel:          meta.LevelMeta2,
+			Change: replica.ReplicaChange{
+				Kind:    replica.ReplicaChangeAddLearner,
+				Replica: meta.ReplicaDescriptor{ReplicaID: 3, NodeID: 3, Role: meta.ReplicaRoleLearner},
+			},
+		},
+	})
+
+	snapshot, err := cluster.CaptureSnapshot(1)
+	if err != nil {
+		t.Fatalf("capture snapshot: %v", err)
+	}
+	if err := cluster.InstallSnapshot(3, snapshot); err != nil {
+		t.Fatalf("install snapshot: %v", err)
+	}
+
+	learner, ok := cluster.Replica(3)
+	if !ok {
+		t.Fatalf("replica 3 missing")
+	}
+	if learner.State.Descriptor().Generation != 2 {
+		t.Fatalf("learner generation after snapshot = %d, want 2", learner.State.Descriptor().Generation)
+	}
+	if role, ok := replicaRole(learner.State.Descriptor(), 3); !ok || role != meta.ReplicaRoleLearner {
+		t.Fatalf("learner role after snapshot = %q, ok=%v, want %q", role, ok, meta.ReplicaRoleLearner)
+	}
+	got, err := learner.State.HistoricalGet(ctx, logicalKey, valueTS)
+	if err != nil {
+		t.Fatalf("learner historical get after snapshot: %v", err)
+	}
+	if !bytes.Equal(got, []byte("reserved")) {
+		t.Fatalf("learner value after snapshot = %q, want %q", got, []byte("reserved"))
+	}
+
+	applyReplicatedCommand(t, cluster, []uint64{1, 2, 3}, replica.Command{
+		Version: 1,
+		Type:    replica.CommandTypeChangeReplicas,
+		Replica: &replica.ChangeReplicas{
+			ExpectedGeneration: 2,
+			MetaLevel:          meta.LevelMeta2,
+			Change: replica.ReplicaChange{
+				Kind:    replica.ReplicaChangePromote,
+				Replica: meta.ReplicaDescriptor{ReplicaID: 3, NodeID: 3, Role: meta.ReplicaRoleVoter},
+			},
+		},
+	})
+
+	for _, replicaID := range []uint64{1, 2, 3} {
+		node, ok := cluster.Replica(replicaID)
+		if !ok {
+			t.Fatalf("replica %d missing", replicaID)
+		}
+		if node.State.Descriptor().Generation != 3 {
+			t.Fatalf("replica %d generation after promotion = %d, want 3", replicaID, node.State.Descriptor().Generation)
+		}
+		if role, ok := replicaRole(node.State.Descriptor(), 3); !ok || role != meta.ReplicaRoleVoter {
+			t.Fatalf("replica %d promoted role = %q, ok=%v, want %q", replicaID, role, ok, meta.ReplicaRoleVoter)
+		}
+	}
+}
+
 func applyReplicatedCommand(t *testing.T, cluster *RangeCluster, replicaIDs []uint64, cmd replica.Command) {
 	t.Helper()
 
@@ -324,4 +470,13 @@ func nextEntry(t *testing.T, cluster *RangeCluster, cmd replica.Command) raftpb.
 		t.Fatalf("next entry: %v", err)
 	}
 	return entry
+}
+
+func replicaRole(desc meta.RangeDescriptor, replicaID uint64) (meta.ReplicaRole, bool) {
+	for _, replica := range desc.Replicas {
+		if replica.ReplicaID == replicaID {
+			return replica.Role, true
+		}
+	}
+	return "", false
 }

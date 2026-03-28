@@ -151,3 +151,49 @@ func TestBootstrapRejectsSecondInitialization(t *testing.T) {
 		t.Fatalf("second bootstrap error = %v, want %v", err, ErrAlreadyBootstrapped)
 	}
 }
+
+func TestScanRawRangeReturnsBoundedMVCCSpan(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	engine, err := Open(ctx, Options{
+		Dir: "scan-raw-range",
+		FS:  vfs.NewMem(),
+	})
+	if err != nil {
+		t.Fatalf("open engine: %v", err)
+	}
+	defer engine.Close()
+	if err := engine.Bootstrap(ctx, StoreIdent{ClusterID: "cluster-a", NodeID: 1, StoreID: 1}); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+
+	inRangeKey := GlobalTablePrimaryKey(7, []byte("alice"))
+	outOfRangeKey := GlobalTablePrimaryKey(9, []byte("bob"))
+	if err := engine.PutMVCCValue(ctx, inRangeKey, hlc.Timestamp{WallTime: 100, Logical: 1}, []byte("in")); err != nil {
+		t.Fatalf("put in-range value: %v", err)
+	}
+	if err := engine.PutMVCCValue(ctx, outOfRangeKey, hlc.Timestamp{WallTime: 100, Logical: 1}, []byte("out")); err != nil {
+		t.Fatalf("put out-of-range value: %v", err)
+	}
+
+	kvs, err := engine.ScanRawRange(GlobalTablePrimaryPrefix(7), GlobalTablePrimaryPrefix(8))
+	if err != nil {
+		t.Fatalf("scan raw range: %v", err)
+	}
+	if len(kvs) != 1 {
+		t.Fatalf("raw kv count = %d, want 1", len(kvs))
+	}
+	for _, kv := range kvs {
+		decoded, err := DecodeMVCCKey(kv.Key)
+		if err != nil {
+			t.Fatalf("decode mvcc key: %v", err)
+		}
+		if !bytes.Equal(decoded.LogicalKey, inRangeKey) {
+			t.Fatalf("scanned logical key = %q, want %q", decoded.LogicalKey, inRangeKey)
+		}
+		if decoded.Timestamp != (hlc.Timestamp{WallTime: 100, Logical: 1}) {
+			t.Fatalf("scanned timestamp = %+v, want %+v", decoded.Timestamp, hlc.Timestamp{WallTime: 100, Logical: 1})
+		}
+	}
+}
