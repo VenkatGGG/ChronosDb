@@ -262,7 +262,8 @@ Exit criteria:
 
 - the system can be operated, profiled, and failure-tested at realistic scale
 
-**Status:** In progress. A dedicated admission controller now exists with
+**Status:** Planned hardening skeletons are complete, but full chaos/Jepsen
+validation is still outstanding. A dedicated admission controller now exists with
 critical/normal/background tiers, reserved capacity for critical work, and
 compaction escalation when storage pressure crosses configured thresholds. The
 allocator now also has a placement-aware rebalance scorer that avoids violating
@@ -279,8 +280,10 @@ closed-timestamp publication rejection. The operator metrics surface now also
 exposes explicit snapshot-pressure and allocator-decision signals alongside the
 earlier Raft, split, compaction, and routing metrics. The simulator also now
 has a deterministic multi-range coordinator-recovery harness for `STAGING`
-transactions observed across participant ranges. Chaos validation is still
-open.
+transactions observed across participant ranges. A typed
+`internal/systemtest` harness now also exists for partition, crash/restart,
+wait, and ambiguous-commit scenarios against a pluggable cluster controller.
+Chaos validation is still open.
 
 ## Ongoing Discipline
 
@@ -307,8 +310,8 @@ Rule:
 - [x] 7.2 Make leaseholder/follower read routing expose locality reasons and freshness gaps as first-class outputs
 - [x] 7.3 Thread locality policy through more replica movement and cache-refresh surfaces
 
-### [ ] Phase 8 Remaining Execution
+### [x] Phase 8 Remaining Execution
 
 - [x] 8.1 Expand deterministic simulation to cover split races, lease churn, and multi-range transaction recovery
 - [x] 8.2 Add snapshot-pressure and allocator-observability metrics around the new operator HTTP surface
-- [ ] 8.3 Add a chaos/system-test harness skeleton for partitions, crash/restart, and ambiguous commit timing
+- [x] 8.3 Add a chaos/system-test harness skeleton for partitions, crash/restart, and ambiguous commit timing
