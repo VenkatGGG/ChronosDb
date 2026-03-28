@@ -74,7 +74,8 @@ func TestRunnerExecutesScenarioInOrder(t *testing.T) {
 		},
 	}
 	controller := &recordingController{}
-	if err := (Runner{Controller: controller}).Run(context.Background(), scenario); err != nil {
+	report, err := (Runner{Controller: controller}).Run(context.Background(), scenario)
+	if err != nil {
 		t.Fatalf("run scenario: %v", err)
 	}
 	want := []string{
@@ -88,10 +89,65 @@ func TestRunnerExecutesScenarioInOrder(t *testing.T) {
 	if !reflect.DeepEqual(controller.calls, want) {
 		t.Fatalf("calls = %+v, want %+v", controller.calls, want)
 	}
+	if len(report.Steps) != len(want) || report.ScenarioName != scenario.Name {
+		t.Fatalf("report = %+v, want %d steps for %q", report, len(want), scenario.Name)
+	}
+	for _, step := range report.Steps {
+		if step.StartedAt.IsZero() || step.FinishedAt.IsZero() {
+			t.Fatalf("step report timestamps must be populated: %+v", step)
+		}
+	}
+}
+
+func TestRunnerInvokesAssertionHooks(t *testing.T) {
+	t.Parallel()
+
+	scenario := Scenario{
+		Name:  "asserted-restart",
+		Nodes: []uint64{1, 2},
+		Steps: []Step{
+			{Action: ActionCrashNode, NodeID: 2},
+			{Action: ActionWait, Duration: time.Second},
+			{Action: ActionRestartNode, NodeID: 2},
+		},
+	}
+	controller := &recordingController{}
+	assertion := &recordingAssertion{}
+	report, err := (Runner{
+		Controller: controller,
+		Assertions: []AssertionHook{assertion},
+	}).Run(context.Background(), scenario)
+	if err != nil {
+		t.Fatalf("run scenario with assertions: %v", err)
+	}
+	if assertion.afterRunName != scenario.Name {
+		t.Fatalf("after run scenario = %q, want %q", assertion.afterRunName, scenario.Name)
+	}
+	if !reflect.DeepEqual(assertion.afterStepActions, []ActionType{ActionCrashNode, ActionWait, ActionRestartNode}) {
+		t.Fatalf("after-step actions = %+v", assertion.afterStepActions)
+	}
+	if len(report.Steps) != 3 {
+		t.Fatalf("report steps = %+v, want 3", report.Steps)
+	}
 }
 
 type recordingController struct {
 	calls []string
+}
+
+type recordingAssertion struct {
+	afterStepActions []ActionType
+	afterRunName     string
+}
+
+func (r *recordingAssertion) AfterStep(_ context.Context, _ Scenario, step StepReport) error {
+	r.afterStepActions = append(r.afterStepActions, step.Action)
+	return nil
+}
+
+func (r *recordingAssertion) AfterRun(_ context.Context, report RunReport) error {
+	r.afterRunName = report.ScenarioName
+	return nil
 }
 
 func (r *recordingController) Partition(_ context.Context, spec PartitionSpec) error {

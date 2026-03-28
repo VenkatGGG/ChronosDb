@@ -284,7 +284,9 @@ transactions observed across participant ranges. A typed
 `internal/systemtest` harness now also exists for partition, crash/restart,
 wait, and ambiguous-commit scenarios against a pluggable cluster controller.
 That harness now also has a built-in catalog of canonical partition, restart,
-and ambiguous-commit recovery scenarios. Chaos validation is still open.
+and ambiguous-commit recovery scenarios. Runner executions now also emit
+structured reports and support post-step and post-run assertion hooks. Chaos
+validation is still open.
 
 ## Ongoing Discipline
 
@@ -320,5 +322,5 @@ Rule:
 ### [ ] Phase 8 Follow-On Execution
 
 - [x] 8.4 Add a built-in catalog of canonical chaos scenarios for partition, crash/restart, and ambiguous-commit recovery
-- [ ] 8.5 Add structured execution reports and assertion hooks to the system-test runner
+- [x] 8.5 Add structured execution reports and assertion hooks to the system-test runner
 - [ ] 8.6 Add a Jepsen/chaos handoff manifest format so external fault runners can consume the same scenarios

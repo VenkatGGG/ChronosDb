@@ -59,50 +59,106 @@ type Controller interface {
 	Wait(context.Context, time.Duration) error
 }
 
+// AssertionHook observes scenario execution and may reject the run.
+type AssertionHook interface {
+	AfterStep(context.Context, Scenario, StepReport) error
+	AfterRun(context.Context, RunReport) error
+}
+
+// RunReport is the structured execution evidence for one scenario run.
+type RunReport struct {
+	ScenarioName string
+	StartedAt    time.Time
+	FinishedAt   time.Time
+	Steps        []StepReport
+}
+
+// StepReport captures one executed system-test step.
+type StepReport struct {
+	Index      int
+	Action     ActionType
+	StartedAt  time.Time
+	FinishedAt time.Time
+	Error      string
+}
+
 // Runner validates and executes system-test scenarios against a controller.
 type Runner struct {
 	Controller Controller
+	Assertions []AssertionHook
+	Now        func() time.Time
 }
 
 // Run executes the scenario step-by-step after validation.
-func (r Runner) Run(ctx context.Context, scenario Scenario) error {
+func (r Runner) Run(ctx context.Context, scenario Scenario) (RunReport, error) {
 	if r.Controller == nil {
-		return fmt.Errorf("systemtest: controller is required")
+		return RunReport{}, fmt.Errorf("systemtest: controller is required")
 	}
 	if err := scenario.Validate(); err != nil {
-		return err
+		return RunReport{}, err
 	}
-	for _, step := range scenario.Steps {
+	now := r.Now
+	if now == nil {
+		now = time.Now().UTC
+	}
+	report := RunReport{
+		ScenarioName: scenario.Name,
+		StartedAt:    now(),
+		Steps:        make([]StepReport, 0, len(scenario.Steps)),
+	}
+	for i, step := range scenario.Steps {
+		stepReport := StepReport{
+			Index:     i + 1,
+			Action:    step.Action,
+			StartedAt: now(),
+		}
+		var err error
 		switch step.Action {
 		case ActionPartition:
-			if err := r.Controller.Partition(ctx, *step.Partition); err != nil {
-				return err
-			}
+			err = r.Controller.Partition(ctx, *step.Partition)
 		case ActionHeal:
-			if err := r.Controller.Heal(ctx); err != nil {
-				return err
-			}
+			err = r.Controller.Heal(ctx)
 		case ActionCrashNode:
-			if err := r.Controller.CrashNode(ctx, step.NodeID); err != nil {
-				return err
-			}
+			err = r.Controller.CrashNode(ctx, step.NodeID)
 		case ActionRestartNode:
-			if err := r.Controller.RestartNode(ctx, step.NodeID); err != nil {
-				return err
-			}
+			err = r.Controller.RestartNode(ctx, step.NodeID)
 		case ActionAmbiguousCommit:
-			if err := r.Controller.InjectAmbiguousCommit(ctx, *step.AmbiguousCommit); err != nil {
-				return err
-			}
+			err = r.Controller.InjectAmbiguousCommit(ctx, *step.AmbiguousCommit)
 		case ActionWait:
-			if err := r.Controller.Wait(ctx, step.Duration); err != nil {
-				return err
-			}
+			err = r.Controller.Wait(ctx, step.Duration)
 		default:
-			return fmt.Errorf("systemtest: unknown action %q", step.Action)
+			err = fmt.Errorf("systemtest: unknown action %q", step.Action)
+		}
+		stepReport.FinishedAt = now()
+		if err != nil {
+			stepReport.Error = err.Error()
+			report.Steps = append(report.Steps, stepReport)
+			report.FinishedAt = now()
+			return report, err
+		}
+		for _, assertion := range r.Assertions {
+			if assertion == nil {
+				continue
+			}
+			if err := assertion.AfterStep(ctx, scenario, stepReport); err != nil {
+				stepReport.Error = err.Error()
+				report.Steps = append(report.Steps, stepReport)
+				report.FinishedAt = now()
+				return report, err
+			}
+		}
+		report.Steps = append(report.Steps, stepReport)
+	}
+	report.FinishedAt = now()
+	for _, assertion := range r.Assertions {
+		if assertion == nil {
+			continue
+		}
+		if err := assertion.AfterRun(ctx, report); err != nil {
+			return report, err
 		}
 	}
-	return nil
+	return report, nil
 }
 
 // Validate checks that the scenario is internally consistent before execution.
