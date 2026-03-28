@@ -343,6 +343,8 @@ top-level outcomes without starting that work yet.
   including scenario manifest, structured runner report, per-node logs, and a
   final pass/fail summary that can be attached to CI or retained for manual review
 - [ ] 9.3 Define and implement assertion packs for external correctness checks
+- [x] 9.3 Define and implement assertion packs for external correctness checks
+  Status: complete via artifact-level correctness assertions for acknowledged-write visibility, follower-read freshness, deterministic `STAGING` outcomes, and lease/descriptor monotonicity, plus standardized node-log markers for external runners to emit.
   including no acknowledged-write loss, no stale follower read beyond closed
   timestamp, deterministic `STAGING` recovery outcome, and lease/descriptor
   generation monotonicity under churn
