@@ -5,7 +5,9 @@ import (
 	"flag"
 	"log"
 	"net/http"
+	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -19,6 +21,7 @@ func main() {
 	eventLimit := flag.Int("event-limit-per-node", 64, "recent events to request from each node")
 	streamPollInterval := flag.Duration("event-poll-interval", time.Second, "cluster event polling interval")
 	streamReplayLimit := flag.Int("event-replay-limit", 256, "recent events retained for SSE replay")
+	uiDir := flag.String("ui-dir", "", "optional built UI directory to serve alongside the console API")
 	flag.Parse()
 
 	rawTargets := splitAndTrim(*nodeURLs)
@@ -46,13 +49,18 @@ func main() {
 		log.Fatal(err)
 	}
 
+	apiHandler := adminapi.NewHTTPHandlerWithOptions(aggregator, adminapi.HTTPHandlerOptions{
+		Stream: stream,
+	})
+	handler, err := buildHandler(apiHandler, *uiDir)
+	if err != nil {
+		log.Fatal(err)
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 	server := &http.Server{
-		Addr: *listenAddr,
-		Handler: adminapi.NewHTTPHandlerWithOptions(aggregator, adminapi.HTTPHandlerOptions{
-			Stream: stream,
-		}),
+		Addr:    *listenAddr,
+		Handler: handler,
 	}
 	go func() {
 		if err := stream.Start(ctx); err != nil && err != context.Canceled {
@@ -82,4 +90,44 @@ func splitAndTrim(raw string) []string {
 		out = append(out, part)
 	}
 	return out
+}
+
+func buildHandler(api http.Handler, uiDir string) (http.Handler, error) {
+	if uiDir == "" {
+		return api, nil
+	}
+	indexPath := filepath.Join(uiDir, "index.html")
+	info, err := os.Stat(indexPath)
+	if err != nil {
+		return nil, err
+	}
+	if info.IsDir() {
+		return nil, os.ErrNotExist
+	}
+
+	fileServer := http.FileServer(http.Dir(uiDir))
+	mux := http.NewServeMux()
+	mux.Handle("/api/", api)
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/") {
+			api.ServeHTTP(w, r)
+			return
+		}
+		cleaned := filepath.Clean(strings.TrimPrefix(r.URL.Path, "/"))
+		if cleaned == "." || cleaned == "/" {
+			http.ServeFile(w, r, indexPath)
+			return
+		}
+		if strings.HasPrefix(cleaned, "..") {
+			http.ServeFile(w, r, indexPath)
+			return
+		}
+		target := filepath.Join(uiDir, cleaned)
+		if stat, err := os.Stat(target); err == nil && !stat.IsDir() {
+			fileServer.ServeHTTP(w, r)
+			return
+		}
+		http.ServeFile(w, r, indexPath)
+	})
+	return mux, nil
 }

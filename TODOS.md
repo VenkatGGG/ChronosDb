@@ -416,11 +416,11 @@ Exit criteria:
   of inference
 - the UI can drill into scenario runs and retained artifacts
 
-**Status:** In progress. The frontend is still not the hard part; the real work
-is the backend admin plane. Typed view models, node-level admin endpoints, a
-runnable cluster aggregator service, and a live SSE event stream are now in
-place, so the next slice can finally move into the frontend shell and
-placement/key drilldown without faking backend state.
+**Status:** In progress. The frontend shell now exists as a real React/TypeScript
+console app with overview, nodes, ranges, and events surfaces, and
+`chronos-console` can optionally serve the built UI with SPA fallback. The
+remaining work is now deeper data-ownership visibility: authoritative placement
+visualization, key-location drilldown, and retained scenario browsing.
 
 ### [ ] Phase 11 Remaining Execution
 
@@ -428,7 +428,7 @@ placement/key drilldown without faking backend state.
 - [x] 11.2 Add node-level admin read endpoints for node summary, range inventory, and recent events
 - [x] 11.3 Add a cluster snapshot aggregator service that polls nodes and exposes a unified API
 - [x] 11.4 Add an SSE event stream for cluster operations and scenario activity
-- [ ] 11.5 Add a frontend shell with overview, nodes, ranges, and events pages
+- [x] 11.5 Add a frontend shell with overview, nodes, ranges, and events pages
 - [ ] 11.6 Add range placement and leaseholder visualization from authoritative descriptors
 - [ ] 11.7 Add key-location lookup and placement drilldown
 - [ ] 11.8 Add scenario/artifact browsing for retained fault runs

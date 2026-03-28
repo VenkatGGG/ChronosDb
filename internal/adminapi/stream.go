@@ -10,6 +10,8 @@ import (
 	"time"
 )
 
+const clusterSSEEventName = "cluster_event"
+
 // EventStreamConfig configures the cluster event polling and replay pipeline.
 type EventStreamConfig struct {
 	Aggregator        *Aggregator
@@ -181,7 +183,7 @@ func writeSSEEvent(w http.ResponseWriter, event ClusterEvent) error {
 	if _, err := fmt.Fprintf(w, "id: %s\n", event.ID); err != nil {
 		return err
 	}
-	if _, err := fmt.Fprintf(w, "event: %s\n", event.Type); err != nil {
+	if _, err := fmt.Fprintf(w, "event: %s\n", clusterSSEEventName); err != nil {
 		return err
 	}
 	if _, err := fmt.Fprintf(w, "data: %s\n\n", payload); err != nil {
