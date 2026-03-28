@@ -18,6 +18,12 @@ import (
 // ErrKeyNotLocated reports that no merged range descriptor spans the requested key.
 var ErrKeyNotLocated = errors.New("key not located")
 
+// ErrNodeNotFound reports that the requested node is absent from the merged snapshot.
+var ErrNodeNotFound = errors.New("node not found")
+
+// ErrRangeNotFound reports that the requested range is absent from the merged snapshot.
+var ErrRangeNotFound = errors.New("range not found")
+
 // NodeTarget identifies one node admin endpoint for snapshot polling.
 type NodeTarget struct {
 	NodeID  uint64
@@ -163,6 +169,131 @@ func (a *Aggregator) LocateKey(ctx context.Context, raw string) (KeyLocationView
 	return KeyLocationView{}, ErrKeyNotLocated
 }
 
+// Topology returns a graph-friendly placement view derived from the merged snapshot.
+func (a *Aggregator) Topology(ctx context.Context) (ClusterTopologyView, error) {
+	snapshot, err := a.Snapshot(ctx)
+	if err != nil {
+		return ClusterTopologyView{}, err
+	}
+	edges := make([]TopologyEdgeView, 0)
+	for _, view := range snapshot.Ranges {
+		for _, replica := range view.Replicas {
+			edges = append(edges, TopologyEdgeView{
+				NodeID:      replica.NodeID,
+				RangeID:     view.RangeID,
+				ReplicaID:   replica.ReplicaID,
+				Role:        replica.Role,
+				Leaseholder: replica.ReplicaID == view.LeaseholderReplicaID,
+			})
+		}
+	}
+	sort.Slice(edges, func(i, j int) bool {
+		if edges[i].RangeID != edges[j].RangeID {
+			return edges[i].RangeID < edges[j].RangeID
+		}
+		return edges[i].ReplicaID < edges[j].ReplicaID
+	})
+	return ClusterTopologyView{
+		GeneratedAt: snapshot.GeneratedAt,
+		Nodes:       append([]NodeView(nil), snapshot.Nodes...),
+		Ranges:      cloneRangeViews(snapshot.Ranges),
+		Edges:       edges,
+	}, nil
+}
+
+// NodeDetail returns the authoritative drilldown view for one node.
+func (a *Aggregator) NodeDetail(ctx context.Context, nodeID uint64) (NodeDetailView, error) {
+	snapshot, err := a.Snapshot(ctx)
+	if err != nil {
+		return NodeDetailView{}, err
+	}
+	node, ok := findNode(snapshot.Nodes, nodeID)
+	if !ok {
+		return NodeDetailView{}, ErrNodeNotFound
+	}
+	hosted := make([]NodeHostedRangeView, 0)
+	hostedRangeIDs := make(map[uint64]struct{})
+	for _, view := range snapshot.Ranges {
+		for _, replica := range view.Replicas {
+			if replica.NodeID != nodeID {
+				continue
+			}
+			hosted = append(hosted, NodeHostedRangeView{
+				RangeID:       view.RangeID,
+				Generation:    view.Generation,
+				StartKey:      view.StartKey,
+				EndKey:        view.EndKey,
+				ReplicaID:     replica.ReplicaID,
+				ReplicaRole:   replica.Role,
+				Leaseholder:   replica.ReplicaID == view.LeaseholderReplicaID,
+				PlacementMode: view.PlacementMode,
+			})
+			hostedRangeIDs[view.RangeID] = struct{}{}
+		}
+	}
+	sort.Slice(hosted, func(i, j int) bool {
+		if hosted[i].RangeID != hosted[j].RangeID {
+			return hosted[i].RangeID < hosted[j].RangeID
+		}
+		return hosted[i].ReplicaID < hosted[j].ReplicaID
+	})
+	events := correlateEvents(snapshot.Events, func(event ClusterEvent) bool {
+		if event.NodeID == nodeID {
+			return true
+		}
+		if event.RangeID == 0 {
+			return false
+		}
+		_, ok := hostedRangeIDs[event.RangeID]
+		return ok
+	})
+	return NodeDetailView{
+		Node:         node,
+		HostedRanges: hosted,
+		RecentEvents: events,
+	}, nil
+}
+
+// RangeDetail returns the authoritative drilldown view for one range.
+func (a *Aggregator) RangeDetail(ctx context.Context, rangeID uint64) (RangeDetailView, error) {
+	snapshot, err := a.Snapshot(ctx)
+	if err != nil {
+		return RangeDetailView{}, err
+	}
+	nodeIndex := make(map[uint64]NodeView, len(snapshot.Nodes))
+	for _, node := range snapshot.Nodes {
+		nodeIndex[node.NodeID] = node
+	}
+	for _, view := range snapshot.Ranges {
+		if view.RangeID != rangeID {
+			continue
+		}
+		replicaNodes := make([]RangeReplicaNodeView, 0, len(view.Replicas))
+		for _, replica := range view.Replicas {
+			replicaNode := RangeReplicaNodeView{
+				Replica:     replica,
+				Leaseholder: replica.ReplicaID == view.LeaseholderReplicaID,
+			}
+			if node, ok := nodeIndex[replica.NodeID]; ok {
+				copyNode := node
+				replicaNode.Node = &copyNode
+			}
+			replicaNodes = append(replicaNodes, replicaNode)
+		}
+		sort.Slice(replicaNodes, func(i, j int) bool {
+			return replicaNodes[i].Replica.ReplicaID < replicaNodes[j].Replica.ReplicaID
+		})
+		return RangeDetailView{
+			Range:        cloneRangeView(view),
+			ReplicaNodes: replicaNodes,
+			RecentEvents: correlateEvents(snapshot.Events, func(event ClusterEvent) bool {
+				return event.RangeID == rangeID
+			}),
+		}, nil
+	}
+	return RangeDetailView{}, ErrRangeNotFound
+}
+
 func (a *Aggregator) fetchSnapshot(ctx context.Context, target NodeTarget) (ClusterSnapshot, error) {
 	path := target.BaseURL + "/admin/snapshot"
 	if a.eventLimitPerNode > 0 {
@@ -251,6 +382,43 @@ func cloneRangeView(view RangeView) RangeView {
 	copyView.PreferredRegions = append([]string(nil), view.PreferredRegions...)
 	copyView.LeasePreferences = append([]string(nil), view.LeasePreferences...)
 	return copyView
+}
+
+func cloneRangeViews(views []RangeView) []RangeView {
+	out := make([]RangeView, 0, len(views))
+	for _, view := range views {
+		out = append(out, cloneRangeView(view))
+	}
+	return out
+}
+
+func findNode(nodes []NodeView, nodeID uint64) (NodeView, bool) {
+	for _, node := range nodes {
+		if node.NodeID == nodeID {
+			return node, true
+		}
+	}
+	return NodeView{}, false
+}
+
+func correlateEvents(events []ClusterEvent, match func(ClusterEvent) bool) []ClusterEvent {
+	correlated := make([]ClusterEvent, 0)
+	seen := make(map[string]struct{})
+	for _, event := range events {
+		if !match(event) {
+			continue
+		}
+		event = NormalizeEvent(event)
+		if _, ok := seen[event.ID]; ok {
+			continue
+		}
+		seen[event.ID] = struct{}{}
+		correlated = append(correlated, event)
+	}
+	sort.SliceStable(correlated, func(i, j int) bool {
+		return correlated[i].Timestamp.After(correlated[j].Timestamp)
+	})
+	return correlated
 }
 
 func parseLookupKey(raw string) ([]byte, string, error) {

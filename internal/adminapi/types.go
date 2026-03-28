@@ -69,6 +69,56 @@ type ClusterSnapshot struct {
 	Events      []ClusterEvent `json:"events,omitempty"`
 }
 
+// TopologyEdgeView is one replica-placement edge in the cluster topology graph.
+type TopologyEdgeView struct {
+	NodeID      uint64 `json:"node_id"`
+	RangeID     uint64 `json:"range_id"`
+	ReplicaID   uint64 `json:"replica_id"`
+	Role        string `json:"role"`
+	Leaseholder bool   `json:"leaseholder"`
+}
+
+// ClusterTopologyView is the graph-friendly console view of live placement.
+type ClusterTopologyView struct {
+	GeneratedAt time.Time          `json:"generated_at"`
+	Nodes       []NodeView         `json:"nodes"`
+	Ranges      []RangeView        `json:"ranges"`
+	Edges       []TopologyEdgeView `json:"edges"`
+}
+
+// NodeHostedRangeView is one range residency row in a node drilldown view.
+type NodeHostedRangeView struct {
+	RangeID       uint64 `json:"range_id"`
+	Generation    uint64 `json:"generation"`
+	StartKey      string `json:"start_key"`
+	EndKey        string `json:"end_key,omitempty"`
+	ReplicaID     uint64 `json:"replica_id"`
+	ReplicaRole   string `json:"replica_role"`
+	Leaseholder   bool   `json:"leaseholder"`
+	PlacementMode string `json:"placement_mode,omitempty"`
+}
+
+// NodeDetailView is the console drilldown for one node.
+type NodeDetailView struct {
+	Node         NodeView              `json:"node"`
+	HostedRanges []NodeHostedRangeView `json:"hosted_ranges"`
+	RecentEvents []ClusterEvent        `json:"recent_events"`
+}
+
+// RangeReplicaNodeView ties one replica to its current node surface.
+type RangeReplicaNodeView struct {
+	Replica     ReplicaView `json:"replica"`
+	Node        *NodeView   `json:"node,omitempty"`
+	Leaseholder bool        `json:"leaseholder"`
+}
+
+// RangeDetailView is the console drilldown for one range.
+type RangeDetailView struct {
+	Range        RangeView              `json:"range"`
+	ReplicaNodes []RangeReplicaNodeView `json:"replica_nodes"`
+	RecentEvents []ClusterEvent         `json:"recent_events"`
+}
+
 // ScenarioManifest is the console-facing export of a retained chaos manifest.
 type ScenarioManifest struct {
 	Version  string                 `json:"version"`

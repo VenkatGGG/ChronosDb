@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 )
 
@@ -45,6 +46,27 @@ func NewHTTPHandlerWithOptions(aggregator *Aggregator, opts HTTPHandlerOptions) 
 		}
 		writeJSONResponse(w, snapshot.Nodes)
 	})
+	mux.HandleFunc("/api/v1/nodes/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		nodeID, err := parseResourceID(r.URL.Path, "/api/v1/nodes/")
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		detail, err := aggregator.NodeDetail(r.Context(), nodeID)
+		if err != nil {
+			status := http.StatusBadGateway
+			if errors.Is(err, ErrNodeNotFound) {
+				status = http.StatusNotFound
+			}
+			http.Error(w, err.Error(), status)
+			return
+		}
+		writeJSONResponse(w, detail)
+	})
 	mux.HandleFunc("/api/v1/ranges", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -56,6 +78,39 @@ func NewHTTPHandlerWithOptions(aggregator *Aggregator, opts HTTPHandlerOptions) 
 			return
 		}
 		writeJSONResponse(w, snapshot.Ranges)
+	})
+	mux.HandleFunc("/api/v1/ranges/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		rangeID, err := parseResourceID(r.URL.Path, "/api/v1/ranges/")
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		detail, err := aggregator.RangeDetail(r.Context(), rangeID)
+		if err != nil {
+			status := http.StatusBadGateway
+			if errors.Is(err, ErrRangeNotFound) {
+				status = http.StatusNotFound
+			}
+			http.Error(w, err.Error(), status)
+			return
+		}
+		writeJSONResponse(w, detail)
+	})
+	mux.HandleFunc("/api/v1/topology", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		topology, err := aggregator.Topology(r.Context())
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		writeJSONResponse(w, topology)
 	})
 	mux.HandleFunc("/api/v1/events", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -138,4 +193,16 @@ func isLookupInputError(err error) bool {
 	}
 	message := err.Error()
 	return strings.HasPrefix(message, "adminapi: lookup key") || strings.HasPrefix(message, "adminapi: invalid hex lookup key")
+}
+
+func parseResourceID(path, prefix string) (uint64, error) {
+	id := strings.TrimPrefix(path, prefix)
+	if id == "" || strings.Contains(id, "/") {
+		return 0, errors.New("resource not found")
+	}
+	value, err := strconv.ParseUint(id, 10, 64)
+	if err != nil {
+		return 0, errors.New("resource id must be an unsigned integer")
+	}
+	return value, nil
 }

@@ -231,3 +231,141 @@ func TestAggregatorLocateKeyErrors(t *testing.T) {
 		t.Fatalf("err = %v, want ErrKeyNotLocated", err)
 	}
 }
+
+func TestAggregatorTopologyAndDetails(t *testing.T) {
+	t.Parallel()
+
+	server1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(ClusterSnapshot{
+			Nodes: []NodeView{{
+				NodeID:       1,
+				Status:       "ok",
+				ReplicaCount: 2,
+				LeaseCount:   1,
+			}},
+			Ranges: []RangeView{
+				{
+					RangeID:              11,
+					Generation:           4,
+					StartKey:             "61",
+					EndKey:               "6d",
+					Replicas:             []ReplicaView{{ReplicaID: 1, NodeID: 1, Role: "voter"}},
+					LeaseholderReplicaID: 1,
+					LeaseholderNodeID:    1,
+					PlacementMode:        "REGIONAL",
+				},
+				{
+					RangeID:              12,
+					Generation:           2,
+					StartKey:             "6d",
+					EndKey:               "",
+					Replicas:             []ReplicaView{{ReplicaID: 3, NodeID: 1, Role: "voter"}},
+					LeaseholderReplicaID: 3,
+					LeaseholderNodeID:    1,
+				},
+			},
+			Events: []ClusterEvent{
+				{
+					Timestamp: time.Unix(100, 0).UTC(),
+					Type:      "lease_transfer",
+					NodeID:    1,
+					RangeID:   11,
+					Message:   "lease moved to node 1",
+				},
+				{
+					Timestamp: time.Unix(101, 0).UTC(),
+					Type:      "node_heartbeat",
+					NodeID:    1,
+					Message:   "node 1 healthy",
+				},
+			},
+		})
+	}))
+	defer server1.Close()
+
+	server2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(ClusterSnapshot{
+			Nodes: []NodeView{{
+				NodeID:       2,
+				Status:       "ok",
+				ReplicaCount: 1,
+				LeaseCount:   0,
+			}},
+			Ranges: []RangeView{{
+				RangeID:              11,
+				Generation:           4,
+				StartKey:             "61",
+				EndKey:               "6d",
+				Replicas:             []ReplicaView{{ReplicaID: 2, NodeID: 2, Role: "voter"}},
+				LeaseholderReplicaID: 1,
+				LeaseholderNodeID:    1,
+				PlacementMode:        "REGIONAL",
+			}},
+			Events: []ClusterEvent{{
+				Timestamp: time.Unix(102, 0).UTC(),
+				Type:      "replica_added",
+				NodeID:    2,
+				RangeID:   11,
+				Message:   "replica added on node 2",
+			}},
+		})
+	}))
+	defer server2.Close()
+
+	aggregator, err := NewAggregator(AggregatorConfig{
+		Targets: []NodeTarget{
+			{NodeID: 1, BaseURL: server1.URL},
+			{NodeID: 2, BaseURL: server2.URL},
+		},
+		Now: func() time.Time { return time.Unix(200, 0).UTC() },
+	})
+	if err != nil {
+		t.Fatalf("new aggregator: %v", err)
+	}
+
+	topology, err := aggregator.Topology(context.Background())
+	if err != nil {
+		t.Fatalf("topology: %v", err)
+	}
+	if len(topology.Edges) != 3 {
+		t.Fatalf("edge count = %d, want 3", len(topology.Edges))
+	}
+	if !topology.Edges[0].Leaseholder {
+		t.Fatalf("first edge = %+v, want leaseholder edge", topology.Edges[0])
+	}
+
+	nodeDetail, err := aggregator.NodeDetail(context.Background(), 1)
+	if err != nil {
+		t.Fatalf("node detail: %v", err)
+	}
+	if len(nodeDetail.HostedRanges) != 2 {
+		t.Fatalf("hosted range count = %d, want 2", len(nodeDetail.HostedRanges))
+	}
+	if len(nodeDetail.RecentEvents) != 3 {
+		t.Fatalf("recent event count = %d, want 3", len(nodeDetail.RecentEvents))
+	}
+	if nodeDetail.RecentEvents[0].Timestamp.Before(nodeDetail.RecentEvents[1].Timestamp) {
+		t.Fatalf("recent events not sorted newest-first: %+v", nodeDetail.RecentEvents)
+	}
+
+	rangeDetail, err := aggregator.RangeDetail(context.Background(), 11)
+	if err != nil {
+		t.Fatalf("range detail: %v", err)
+	}
+	if len(rangeDetail.ReplicaNodes) != 2 {
+		t.Fatalf("replica node count = %d, want 2", len(rangeDetail.ReplicaNodes))
+	}
+	if rangeDetail.ReplicaNodes[0].Node == nil || rangeDetail.ReplicaNodes[1].Node == nil {
+		t.Fatalf("replica nodes = %+v, want resolved node surfaces", rangeDetail.ReplicaNodes)
+	}
+	if len(rangeDetail.RecentEvents) != 2 {
+		t.Fatalf("range event count = %d, want 2", len(rangeDetail.RecentEvents))
+	}
+
+	if _, err := aggregator.NodeDetail(context.Background(), 9); !errors.Is(err, ErrNodeNotFound) {
+		t.Fatalf("node detail err = %v, want ErrNodeNotFound", err)
+	}
+	if _, err := aggregator.RangeDetail(context.Background(), 99); !errors.Is(err, ErrRangeNotFound) {
+		t.Fatalf("range detail err = %v, want ErrRangeNotFound", err)
+	}
+}

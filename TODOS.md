@@ -457,13 +457,15 @@ Exit criteria:
 
 **Status:** In progress. Phase 12 starts by freezing the topology and drilldown
 contracts, then adding backend APIs before deeper UI navigation and forensics
-surfaces.
+surfaces. The topology summary plus node/range drilldown APIs now exist and
+derive their views from authoritative descriptors, live node state, and
+correlated recent events.
 
 ### [ ] Phase 12 Remaining Execution
 
-- [ ] 12.1 Freeze topology and drilldown view contracts plus HTTP endpoints
-- [ ] 12.2 Add backend topology summary, node detail, and range detail APIs
-- [ ] 12.3 Correlate recent events by node and range on the backend
+- [x] 12.1 Freeze topology and drilldown view contracts plus HTTP endpoints
+- [x] 12.2 Add backend topology summary, node detail, and range detail APIs
+- [x] 12.3 Correlate recent events by node and range on the backend
 - [ ] 12.4 Add console topology and drilldown pages with deep-linkable routes
 - [ ] 12.5 Link retained scenario artifacts to affected nodes and ranges in the console
 - [ ] 12.6 Add focused tests for topology merges, drilldown correctness, and deep-link behavior

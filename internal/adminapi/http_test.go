@@ -165,6 +165,54 @@ func TestHTTPHandlerServesMergedClusterAPI(t *testing.T) {
 		}
 	})
 
+	t.Run("node detail", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/nodes/1", nil)
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("node detail status = %d", rec.Code)
+		}
+		var detail NodeDetailView
+		if err := json.NewDecoder(rec.Body).Decode(&detail); err != nil {
+			t.Fatalf("decode node detail: %v", err)
+		}
+		if detail.Node.NodeID != 1 || len(detail.HostedRanges) != 1 {
+			t.Fatalf("node detail = %+v", detail)
+		}
+	})
+
+	t.Run("range detail", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/ranges/11", nil)
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("range detail status = %d", rec.Code)
+		}
+		var detail RangeDetailView
+		if err := json.NewDecoder(rec.Body).Decode(&detail); err != nil {
+			t.Fatalf("decode range detail: %v", err)
+		}
+		if detail.Range.RangeID != 11 || len(detail.ReplicaNodes) != 1 {
+			t.Fatalf("range detail = %+v", detail)
+		}
+	})
+
+	t.Run("topology", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/topology", nil)
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("topology status = %d", rec.Code)
+		}
+		var topology ClusterTopologyView
+		if err := json.NewDecoder(rec.Body).Decode(&topology); err != nil {
+			t.Fatalf("decode topology: %v", err)
+		}
+		if len(topology.Nodes) != 1 || len(topology.Ranges) != 1 || len(topology.Edges) != 1 {
+			t.Fatalf("topology = %+v", topology)
+		}
+	})
+
 	t.Run("events", func(t *testing.T) {
 		rec := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodGet, "/api/v1/events", nil)
@@ -203,6 +251,15 @@ func TestHTTPHandlerServesMergedClusterAPI(t *testing.T) {
 		handler.ServeHTTP(rec, req)
 		if rec.Code != http.StatusBadRequest {
 			t.Fatalf("locate bad input status = %d, want %d", rec.Code, http.StatusBadRequest)
+		}
+	})
+
+	t.Run("node detail bad id", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/nodes/not-a-number", nil)
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("node detail bad id status = %d", rec.Code)
 		}
 	})
 
