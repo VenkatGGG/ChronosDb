@@ -174,7 +174,7 @@ the deterministic `STAGING -> COMMITTED/ABORTED` decision rule.
 
 Deliver:
 
-- PostgreSQL wire protocol
+- [x] PostgreSQL wire protocol
 - [x] parser integration
 - [x] catalog descriptors
 - [x] binder and semantic analysis
@@ -196,8 +196,10 @@ paths. A standalone PostgreSQL wire-protocol foundation now exists in
 wire layer is now connected to the SQL planner for simple-query validation and
 row-description metadata, and the distributed SQL layer has a first
 flow-planner boundary for scan and mutation plans with stage/operator
-vocabulary reserved for future join and aggregation planning. Listener
-integration and full distributed query flows are still open.
+vocabulary reserved for future join and aggregation planning. The pgwire layer
+now also has a real connection-serving loop with startup negotiation, SSL
+rejection, simple-query dispatch, and listener integration. Full distributed
+query flows are still open.
 
 ### [ ] Phase 7: Locality and Follower Reads
 

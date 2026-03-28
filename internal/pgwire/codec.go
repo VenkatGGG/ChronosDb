@@ -11,6 +11,10 @@ import (
 const (
 	// ProtocolVersion30 is PostgreSQL protocol version 3.0.
 	ProtocolVersion30 uint32 = 196608
+	// SSLRequestCode is the startup code for SSL negotiation.
+	SSLRequestCode uint32 = 80877103
+	// GSSENCRequestCode is the startup code for GSS encryption negotiation.
+	GSSENCRequestCode uint32 = 80877104
 )
 
 // TxStatus is the ready-for-query transaction state byte.
@@ -67,6 +71,9 @@ func DecodeStartup(r io.Reader) (StartupMessage, error) {
 	msg := StartupMessage{
 		ProtocolVersion: binary.BigEndian.Uint32(payload[:4]),
 		Parameters:      make(map[string]string),
+	}
+	if len(payload) == 4 {
+		return msg, nil
 	}
 	items, err := parseCStringFields(payload[4:])
 	if err != nil {
