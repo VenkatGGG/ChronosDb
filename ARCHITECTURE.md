@@ -313,14 +313,16 @@ Why:
 
 ### Discovery
 
-Use static bootstrap for cluster formation, and allow an optional gossip plane
-for low-latency dissemination of node and locality hints.
+Use static bootstrap for cluster formation. Do not add a gossip plane in the
+current architecture. Revisit only if we later observe a concrete need for
+faster non-authoritative dissemination of node and locality hints.
 
 Why:
 
 - bootstrap should stay boring and explicit
 - an authoritative liveness model matters more than a fancy membership protocol
-- hint dissemination is useful, but routing and lease correctness cannot depend on it
+- routing and lease correctness cannot depend on a secondary hint plane
+- extra membership machinery is not justified until measured latency or operability needs appear
 
 Any gossip or memberlist-style mechanism is advisory only. Routing, leases,
 liveness epochs, and placement truth live in replicated system state.
@@ -925,7 +927,7 @@ Build:
 - liveness records and epochs
 - range split
 - range membership changes
-- hinted gossip dissemination if useful
+- no advisory gossip in the current plan; reconsider only if justified by measured need
 
 ### Phase 4: transaction core
 

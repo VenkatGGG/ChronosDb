@@ -113,7 +113,7 @@ Deliver:
 - [x] split triggers
 - [x] learner/snapshot/rebalance flow
 - [x] generation-checked config changes
-- [ ] optional advisory gossip dissemination (deferred)
+- [x] optional advisory gossip dissemination decision: do not implement for now
 
 Exit criteria:
 
@@ -124,8 +124,9 @@ Exit criteria:
 authoritative meta1/meta2 layout bootstrapping, cache-backed routing,
 generation checks, split-trigger application, rebalance-safe membership
 transitions, and snapshot image installation are implemented. Optional advisory
-gossip dissemination remains open by design because correctness does not depend
-on it.
+gossip dissemination has now been explicitly rejected for the current plan
+because correctness does not depend on it and the measured need for a separate
+hint plane is not yet strong enough to justify the extra operational surface.
 
 ### [x] Phase 4: Transaction Core
 
@@ -381,12 +382,16 @@ checkbox.
 
 ### [ ] 10. Deferred Optional Work
 
-- [ ] 10.1 Decide whether advisory gossip dissemination is still worth doing
+- [x] 10.1 Decide whether advisory gossip dissemination is still worth doing
+  Status: decided no for the current architecture. ChronosDB should stay on
+  static bootstrap plus authoritative replicated metadata and liveness. Revisit
+  only if a measured need appears for faster non-authoritative locality or
+  topology hint fanout.
   now that correctness, routing truth, and placement all depend on authoritative
   metadata instead of gossip
-- [ ] 10.2 If kept, implement advisory gossip strictly as a hint plane
+- [ ] 10.2 If that decision changes, implement advisory gossip strictly as a hint plane
   for liveness suspicion and topology hints only, with an explicit guarantee
   that it cannot override meta-range truth or lease/routing decisions
-- [ ] 10.3 Add validation and failure tests for advisory gossip
+- [ ] 10.3 If that decision changes, add validation and failure tests for advisory gossip
   covering stale hints, GC-pause false suspicion, and disagreement with
   authoritative metadata so the feature stays non-authoritative by construction

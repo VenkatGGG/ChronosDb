@@ -266,7 +266,7 @@ Deliver:
 - split triggers
 - config-change generation checks
 - learner/snapshot/rebalance flow
-- optional advisory gossip dissemination
+- no advisory gossip in the current plan; revisit only if a measured hint-dissemination need appears
 
 Definition of done:
 
