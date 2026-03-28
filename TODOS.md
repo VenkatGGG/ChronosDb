@@ -469,3 +469,80 @@ through retained scenario evidence without requiring UI-side inference.
 - [x] 12.4 Add console topology and drilldown pages with deep-linkable routes
 - [x] 12.5 Link retained scenario artifacts to affected nodes and ranges in the console
 - [x] 12.6 Add focused tests for topology merges, drilldown correctness, and deep-link behavior
+
+### [ ] 13. Live Data Plane and Integrated Runtime
+
+Deliver:
+
+- a real node runtime that opens Pebble, bootstraps store identity, hosts live
+  replicas, and runs MultiRaft in the normal process path
+- inter-node Raft transport so separate `chronos-node` processes actually
+  replicate state instead of only exposing local demo shells
+- authoritative bootstrap of meta ranges, liveness, user ranges, replica
+  assignments, and initial leaseholders
+- a real KV execution path for point gets, scans, puts, intents, and
+  transaction records against the live replicated substrate
+- a SQL execution path that runs physical flow operators instead of only
+  planning them and returns real rows over pgwire
+- persistent catalog and descriptor storage so table metadata is not hardcoded
+  in the demo runtime
+- restart and recovery behavior that reconstructs stores, hosted replicas,
+  leases, and descriptor state from disk and cluster metadata
+- background workers that make split, rebalance, lease, liveness, and closed
+  timestamp machinery part of the live runtime instead of library-only logic
+- a seeded demo bootstrap that makes range placement and live query execution
+  visible in the console and through `psql`
+
+Exit criteria:
+
+- a fresh 3-node cluster can be bootstrapped from the CLI without manual code
+  wiring and exposes real ranges/replicas in the console
+- `psql` can `INSERT` and `SELECT` real rows through the distributed runtime
+  instead of only receiving planner metadata and command tags
+- data survives process restart and remains queryable after a node crash/restart
+- range placement, leaseholders, and key location in the console are sourced
+  from the live replicated runtime rather than static node config
+
+**Status:** Planned. This phase is the missing integration step between the
+existing subsystem libraries and a real running distributed database. The goal
+is to replace the current planner-backed demo shell with a true live runtime.
+
+### [ ] Phase 13 Remaining Execution
+
+- [ ] 13.1 Replace the planner-only `chronos-node` shell with a real runtime assembly layer
+  that opens the storage engine, bootstraps store identity, constructs hosted
+  replicas, and wires MultiRaft, leases, metadata, and observability together
+- [ ] 13.2 Add a persistent node/store bootstrap path
+  that creates cluster/store identities, bootstraps meta ranges, and records
+  the first authoritative range descriptors and leaseholders on disk
+- [ ] 13.3 Add real inter-node Raft transport and message handling
+  so outbound `ProcessReady` messages are delivered across processes and
+  inbound messages are stepped into the correct local groups
+- [ ] 13.4 Replace static `ProcessNodeConfig.Ranges` with live descriptor-backed hosting
+  so node/range views come from the actual replicated runtime instead of
+  synthetic local config
+- [ ] 13.5 Build the KV request path
+  for point lookup, range scan, put, intent write, intent resolution, and txn
+  record operations against live replicas and the MVCC storage engine
+- [ ] 13.6 Wire the transaction coordinator into the live KV path
+  including begin/heartbeat/commit/abort, lock acquisition, refresh/retry, and
+  coordinator recovery in the normal request flow
+- [ ] 13.7 Build the first real SQL executor slice
+  that can run point lookups and inserts end-to-end through pgwire, the planner,
+  KV routing, leases, transactions, and storage, returning real rows/results
+- [ ] 13.8 Extend SQL execution to distributed scans, aggregates, and joins
+  by executing the physical flow operators built in `internal/sql/flow.go`
+  across leaseholders and gateway merge stages
+- [ ] 13.9 Persist catalog and SQL descriptors in the cluster
+  so the demo no longer depends on the hardcoded `users` and `orders` tables in
+  the systemtest catalog bootstrap path
+- [ ] 13.10 Promote background subsystem logic into live services
+  for liveness heartbeats, lease maintenance, closed timestamp publication,
+  split triggers, allocator decisions, learner snapshot catch-up, and rebalance
+- [ ] 13.11 Implement restart and recovery wiring
+  so a restarted node reopens its engine, reconstructs hosted groups, reloads
+  descriptors and applied indexes, rejoins the cluster, and resumes serving
+- [ ] 13.12 Add a real seeded demo/bootstrap command
+  that starts a 3-node cluster with pre-seeded range descriptors, visible range
+  placement in the console, and a repeatable `psql` smoke test for `INSERT` and
+  `SELECT`
