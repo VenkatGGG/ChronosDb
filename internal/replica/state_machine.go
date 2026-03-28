@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/VenkatGGG/ChronosDb/internal/closedts"
 	"github.com/VenkatGGG/ChronosDb/internal/hlc"
 	"github.com/VenkatGGG/ChronosDb/internal/lease"
 	"github.com/VenkatGGG/ChronosDb/internal/meta"
@@ -26,6 +27,9 @@ var ErrInvalidReplicaChange = errors.New("invalid replica change")
 // ErrStaleSnapshot reports that a snapshot image is older than the descriptor already applied locally.
 var ErrStaleSnapshot = errors.New("stale snapshot image")
 
+// ErrInvalidClosedTimestamp reports that a closed timestamp publication violates lease-bound rules.
+var ErrInvalidClosedTimestamp = errors.New("invalid closed timestamp")
+
 // StateMachine is the local replica apply state for one range on one node.
 type StateMachine struct {
 	rangeID          uint64
@@ -33,6 +37,8 @@ type StateMachine struct {
 	engine           *storage.Engine
 	appliedIndex     uint64
 	lease            lease.Record
+	closedTimestamp  closedts.Record
+	hasClosedTS      bool
 	descriptor       meta.RangeDescriptor
 	safeReadFrontier hlc.Timestamp
 }
@@ -42,6 +48,8 @@ type ApplyDelta struct {
 	AppliedIndex     uint64
 	Lease            lease.Record
 	HasLease         bool
+	ClosedTimestamp  closedts.Record
+	HasClosedTS      bool
 	Descriptor       meta.RangeDescriptor
 	HasDescriptor    bool
 	SafeReadFrontier hlc.Timestamp
@@ -53,6 +61,8 @@ type SnapshotImage struct {
 	Descriptor       meta.RangeDescriptor
 	Lease            lease.Record
 	HasLease         bool
+	ClosedTimestamp  closedts.Record
+	HasClosedTS      bool
 	SafeReadFrontier hlc.Timestamp
 }
 
@@ -63,6 +73,10 @@ func OpenStateMachine(rangeID, replicaID uint64, engine *storage.Engine) (*State
 		return nil, err
 	}
 	record, err := engine.LoadRangeLease(rangeID)
+	if err != nil {
+		return nil, err
+	}
+	closedRecord, err := engine.LoadRangeClosedTimestamp(rangeID)
 	if err != nil {
 		return nil, err
 	}
@@ -78,12 +92,14 @@ func OpenStateMachine(rangeID, replicaID uint64, engine *storage.Engine) (*State
 		return nil, err
 	}
 	return &StateMachine{
-		rangeID:      rangeID,
-		replicaID:    replicaID,
-		engine:       engine,
-		appliedIndex: appliedIndex,
-		lease:        record,
-		descriptor:   desc,
+		rangeID:         rangeID,
+		replicaID:       replicaID,
+		engine:          engine,
+		appliedIndex:    appliedIndex,
+		lease:           record,
+		closedTimestamp: closedRecord,
+		hasClosedTS:     closedRecord.RangeID != 0,
+		descriptor:      desc,
 	}, nil
 }
 
@@ -105,6 +121,11 @@ func (s *StateMachine) AppliedIndex() uint64 {
 // Lease returns the latest applied lease record.
 func (s *StateMachine) Lease() lease.Record {
 	return s.lease
+}
+
+// ClosedTimestamp returns the latest applied closed timestamp publication, if present.
+func (s *StateMachine) ClosedTimestamp() (closedts.Record, bool) {
+	return s.closedTimestamp, s.hasClosedTS
 }
 
 // Descriptor returns the latest applied range descriptor.
@@ -153,6 +174,23 @@ func (s *StateMachine) StageEntries(batch *storage.WriteBatch, entries []raftpb.
 				}
 				delta.Lease = cmd.Lease.Record
 				delta.HasLease = true
+			case CommandTypeSetClosedTS:
+				currentLease := s.lease
+				if delta.HasLease {
+					currentLease = delta.Lease
+				}
+				currentClosedTS, hasCurrentClosedTS := s.closedTimestamp, s.hasClosedTS
+				if delta.HasClosedTS {
+					currentClosedTS, hasCurrentClosedTS = delta.ClosedTimestamp, true
+				}
+				if err := validateClosedTimestampUpdate(s.rangeID, currentLease, currentClosedTS, hasCurrentClosedTS, cmd.ClosedTS.Record); err != nil {
+					return ApplyDelta{}, err
+				}
+				if err := batch.SetRangeClosedTimestamp(s.rangeID, cmd.ClosedTS.Record); err != nil {
+					return ApplyDelta{}, err
+				}
+				delta.ClosedTimestamp = cmd.ClosedTS.Record
+				delta.HasClosedTS = true
 			case CommandTypeUpdateDescriptor:
 				currentGeneration := s.descriptor.Generation
 				if delta.HasDescriptor {
@@ -252,6 +290,10 @@ func (s *StateMachine) CommitApply(delta ApplyDelta) {
 	if delta.HasLease {
 		s.lease = delta.Lease
 	}
+	if delta.HasClosedTS {
+		s.closedTimestamp = delta.ClosedTimestamp
+		s.hasClosedTS = true
+	}
 	if delta.HasDescriptor {
 		s.descriptor = delta.Descriptor
 	}
@@ -291,6 +333,11 @@ func (s *StateMachine) ApplySnapshot(image SnapshotImage) error {
 			return err
 		}
 	}
+	if image.HasClosedTS {
+		if err := validateClosedTimestampUpdate(s.rangeID, image.Lease, s.closedTimestamp, s.hasClosedTS, image.ClosedTimestamp); err != nil {
+			return err
+		}
+	}
 	if s.descriptor.Generation > 0 && image.Descriptor.Generation < s.descriptor.Generation {
 		return fmt.Errorf("%w: current=%d incoming=%d", ErrStaleSnapshot, s.descriptor.Generation, image.Descriptor.Generation)
 	}
@@ -317,6 +364,15 @@ func (s *StateMachine) ApplySnapshot(image SnapshotImage) error {
 			return err
 		}
 	}
+	if image.HasClosedTS {
+		if err := batch.SetRangeClosedTimestamp(s.rangeID, image.ClosedTimestamp); err != nil {
+			return err
+		}
+	} else {
+		if err := batch.DeleteRaw(storage.RangeClosedTimestampKey(s.rangeID)); err != nil {
+			return err
+		}
+	}
 	if err := batch.Commit(true); err != nil {
 		return err
 	}
@@ -328,7 +384,35 @@ func (s *StateMachine) ApplySnapshot(image SnapshotImage) error {
 	} else {
 		s.lease = lease.Record{}
 	}
+	if image.HasClosedTS {
+		s.closedTimestamp = image.ClosedTimestamp
+		s.hasClosedTS = true
+	} else {
+		s.closedTimestamp = closedts.Record{}
+		s.hasClosedTS = false
+	}
 	s.safeReadFrontier = image.SafeReadFrontier
+	return nil
+}
+
+func validateClosedTimestampUpdate(rangeID uint64, currentLease lease.Record, current closedts.Record, hasCurrent bool, next closedts.Record) error {
+	if next.RangeID != rangeID {
+		return fmt.Errorf("%w: record range %d does not match replica range %d", ErrInvalidClosedTimestamp, next.RangeID, rangeID)
+	}
+	if err := currentLease.Validate(); err != nil {
+		return fmt.Errorf("%w: lease is required before publishing closed timestamps", ErrInvalidClosedTimestamp)
+	}
+	if next.LeaseSequence != currentLease.Sequence {
+		return fmt.Errorf("%w: publication lease sequence %d does not match current lease sequence %d", ErrInvalidClosedTimestamp, next.LeaseSequence, currentLease.Sequence)
+	}
+	if hasCurrent {
+		if next.LeaseSequence < current.LeaseSequence {
+			return fmt.Errorf("%w: publication sequence regressed from %d to %d", ErrInvalidClosedTimestamp, current.LeaseSequence, next.LeaseSequence)
+		}
+		if next.LeaseSequence == current.LeaseSequence && next.ClosedTS.Compare(current.ClosedTS) < 0 {
+			return fmt.Errorf("%w: publication timestamp regressed from %v to %v", ErrInvalidClosedTimestamp, current.ClosedTS, next.ClosedTS)
+		}
+	}
 	return nil
 }
 

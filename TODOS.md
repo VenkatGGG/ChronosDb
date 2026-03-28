@@ -229,7 +229,8 @@ descriptors now carry validated placement policy and home-region hints. The
 remaining Phase 7 work is wiring those locality policies through more of the
 live replica/routing surfaces. Closed timestamp publications can now also be
 encoded and persisted through the storage engine under the global system
-namespace.
+namespace, and the replica state machine now applies lease-bound closed
+timestamp publications as live replica state.
 
 ### [ ] Phase 8: Hardening and Operability
 

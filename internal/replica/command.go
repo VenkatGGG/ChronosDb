@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/VenkatGGG/ChronosDb/internal/closedts"
 	"github.com/VenkatGGG/ChronosDb/internal/hlc"
 	"github.com/VenkatGGG/ChronosDb/internal/lease"
 	"github.com/VenkatGGG/ChronosDb/internal/meta"
@@ -15,6 +16,7 @@ type CommandType string
 const (
 	CommandTypePutValue         CommandType = "put_value"
 	CommandTypeSetLease         CommandType = "set_lease"
+	CommandTypeSetClosedTS      CommandType = "set_closed_timestamp"
 	CommandTypeUpdateDescriptor CommandType = "update_descriptor"
 	CommandTypeSplitRange       CommandType = "split_range"
 	CommandTypeChangeReplicas   CommandType = "change_replicas"
@@ -26,6 +28,7 @@ type Command struct {
 	Type       CommandType       `json:"type"`
 	Put        *PutValue         `json:"put,omitempty"`
 	Lease      *SetLease         `json:"lease,omitempty"`
+	ClosedTS   *SetClosedTS      `json:"closed_timestamp,omitempty"`
 	Descriptor *UpdateDescriptor `json:"descriptor,omitempty"`
 	Split      *SplitRange       `json:"split,omitempty"`
 	Replica    *ChangeReplicas   `json:"replica,omitempty"`
@@ -41,6 +44,11 @@ type PutValue struct {
 // SetLease installs a new lease record.
 type SetLease struct {
 	Record lease.Record `json:"record"`
+}
+
+// SetClosedTS installs a new closed timestamp publication.
+type SetClosedTS struct {
+	Record closedts.Record `json:"record"`
 }
 
 // UpdateDescriptor applies a generation-checked descriptor update.
@@ -61,9 +69,9 @@ type SplitRange struct {
 type ReplicaChangeKind string
 
 const (
-	ReplicaChangeAddLearner   ReplicaChangeKind = "add_learner"
-	ReplicaChangePromote      ReplicaChangeKind = "promote_learner"
-	ReplicaChangeRemove       ReplicaChangeKind = "remove_replica"
+	ReplicaChangeAddLearner ReplicaChangeKind = "add_learner"
+	ReplicaChangePromote    ReplicaChangeKind = "promote_learner"
+	ReplicaChangeRemove     ReplicaChangeKind = "remove_replica"
 )
 
 // ChangeReplicas applies one generation-checked membership transition.
@@ -75,7 +83,7 @@ type ChangeReplicas struct {
 
 // ReplicaChange describes a single membership mutation.
 type ReplicaChange struct {
-	Kind    ReplicaChangeKind     `json:"kind"`
+	Kind    ReplicaChangeKind      `json:"kind"`
 	Replica meta.ReplicaDescriptor `json:"replica"`
 }
 
@@ -106,7 +114,7 @@ func (c Command) Validate() error {
 	}
 	switch c.Type {
 	case CommandTypePutValue:
-		if c.Put == nil || c.Lease != nil || c.Descriptor != nil || c.Split != nil || c.Replica != nil {
+		if c.Put == nil || c.Lease != nil || c.ClosedTS != nil || c.Descriptor != nil || c.Split != nil || c.Replica != nil {
 			return fmt.Errorf("command: put_value payload mismatch")
 		}
 		if len(c.Put.LogicalKey) == 0 {
@@ -116,21 +124,28 @@ func (c Command) Validate() error {
 			return fmt.Errorf("command: put timestamp required")
 		}
 	case CommandTypeSetLease:
-		if c.Lease == nil || c.Put != nil || c.Descriptor != nil || c.Split != nil || c.Replica != nil {
+		if c.Lease == nil || c.Put != nil || c.ClosedTS != nil || c.Descriptor != nil || c.Split != nil || c.Replica != nil {
 			return fmt.Errorf("command: set_lease payload mismatch")
 		}
 		if err := c.Lease.Record.Validate(); err != nil {
 			return err
 		}
+	case CommandTypeSetClosedTS:
+		if c.ClosedTS == nil || c.Put != nil || c.Lease != nil || c.Descriptor != nil || c.Split != nil || c.Replica != nil {
+			return fmt.Errorf("command: set_closed_timestamp payload mismatch")
+		}
+		if err := c.ClosedTS.Record.Validate(); err != nil {
+			return err
+		}
 	case CommandTypeUpdateDescriptor:
-		if c.Descriptor == nil || c.Put != nil || c.Lease != nil || c.Split != nil || c.Replica != nil {
+		if c.Descriptor == nil || c.Put != nil || c.Lease != nil || c.ClosedTS != nil || c.Split != nil || c.Replica != nil {
 			return fmt.Errorf("command: update_descriptor payload mismatch")
 		}
 		if err := c.Descriptor.Descriptor.Validate(); err != nil {
 			return err
 		}
 	case CommandTypeSplitRange:
-		if c.Split == nil || c.Put != nil || c.Lease != nil || c.Descriptor != nil || c.Replica != nil {
+		if c.Split == nil || c.Put != nil || c.Lease != nil || c.ClosedTS != nil || c.Descriptor != nil || c.Replica != nil {
 			return fmt.Errorf("command: split_range payload mismatch")
 		}
 		switch c.Split.MetaLevel {
@@ -148,7 +163,7 @@ func (c Command) Validate() error {
 			return fmt.Errorf("command: split_range must create a distinct right range")
 		}
 	case CommandTypeChangeReplicas:
-		if c.Replica == nil || c.Put != nil || c.Lease != nil || c.Descriptor != nil || c.Split != nil {
+		if c.Replica == nil || c.Put != nil || c.Lease != nil || c.ClosedTS != nil || c.Descriptor != nil || c.Split != nil {
 			return fmt.Errorf("command: change_replicas payload mismatch")
 		}
 		switch c.Replica.MetaLevel {

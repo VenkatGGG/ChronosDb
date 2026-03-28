@@ -6,6 +6,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/VenkatGGG/ChronosDb/internal/closedts"
 	"github.com/VenkatGGG/ChronosDb/internal/hlc"
 	"github.com/VenkatGGG/ChronosDb/internal/lease"
 	"github.com/VenkatGGG/ChronosDb/internal/meta"
@@ -86,6 +87,135 @@ func TestStageEntriesAppliesWritesAndLease(t *testing.T) {
 	}
 	if !bytes.Equal(got, []byte("value")) {
 		t.Fatalf("value = %q, want %q", got, []byte("value"))
+	}
+}
+
+func TestStageEntriesAppliesClosedTimestamp(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	engine, err := storage.Open(ctx, storage.Options{
+		Dir: "replica-closedts-stage-test",
+		FS:  vfs.NewMem(),
+	})
+	if err != nil {
+		t.Fatalf("open engine: %v", err)
+	}
+	defer engine.Close()
+	if err := engine.Bootstrap(ctx, storage.StoreIdent{ClusterID: "cluster-a", NodeID: 1, StoreID: 1}); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+
+	stateMachine, err := OpenStateMachine(1, 1, engine)
+	if err != nil {
+		t.Fatalf("open state machine: %v", err)
+	}
+	record, err := lease.NewRecord(1, 1, hlc.Timestamp{WallTime: 100, Logical: 0}, hlc.Timestamp{WallTime: 200, Logical: 0}, 4)
+	if err != nil {
+		t.Fatalf("new lease: %v", err)
+	}
+	leasePayload, err := Command{
+		Version: 1,
+		Type:    CommandTypeSetLease,
+		Lease:   &SetLease{Record: record},
+	}.Marshal()
+	if err != nil {
+		t.Fatalf("marshal lease command: %v", err)
+	}
+	publication := closedts.Record{
+		RangeID:       1,
+		LeaseSequence: record.Sequence,
+		ClosedTS:      hlc.Timestamp{WallTime: 150, Logical: 1},
+		PublishedAt:   hlc.Timestamp{WallTime: 160, Logical: 0},
+	}
+	publicationPayload, err := Command{
+		Version: 1,
+		Type:    CommandTypeSetClosedTS,
+		ClosedTS: &SetClosedTS{
+			Record: publication,
+		},
+	}.Marshal()
+	if err != nil {
+		t.Fatalf("marshal closed timestamp command: %v", err)
+	}
+
+	batch := engine.NewWriteBatch()
+	defer batch.Close()
+	delta, err := stateMachine.StageEntries(batch, []raftpb.Entry{
+		{Index: 4, Type: raftpb.EntryNormal, Data: leasePayload},
+		{Index: 5, Type: raftpb.EntryNormal, Data: publicationPayload},
+	})
+	if err != nil {
+		t.Fatalf("stage entries: %v", err)
+	}
+	if err := batch.Commit(true); err != nil {
+		t.Fatalf("commit batch: %v", err)
+	}
+	stateMachine.CommitApply(delta)
+
+	got, ok := stateMachine.ClosedTimestamp()
+	if !ok || got != publication {
+		t.Fatalf("closed timestamp = %+v, ok=%v want %+v", got, ok, publication)
+	}
+	persisted, err := engine.LoadRangeClosedTimestamp(1)
+	if err != nil {
+		t.Fatalf("load closed timestamp: %v", err)
+	}
+	if persisted != publication {
+		t.Fatalf("persisted closed timestamp = %+v, want %+v", persisted, publication)
+	}
+}
+
+func TestStageEntriesRejectsClosedTimestampLeaseMismatch(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	engine, err := storage.Open(ctx, storage.Options{
+		Dir: "replica-closedts-mismatch-test",
+		FS:  vfs.NewMem(),
+	})
+	if err != nil {
+		t.Fatalf("open engine: %v", err)
+	}
+	defer engine.Close()
+	if err := engine.Bootstrap(ctx, storage.StoreIdent{ClusterID: "cluster-a", NodeID: 1, StoreID: 1}); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+
+	stateMachine, err := OpenStateMachine(1, 1, engine)
+	if err != nil {
+		t.Fatalf("open state machine: %v", err)
+	}
+	record, err := lease.NewRecord(1, 1, hlc.Timestamp{WallTime: 100, Logical: 0}, hlc.Timestamp{WallTime: 200, Logical: 0}, 4)
+	if err != nil {
+		t.Fatalf("new lease: %v", err)
+	}
+	if err := applyLeaseCommand(stateMachine, engine, 4, record); err != nil {
+		t.Fatalf("apply lease command: %v", err)
+	}
+
+	payload, err := Command{
+		Version: 1,
+		Type:    CommandTypeSetClosedTS,
+		ClosedTS: &SetClosedTS{
+			Record: closedts.Record{
+				RangeID:       1,
+				LeaseSequence: record.Sequence - 1,
+				ClosedTS:      hlc.Timestamp{WallTime: 150, Logical: 1},
+				PublishedAt:   hlc.Timestamp{WallTime: 160, Logical: 0},
+			},
+		},
+	}.Marshal()
+	if err != nil {
+		t.Fatalf("marshal closed timestamp command: %v", err)
+	}
+	batch := engine.NewWriteBatch()
+	defer batch.Close()
+	_, err = stateMachine.StageEntries(batch, []raftpb.Entry{
+		{Index: 5, Type: raftpb.EntryNormal, Data: payload},
+	})
+	if !errors.Is(err, ErrInvalidClosedTimestamp) {
+		t.Fatalf("closed timestamp mismatch error = %v, want %v", err, ErrInvalidClosedTimestamp)
 	}
 }
 
@@ -209,19 +339,19 @@ func TestStageEntriesApplySplitTrigger(t *testing.T) {
 	}
 
 	left := meta.RangeDescriptor{
-		RangeID:    1,
-		Generation: 2,
-		StartKey:   []byte("a"),
-		EndKey:     []byte("m"),
-		Replicas:   append([]meta.ReplicaDescriptor(nil), parent.Replicas...),
+		RangeID:              1,
+		Generation:           2,
+		StartKey:             []byte("a"),
+		EndKey:               []byte("m"),
+		Replicas:             append([]meta.ReplicaDescriptor(nil), parent.Replicas...),
 		LeaseholderReplicaID: 1,
 	}
 	right := meta.RangeDescriptor{
-		RangeID:    2,
-		Generation: 1,
-		StartKey:   []byte("m"),
-		EndKey:     nil,
-		Replicas:   append([]meta.ReplicaDescriptor(nil), parent.Replicas...),
+		RangeID:              2,
+		Generation:           1,
+		StartKey:             []byte("m"),
+		EndKey:               nil,
+		Replicas:             append([]meta.ReplicaDescriptor(nil), parent.Replicas...),
 		LeaseholderReplicaID: 1,
 	}
 	payload, err := Command{
@@ -335,19 +465,19 @@ func TestStageEntriesRejectInvalidSplitTrigger(t *testing.T) {
 			ExpectedGeneration: parent.Generation,
 			MetaLevel:          meta.LevelMeta2,
 			Left: meta.RangeDescriptor{
-				RangeID:    1,
-				Generation: 2,
-				StartKey:   []byte("a"),
-				EndKey:     []byte("m"),
-				Replicas:   append([]meta.ReplicaDescriptor(nil), parent.Replicas...),
+				RangeID:              1,
+				Generation:           2,
+				StartKey:             []byte("a"),
+				EndKey:               []byte("m"),
+				Replicas:             append([]meta.ReplicaDescriptor(nil), parent.Replicas...),
 				LeaseholderReplicaID: 1,
 			},
 			Right: meta.RangeDescriptor{
-				RangeID:    2,
-				Generation: 1,
-				StartKey:   []byte("n"),
-				EndKey:     []byte("z"),
-				Replicas:   append([]meta.ReplicaDescriptor(nil), parent.Replicas...),
+				RangeID:              2,
+				Generation:           1,
+				StartKey:             []byte("n"),
+				EndKey:               []byte("z"),
+				Replicas:             append([]meta.ReplicaDescriptor(nil), parent.Replicas...),
 				LeaseholderReplicaID: 1,
 			},
 		},
@@ -590,8 +720,15 @@ func TestApplySnapshotInstallsReplicaImage(t *testing.T) {
 			},
 			LeaseholderReplicaID: 3,
 		},
-		Lease:            record,
-		HasLease:         true,
+		Lease:    record,
+		HasLease: true,
+		ClosedTimestamp: closedts.Record{
+			RangeID:       2,
+			LeaseSequence: record.Sequence,
+			ClosedTS:      hlc.Timestamp{WallTime: 140, Logical: 0},
+			PublishedAt:   hlc.Timestamp{WallTime: 150, Logical: 1},
+		},
+		HasClosedTS:      true,
 		SafeReadFrontier: hlc.Timestamp{WallTime: 150, Logical: 1},
 	}
 
@@ -603,6 +740,9 @@ func TestApplySnapshotInstallsReplicaImage(t *testing.T) {
 	}
 	if stateMachine.Lease() != record {
 		t.Fatalf("lease = %+v, want %+v", stateMachine.Lease(), record)
+	}
+	if got, ok := stateMachine.ClosedTimestamp(); !ok || got != image.ClosedTimestamp {
+		t.Fatalf("closed timestamp = %+v, ok=%v, want %+v", got, ok, image.ClosedTimestamp)
 	}
 	reopened, err := OpenStateMachine(2, 4, engine)
 	if err != nil {
@@ -616,6 +756,9 @@ func TestApplySnapshotInstallsReplicaImage(t *testing.T) {
 	}
 	if reopened.Lease() != record {
 		t.Fatalf("reopened lease = %+v, want %+v", reopened.Lease(), record)
+	}
+	if got, ok := reopened.ClosedTimestamp(); !ok || got != image.ClosedTimestamp {
+		t.Fatalf("reopened closed timestamp = %+v, ok=%v, want %+v", got, ok, image.ClosedTimestamp)
 	}
 }
 
@@ -705,6 +848,30 @@ func applyReplicaChangeCommand(stateMachine *StateMachine, engine *storage.Engin
 		Version: 1,
 		Type:    CommandTypeChangeReplicas,
 		Replica: &change,
+	}.Marshal()
+	if err != nil {
+		return err
+	}
+	batch := engine.NewWriteBatch()
+	defer batch.Close()
+	delta, err := stateMachine.StageEntries(batch, []raftpb.Entry{
+		{Index: index, Type: raftpb.EntryNormal, Data: payload},
+	})
+	if err != nil {
+		return err
+	}
+	if err := batch.Commit(true); err != nil {
+		return err
+	}
+	stateMachine.CommitApply(delta)
+	return nil
+}
+
+func applyLeaseCommand(stateMachine *StateMachine, engine *storage.Engine, index uint64, record lease.Record) error {
+	payload, err := Command{
+		Version: 1,
+		Type:    CommandTypeSetLease,
+		Lease:   &SetLease{Record: record},
 	}.Marshal()
 	if err != nil {
 		return err
