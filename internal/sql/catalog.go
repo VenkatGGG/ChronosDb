@@ -3,6 +3,8 @@ package sql
 import (
 	"fmt"
 	"strings"
+
+	"github.com/VenkatGGG/ChronosDb/internal/placement"
 )
 
 // ColumnType is the logical SQL type supported by the current front-door slice.
@@ -30,11 +32,12 @@ type TableStats struct {
 
 // TableDescriptor describes one SQL table descriptor.
 type TableDescriptor struct {
-	ID         uint64
-	Name       string
-	Columns    []ColumnDescriptor
-	PrimaryKey []string
-	Stats      TableStats
+	ID              uint64
+	Name            string
+	Columns         []ColumnDescriptor
+	PrimaryKey      []string
+	Stats           TableStats
+	PlacementPolicy *placement.Policy
 }
 
 // Catalog stores SQL table descriptors for the binder and planner.
@@ -107,6 +110,9 @@ func (t TableDescriptor) Validate() error {
 			return fmt.Errorf("table descriptor: primary key column %q not found", pk)
 		}
 	}
+	if _, _, err := t.CompiledPlacement(); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -142,6 +148,18 @@ func (t TableDescriptor) StatsOrDefaults() TableStats {
 		stats.AverageRowBytes = 256
 	}
 	return stats
+}
+
+// CompiledPlacement resolves the table's SQL-facing placement policy, if any.
+func (t TableDescriptor) CompiledPlacement() (placement.CompiledPolicy, bool, error) {
+	if t.PlacementPolicy == nil {
+		return placement.CompiledPolicy{}, false, nil
+	}
+	compiled, err := placement.Compile(*t.PlacementPolicy)
+	if err != nil {
+		return placement.CompiledPolicy{}, false, fmt.Errorf("table descriptor: invalid placement policy: %w", err)
+	}
+	return compiled, true, nil
 }
 
 func canonicalName(name string) string {

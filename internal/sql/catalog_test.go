@@ -1,6 +1,10 @@
 package sql
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/VenkatGGG/ChronosDb/internal/placement"
+)
 
 func TestCatalogAddResolveAndPrimaryKeyColumn(t *testing.T) {
 	t.Parallel()
@@ -31,5 +35,41 @@ func TestCatalogAddResolveAndPrimaryKeyColumn(t *testing.T) {
 	}
 	if pk.Name != "id" {
 		t.Fatalf("primary key column = %q, want id", pk.Name)
+	}
+}
+
+func TestCatalogValidatesPlacementPolicy(t *testing.T) {
+	t.Parallel()
+
+	catalog := NewCatalog()
+	if err := catalog.AddTable(TableDescriptor{
+		ID:   9,
+		Name: "orders",
+		Columns: []ColumnDescriptor{
+			{ID: 1, Name: "id", Type: ColumnTypeInt},
+		},
+		PrimaryKey: []string{"id"},
+		PlacementPolicy: &placement.Policy{
+			PlacementMode:    placement.ModeHomeRegion,
+			HomeRegion:       "us-east1",
+			PreferredRegions: []string{"us-east1", "us-west1", "europe-west1"},
+		},
+	}); err != nil {
+		t.Fatalf("add table with placement: %v", err)
+	}
+
+	if err := catalog.AddTable(TableDescriptor{
+		ID:   10,
+		Name: "broken_orders",
+		Columns: []ColumnDescriptor{
+			{ID: 1, Name: "id", Type: ColumnTypeInt},
+		},
+		PrimaryKey: []string{"id"},
+		PlacementPolicy: &placement.Policy{
+			PlacementMode:    placement.ModeGlobal,
+			PreferredRegions: []string{"us-east1", "us-west1"},
+		},
+	}); err == nil {
+		t.Fatalf("expected invalid placement policy to be rejected")
 	}
 }

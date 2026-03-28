@@ -56,11 +56,13 @@ type ProcessorSpec struct {
 
 // FlowStage is one placement boundary in the physical flow.
 type FlowStage struct {
-	ID            int
-	Name          string
-	Distribution  FlowDistribution
-	InputStageIDs []int
-	Processors    []ProcessorSpec
+	ID               int
+	Name             string
+	Distribution     FlowDistribution
+	PreferredRegions []string
+	HomeRegion       string
+	InputStageIDs    []int
+	Processors       []ProcessorSpec
 }
 
 // FlowPlan is the distributed execution shape derived from a bound SQL plan.
@@ -96,9 +98,11 @@ func (p *FlowPlanner) buildPointLookup(plan PointLookupPlan) FlowPlan {
 		RootStageID: 1,
 		Stages: []FlowStage{
 			{
-				ID:           1,
-				Name:         "point_lookup",
-				Distribution: DistributionLeaseholderOnly,
+				ID:               1,
+				Name:             "point_lookup",
+				Distribution:     DistributionLeaseholderOnly,
+				PreferredRegions: leasePreferredRegions(plan.Table),
+				HomeRegion:       homeRegion(plan.Table),
 				Processors: []ProcessorSpec{
 					{
 						Kind:       OperatorKVScan,
@@ -121,9 +125,11 @@ func (p *FlowPlanner) buildPointLookup(plan PointLookupPlan) FlowPlan {
 
 func (p *FlowPlanner) buildRangeScan(plan RangeScanPlan) FlowPlan {
 	scanStage := FlowStage{
-		ID:           1,
-		Name:         "distributed_scan",
-		Distribution: DistributionByRange,
+		ID:               1,
+		Name:             "distributed_scan",
+		Distribution:     DistributionByRange,
+		PreferredRegions: scanPreferredRegions(plan.Table),
+		HomeRegion:       homeRegion(plan.Table),
 		Processors: []ProcessorSpec{
 			{
 				Kind:       OperatorKVScan,
@@ -169,9 +175,11 @@ func (p *FlowPlanner) buildInsert(plan InsertPlan) FlowPlan {
 		RootStageID: 1,
 		Stages: []FlowStage{
 			{
-				ID:           1,
-				Name:         "insert_put",
-				Distribution: DistributionLeaseholderOnly,
+				ID:               1,
+				Name:             "insert_put",
+				Distribution:     DistributionLeaseholderOnly,
+				PreferredRegions: leasePreferredRegions(plan.Table),
+				HomeRegion:       homeRegion(plan.Table),
 				Processors: []ProcessorSpec{
 					{
 						Kind:  OperatorKVInsert,
@@ -189,4 +197,27 @@ func (p *FlowPlanner) buildInsert(plan InsertPlan) FlowPlan {
 			},
 		},
 	}
+}
+
+func leasePreferredRegions(table TableDescriptor) []string {
+	compiled, ok, err := table.CompiledPlacement()
+	if !ok || err != nil {
+		return nil
+	}
+	return append([]string(nil), compiled.LeasePreferences...)
+}
+
+func scanPreferredRegions(table TableDescriptor) []string {
+	compiled, ok, err := table.CompiledPlacement()
+	if !ok || err != nil {
+		return nil
+	}
+	return append([]string(nil), compiled.PreferredRegions...)
+}
+
+func homeRegion(table TableDescriptor) string {
+	if table.PlacementPolicy == nil {
+		return ""
+	}
+	return table.PlacementPolicy.HomeRegion
 }

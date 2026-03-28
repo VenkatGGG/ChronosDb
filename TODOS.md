@@ -224,8 +224,9 @@ normalization and allocator-facing compilation now exist as a dedicated package
 for `REGIONAL`, `HOME_REGION`, and `GLOBAL` declarations, and leaseholder
 selection can now follow compiled region preferences. Replica-local routing can
 also choose between follower-historical and leaseholder reads based on closed
-timestamp safety. SQL-visible locality semantics and deeper descriptor
-integration are still open.
+timestamp safety. SQL table descriptors and distributed flow stages now carry
+validated placement policy and home-region hints, but deeper range-descriptor
+integration is still open.
 
 ### [ ] Phase 8: Hardening and Operability
 

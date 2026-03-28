@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/VenkatGGG/ChronosDb/internal/placement"
 	"github.com/VenkatGGG/ChronosDb/internal/storage"
 )
 
@@ -144,6 +145,11 @@ func testPlanner(t *testing.T) *Planner {
 		Stats: TableStats{
 			EstimatedRows:   10000,
 			AverageRowBytes: 192,
+		},
+		PlacementPolicy: &placement.Policy{
+			PlacementMode:    placement.ModeHomeRegion,
+			HomeRegion:       "us-east1",
+			PreferredRegions: []string{"us-east1", "us-west1", "europe-west1"},
 		},
 	}); err != nil {
 		t.Fatalf("add users descriptor: %v", err)
