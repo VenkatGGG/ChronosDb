@@ -132,6 +132,22 @@ flowchart TD
 8. **Phase 7**: locality semantics and follower historical reads
 9. **Phase 8**: hardening, large-scale simulation, and chaos/Jepsen testing
 
+## Phase 8 Evidence
+
+The in-repo Phase 8 closure work is now implemented and tested:
+
+- the live local controller is in [`internal/systemtest/local_controller.go`](./internal/systemtest/local_controller.go)
+- the persistent artifact bundle is in [`internal/systemtest/artifacts.go`](./internal/systemtest/artifacts.go)
+- the artifact assertion pack is in [`internal/systemtest/assertions.go`](./internal/systemtest/assertions.go)
+- the built-in local fault matrix is in [`internal/systemtest/matrix.go`](./internal/systemtest/matrix.go) and exercised in [`internal/systemtest/matrix_test.go`](./internal/systemtest/matrix_test.go)
+- the external handoff contract is documented in [`docs/systemtest/EXTERNAL_HANDOFF.md`](./docs/systemtest/EXTERNAL_HANDOFF.md)
+- the operator dashboard and runbook docs live in [`docs/operations/DASHBOARDS.md`](./docs/operations/DASHBOARDS.md) and [`docs/operations/RUNBOOKS.md`](./docs/operations/RUNBOOKS.md)
+
+Current decision:
+
+- the Phase 8 closure plan is complete in-repo
+- the top-level Phase 8 roadmap item is **not** marked complete yet, because an external Jepsen/chaos runner has not yet consumed the exported `handoff.json` contract and produced retained fault-run artifacts outside the local harness
+
 ## Repository Contract
 
 Current source-of-truth docs:
@@ -140,6 +156,8 @@ Current source-of-truth docs:
 - [`IMPLEMENTATION_PLAN.md`](./IMPLEMENTATION_PLAN.md) is the execution contract
 - [`TODOS.md`](./TODOS.md) tracks the next concrete milestones
 - [`rules.md`](./rules.md) defines the repo workflow rules
+- [`docs/systemtest/EXTERNAL_HANDOFF.md`](./docs/systemtest/EXTERNAL_HANDOFF.md) defines the external chaos-runner mapping
+- [`docs/operations/DASHBOARDS.md`](./docs/operations/DASHBOARDS.md) and [`docs/operations/RUNBOOKS.md`](./docs/operations/RUNBOOKS.md) define the Phase 8 operator view
 
 Implementation rule:
 

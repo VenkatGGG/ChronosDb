@@ -984,6 +984,20 @@ Build:
 - large-scale simulation
 - chaos and Jepsen testing
 
+Current evidence in the repo:
+
+- `internal/systemtest/local_controller.go` provides a live in-process cluster controller with real pgwire and observability listeners
+- `internal/systemtest/artifacts.go` persists versioned scenario artifacts
+- `internal/systemtest/assertions.go` validates retained artifacts for write visibility, follower-read freshness, `STAGING` outcomes, and metadata monotonicity
+- `internal/systemtest/matrix.go` executes the first built-in local fault matrix and writes `fault-matrix.json` plus per-scenario artifacts
+- `internal/systemtest/handoff.go` and `docs/systemtest/EXTERNAL_HANDOFF.md` define the external-runner handoff contract
+- `docs/operations/DASHBOARDS.md` and `docs/operations/RUNBOOKS.md` define the operator-facing Phase 8 view
+
+Architectural decision:
+
+- the in-repo Phase 8 closure plan is complete
+- the top-level Phase 8 program remains open until an external Jepsen/chaos runner executes the exported handoff contract and the resulting retained artifacts are reviewed
+
 ## 24. Open Decisions
 
 These questions remain open even in the final-version plan:

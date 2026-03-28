@@ -263,7 +263,13 @@ Exit criteria:
 - the system can be operated, profiled, and failure-tested at realistic scale
 
 **Status:** Planned hardening skeletons are complete, but full chaos/Jepsen
-validation is still outstanding. A dedicated admission controller now exists with
+validation is still outstanding. In-repo Phase 8 closure work is now complete:
+the local controller, artifact bundle, assertion pack, local fault matrix,
+external handoff contract, and operator docs all exist and are tested. The
+remaining blocker for marking this top-level phase complete is an external
+Jepsen/chaos campaign that consumes `handoff.json` and records real run
+artifacts outside the in-process local harness. A dedicated admission controller
+now exists with
 critical/normal/background tiers, reserved capacity for critical work, and
 compaction escalation when storage pressure crosses configured thresholds. The
 allocator now also has a placement-aware rebalance scorer that avoids violating
@@ -328,44 +334,47 @@ Rule:
 
 ## Completion Plan For Remaining Open Work
 
-This section is a planning artifact only. It defines how to close the still-open
-top-level outcomes without starting that work yet.
+This section began as a planning artifact. It now records the implemented Phase 8
+closure work and the explicit remaining gap for the still-open top-level Phase 8
+checkbox.
 
-### [ ] 9. Phase 8 Closure Plan
+### [x] 9. Phase 8 Closure Plan
 
 - [x] 9.1 Implement a real cluster-backed `internal/systemtest` controller
   Status: complete via `LocalController`, which now starts real pgwire and observability listeners per node, supports crash/restart and partition/heal controls, and provides one-shot ambiguous-commit fault injection against the live query path.
   so manifests and built-in scenarios can run against an actual multi-process
   ChronosDB cluster instead of only a recording stub
-- [ ] 9.2 Add a persistent run artifact format for chaos runs
 - [x] 9.2 Add a persistent run artifact format for chaos runs
   Status: complete via `RunArtifacts`, which now persists `manifest.json`, `report.json`, `summary.json`, and per-node `node-logs/node-<id>.json` files, with `LocalController` exposing structured node-event logs for bundle export.
   including scenario manifest, structured runner report, per-node logs, and a
   final pass/fail summary that can be attached to CI or retained for manual review
-- [ ] 9.3 Define and implement assertion packs for external correctness checks
 - [x] 9.3 Define and implement assertion packs for external correctness checks
   Status: complete via artifact-level correctness assertions for acknowledged-write visibility, follower-read freshness, deterministic `STAGING` outcomes, and lease/descriptor monotonicity, plus standardized node-log markers for external runners to emit.
   including no acknowledged-write loss, no stale follower read beyond closed
   timestamp, deterministic `STAGING` recovery outcome, and lease/descriptor
   generation monotonicity under churn
-- [ ] 9.4 Execute a first fault matrix over the real cluster controller
 - [x] 9.4 Execute a first fault matrix over the real cluster controller
   Status: complete via `ExecuteFaultMatrix`, which now runs the built-in Phase 8 scenario set over fresh `LocalController` instances, validates each persisted artifact bundle with the correctness assertion pack, and writes a root `fault-matrix.json` plus per-scenario artifact directories.
   covering minority partition, majority partition, crash during lease transfer,
   crash during learner snapshot catch-up, crash during `STAGING`, ambiguous
   commit response loss, and split/rebalance during concurrent traffic
-- [ ] 9.5 Integrate an external Jepsen/chaos runner handoff path
 - [x] 9.5 Integrate an external Jepsen/chaos runner handoff path
   Status: complete via `handoff.json` export per scenario artifact directory, `BuildHandoffBundle`/`WriteHandoffBundle`, and documented action-to-operation mapping in `docs/systemtest/EXTERNAL_HANDOFF.md`.
   so exported manifests can be consumed by the external fault toolchain with a
   documented mapping from manifest steps to fault injector operations
-- [ ] 9.6 Add operator-facing observability dashboards and runbooks
 - [x] 9.6 Add operator-facing observability dashboards and runbooks
   Status: complete via `docs/operations/DASHBOARDS.md`, `docs/operations/RUNBOOKS.md`, and the observability metric additions for retry pressure and recovery outcomes.
   for snapshot pressure, allocator decisions, closed timestamp lag, lease
   churn, retry/error rates, and recovery outcomes so Phase 8 is operationally
   complete instead of only code-complete
-- [ ] 9.7 Close Phase 8 with evidence
+- [x] 9.7 Close Phase 8 with evidence
+  Status: complete. Evidence now lives in `internal/systemtest/matrix_test.go`,
+  `internal/systemtest/handoff.go`, `docs/systemtest/EXTERNAL_HANDOFF.md`,
+  `docs/operations/DASHBOARDS.md`, and `docs/operations/RUNBOOKS.md`. Final
+  decision: the closure plan is complete, but the top-level Phase 8 checkbox
+  remains open until an external Jepsen/chaos runner consumes the exported
+  `handoff.json` contract and produces retained run artifacts outside the local
+  harness.
   by updating `README.md`, `ARCHITECTURE.md`, and this file with the executed
   fault matrix, evidence locations, observed gaps, and the final decision on
   whether Phase 8 can be marked complete
