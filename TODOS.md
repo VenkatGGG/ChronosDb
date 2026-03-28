@@ -191,7 +191,9 @@ Exit criteria:
 simple single-table `SELECT` and `INSERT`, catalog descriptors,
 binding/semantic validation, primary-key KV mapping, and an explicit
 cost-based planning skeleton with candidate ranking over physical KV access
-paths. PostgreSQL wire protocol and distributed query flows are still open.
+paths. A standalone PostgreSQL wire-protocol foundation now exists in
+`internal/pgwire` for startup, simple-query framing, and backend responses, but
+listener integration and distributed query flows are still open.
 
 ### [ ] Phase 7: Locality and Follower Reads
 
