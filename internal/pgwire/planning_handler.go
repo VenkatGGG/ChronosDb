@@ -38,7 +38,7 @@ func (h *PlanningHandler) DescribeQuery(query string) (chronossql.OptimizedPlan,
 	if err != nil {
 		return chronossql.OptimizedPlan{}, chronossql.FlowPlan{}, QueryResult{}, wrapPlannerError(err)
 	}
-	result, err := describePlan(optimized.Selected.Plan)
+	result, err := describeResult(optimized.Selected.Plan, flow)
 	if err != nil {
 		return chronossql.OptimizedPlan{}, chronossql.FlowPlan{}, QueryResult{}, wrapPlannerError(err)
 	}
@@ -52,16 +52,27 @@ func (h *PlanningHandler) HandleSimpleQuery(ctx context.Context, query string) (
 	return result, err
 }
 
-func describePlan(plan chronossql.Plan) (QueryResult, error) {
-	switch typed := plan.(type) {
+func describeResult(plan chronossql.Plan, flow chronossql.FlowPlan) (QueryResult, error) {
+	fields := describeResultSchema(flow.ResultSchema)
+	switch plan.(type) {
 	case chronossql.PointLookupPlan:
 		return QueryResult{
-			Fields:     describeColumns(typed.Projection),
+			Fields:     fields,
 			CommandTag: "SELECT 0",
 		}, nil
 	case chronossql.RangeScanPlan:
 		return QueryResult{
-			Fields:     describeColumns(typed.Projection),
+			Fields:     fields,
+			CommandTag: "SELECT 0",
+		}, nil
+	case chronossql.AggregatePlan:
+		return QueryResult{
+			Fields:     fields,
+			CommandTag: "SELECT 0",
+		}, nil
+	case chronossql.HashJoinPlan:
+		return QueryResult{
+			Fields:     fields,
 			CommandTag: "SELECT 0",
 		}, nil
 	case chronossql.InsertPlan:
@@ -73,7 +84,7 @@ func describePlan(plan chronossql.Plan) (QueryResult, error) {
 	}
 }
 
-func describeColumns(columns []chronossql.ColumnDescriptor) []FieldDescription {
+func describeResultSchema(columns []chronossql.ResultColumn) []FieldDescription {
 	fields := make([]FieldDescription, 0, len(columns))
 	for _, column := range columns {
 		oid, size := postgresType(column.Type)

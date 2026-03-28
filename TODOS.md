@@ -170,7 +170,7 @@ owns anchored records, required distributed intents, `PENDING -> STAGING`
 transitions, coordinator-death recovery, async intent-resolution planning, and
 the deterministic `STAGING -> COMMITTED/ABORTED` decision rule.
 
-### [ ] Phase 6: SQL Front Door
+### [x] Phase 6: SQL Front Door
 
 Deliver:
 
@@ -187,7 +187,7 @@ Exit criteria:
 - SQL uses the existing KV/routing/txn substrate
 - SQL layers do not bypass protocol contracts
 
-**Status:** In progress. The SQL front-door now has parser-backed planning for
+**Status:** Planning deliverables are complete. The SQL front-door now has parser-backed planning for
 simple single-table `SELECT` and `INSERT`, catalog descriptors,
 binding/semantic validation, primary-key KV mapping, and an explicit
 cost-based planning skeleton with candidate ranking over physical KV access
@@ -202,8 +202,11 @@ rejection, simple-query dispatch, and listener integration. Single-table
 aggregate planning for `GROUP BY`, `COUNT`, and `SUM` now exists and maps onto
 distributed partial/final aggregate flow stages. Two-table inner equi-join
 planning now also exists, with alias-aware binding and distributed hash-join
-flow stages over independently distributed left/right scans. Full distributed
-query flows are still open.
+flow stages over independently distributed left/right scans. Flow plans now
+also carry explicit fragment boundaries and typed result schemas that propagate
+through the pgwire description path. Full execution of those distributed flows
+is still a later concern, but the SQL front-door planning surface itself is now
+in place.
 
 ### [ ] Phase 7: Locality and Follower Reads
 
@@ -283,7 +286,7 @@ Rule:
 
 - [x] 6.1 Add single-table aggregate planning (`GROUP BY`, `COUNT`, `SUM`) and map it to distributed flow stages
 - [x] 6.2 Add join-aware logical planning and distributed hash-join flow stages for supported equi-joins
-- [ ] 6.3 Add explicit flow-fragment boundaries and result schemas so distributed plans can move toward execution
+- [x] 6.3 Add explicit flow-fragment boundaries and result schemas so distributed plans can move toward execution
 
 ### [ ] Phase 7 Remaining Execution
 

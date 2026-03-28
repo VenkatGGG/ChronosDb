@@ -53,6 +53,13 @@ type JoinSpec struct {
 	RightKeys []string
 }
 
+// ResultColumn is one typed output column produced by a stage, fragment, or plan.
+type ResultColumn struct {
+	Name     string
+	Type     ColumnType
+	Nullable bool
+}
+
 // ProcessorSpec is one physical operator instance within a flow stage.
 type ProcessorSpec struct {
 	Kind        OperatorKind
@@ -66,18 +73,34 @@ type ProcessorSpec struct {
 // FlowStage is one placement boundary in the physical flow.
 type FlowStage struct {
 	ID               int
+	FragmentID       int
 	Name             string
 	Distribution     FlowDistribution
 	PreferredRegions []string
 	HomeRegion       string
 	InputStageIDs    []int
 	Processors       []ProcessorSpec
+	ResultSchema     []ResultColumn
+}
+
+// FlowFragment is one explicit execution fragment boundary.
+type FlowFragment struct {
+	ID               int
+	Name             string
+	Distribution     FlowDistribution
+	PreferredRegions []string
+	HomeRegion       string
+	StageIDs         []int
+	ResultSchema     []ResultColumn
 }
 
 // FlowPlan is the distributed execution shape derived from a bound SQL plan.
 type FlowPlan struct {
-	RootStageID int
-	Stages      []FlowStage
+	RootStageID    int
+	RootFragmentID int
+	Stages         []FlowStage
+	Fragments      []FlowFragment
+	ResultSchema   []ResultColumn
 }
 
 // FlowPlanner builds distributed SQL stage graphs from physical SQL plans.
@@ -107,36 +130,36 @@ func (p *FlowPlanner) Build(plan Plan) (FlowPlan, error) {
 }
 
 func (p *FlowPlanner) buildPointLookup(plan PointLookupPlan) FlowPlan {
-	return FlowPlan{
-		RootStageID: 1,
-		Stages: []FlowStage{
-			{
-				ID:               1,
-				Name:             "point_lookup",
-				Distribution:     DistributionLeaseholderOnly,
-				PreferredRegions: leasePreferredRegions(plan.Table),
-				HomeRegion:       homeRegion(plan.Table),
-				Processors: []ProcessorSpec{
-					{
-						Kind:       OperatorKVScan,
-						Table:      &plan.Table,
-						Projection: append([]ColumnDescriptor(nil), plan.Projection...),
-						Spans: []KeySpan{
-							{
-								StartKey:       append([]byte(nil), plan.Key...),
-								EndKey:         append([]byte(nil), plan.Key...),
-								StartInclusive: true,
-								EndInclusive:   true,
-							},
+	resultSchema := schemaFromColumns(plan.Projection)
+	return assembleFlowPlan(1, []FlowStage{
+		{
+			ID:               1,
+			Name:             "point_lookup",
+			Distribution:     DistributionLeaseholderOnly,
+			PreferredRegions: leasePreferredRegions(plan.Table),
+			HomeRegion:       homeRegion(plan.Table),
+			Processors: []ProcessorSpec{
+				{
+					Kind:       OperatorKVScan,
+					Table:      &plan.Table,
+					Projection: append([]ColumnDescriptor(nil), plan.Projection...),
+					Spans: []KeySpan{
+						{
+							StartKey:       append([]byte(nil), plan.Key...),
+							EndKey:         append([]byte(nil), plan.Key...),
+							StartInclusive: true,
+							EndInclusive:   true,
 						},
 					},
 				},
 			},
+			ResultSchema: resultSchema,
 		},
-	}
+	}, resultSchema)
 }
 
 func (p *FlowPlanner) buildRangeScan(plan RangeScanPlan) FlowPlan {
+	resultSchema := schemaFromColumns(plan.Projection)
 	scanStage := FlowStage{
 		ID:               1,
 		Name:             "distributed_scan",
@@ -158,6 +181,7 @@ func (p *FlowPlanner) buildRangeScan(plan RangeScanPlan) FlowPlan {
 				},
 			},
 		},
+		ResultSchema: resultSchema,
 	}
 	mergeStage := FlowStage{
 		ID:            2,
@@ -176,43 +200,39 @@ func (p *FlowPlanner) buildRangeScan(plan RangeScanPlan) FlowPlan {
 				Projection: append([]ColumnDescriptor(nil), plan.Projection...),
 			},
 		},
+		ResultSchema: resultSchema,
 	}
-	return FlowPlan{
-		RootStageID: mergeStage.ID,
-		Stages:      []FlowStage{scanStage, mergeStage},
-	}
+	return assembleFlowPlan(mergeStage.ID, []FlowStage{scanStage, mergeStage}, resultSchema)
 }
 
 func (p *FlowPlanner) buildInsert(plan InsertPlan) FlowPlan {
-	return FlowPlan{
-		RootStageID: 1,
-		Stages: []FlowStage{
-			{
-				ID:               1,
-				Name:             "insert_put",
-				Distribution:     DistributionLeaseholderOnly,
-				PreferredRegions: leasePreferredRegions(plan.Table),
-				HomeRegion:       homeRegion(plan.Table),
-				Processors: []ProcessorSpec{
-					{
-						Kind:  OperatorKVInsert,
-						Table: &plan.Table,
-						Spans: []KeySpan{
-							{
-								StartKey:       append([]byte(nil), plan.Key...),
-								EndKey:         append([]byte(nil), plan.Key...),
-								StartInclusive: true,
-								EndInclusive:   true,
-							},
+	return assembleFlowPlan(1, []FlowStage{
+		{
+			ID:               1,
+			Name:             "insert_put",
+			Distribution:     DistributionLeaseholderOnly,
+			PreferredRegions: leasePreferredRegions(plan.Table),
+			HomeRegion:       homeRegion(plan.Table),
+			Processors: []ProcessorSpec{
+				{
+					Kind:  OperatorKVInsert,
+					Table: &plan.Table,
+					Spans: []KeySpan{
+						{
+							StartKey:       append([]byte(nil), plan.Key...),
+							EndKey:         append([]byte(nil), plan.Key...),
+							StartInclusive: true,
+							EndInclusive:   true,
 						},
 					},
 				},
 			},
 		},
-	}
+	}, nil)
 }
 
 func (p *FlowPlanner) buildAggregate(plan AggregatePlan) FlowPlan {
+	resultSchema := schemaFromAggregate(plan)
 	scanStage := FlowStage{
 		ID:               1,
 		Name:             "distributed_partial_aggregate",
@@ -243,6 +263,7 @@ func (p *FlowPlanner) buildAggregate(plan AggregatePlan) FlowPlan {
 				},
 			},
 		},
+		ResultSchema: resultSchema,
 	}
 	finalStage := FlowStage{
 		ID:            2,
@@ -264,14 +285,15 @@ func (p *FlowPlanner) buildAggregate(plan AggregatePlan) FlowPlan {
 				},
 			},
 		},
+		ResultSchema: resultSchema,
 	}
-	return FlowPlan{
-		RootStageID: finalStage.ID,
-		Stages:      []FlowStage{scanStage, finalStage},
-	}
+	return assembleFlowPlan(finalStage.ID, []FlowStage{scanStage, finalStage}, resultSchema)
 }
 
 func (p *FlowPlanner) buildHashJoin(plan HashJoinPlan) FlowPlan {
+	leftSchema := schemaFromColumns(plan.LeftScan.Projection)
+	rightSchema := schemaFromColumns(plan.RightScan.Projection)
+	resultSchema := schemaFromJoinProjection(plan.Projection)
 	leftStage := FlowStage{
 		ID:               1,
 		Name:             "left_join_scan",
@@ -293,6 +315,7 @@ func (p *FlowPlanner) buildHashJoin(plan HashJoinPlan) FlowPlan {
 				},
 			},
 		},
+		ResultSchema: leftSchema,
 	}
 	rightStage := FlowStage{
 		ID:               2,
@@ -315,6 +338,7 @@ func (p *FlowPlanner) buildHashJoin(plan HashJoinPlan) FlowPlan {
 				},
 			},
 		},
+		ResultSchema: rightSchema,
 	}
 	joinStage := FlowStage{
 		ID:            3,
@@ -338,11 +362,9 @@ func (p *FlowPlanner) buildHashJoin(plan HashJoinPlan) FlowPlan {
 				Projection: joinProjectionColumns(plan.Projection),
 			},
 		},
+		ResultSchema: resultSchema,
 	}
-	return FlowPlan{
-		RootStageID: joinStage.ID,
-		Stages:      []FlowStage{leftStage, rightStage, joinStage},
-	}
+	return assembleFlowPlan(joinStage.ID, []FlowStage{leftStage, rightStage, joinStage}, resultSchema)
 }
 
 func leasePreferredRegions(table TableDescriptor) []string {
@@ -390,4 +412,85 @@ func joinProjectionColumns(projection []JoinProjection) []ColumnDescriptor {
 		columns = append(columns, item.Output)
 	}
 	return columns
+}
+
+func assembleFlowPlan(rootStageID int, stages []FlowStage, resultSchema []ResultColumn) FlowPlan {
+	fragments := make([]FlowFragment, 0, len(stages))
+	for i := range stages {
+		stages[i].FragmentID = stages[i].ID
+		fragments = append(fragments, FlowFragment{
+			ID:               stages[i].FragmentID,
+			Name:             stages[i].Name + "_fragment",
+			Distribution:     stages[i].Distribution,
+			PreferredRegions: append([]string(nil), stages[i].PreferredRegions...),
+			HomeRegion:       stages[i].HomeRegion,
+			StageIDs:         []int{stages[i].ID},
+			ResultSchema:     copyResultSchema(stages[i].ResultSchema),
+		})
+	}
+	return FlowPlan{
+		RootStageID:    rootStageID,
+		RootFragmentID: rootStageID,
+		Stages:         stages,
+		Fragments:      fragments,
+		ResultSchema:   copyResultSchema(resultSchema),
+	}
+}
+
+func schemaFromColumns(columns []ColumnDescriptor) []ResultColumn {
+	schema := make([]ResultColumn, 0, len(columns))
+	for _, column := range columns {
+		schema = append(schema, ResultColumn{
+			Name:     column.Name,
+			Type:     column.Type,
+			Nullable: column.Nullable,
+		})
+	}
+	return schema
+}
+
+func schemaFromAggregate(plan AggregatePlan) []ResultColumn {
+	schema := make([]ResultColumn, 0, len(plan.GroupBy)+len(plan.Aggregates))
+	for _, column := range plan.GroupBy {
+		schema = append(schema, ResultColumn{
+			Name:     column.Name,
+			Type:     column.Type,
+			Nullable: column.Nullable,
+		})
+	}
+	for _, aggregate := range plan.Aggregates {
+		name := aggregate.Alias
+		if name == "" {
+			name = aggregate.String()
+		}
+		nullable := false
+		if aggregate.Func == AggregateFuncSum {
+			nullable = true
+		}
+		schema = append(schema, ResultColumn{
+			Name:     name,
+			Type:     ColumnTypeInt,
+			Nullable: nullable,
+		})
+	}
+	return schema
+}
+
+func schemaFromJoinProjection(projection []JoinProjection) []ResultColumn {
+	schema := make([]ResultColumn, 0, len(projection))
+	for _, item := range projection {
+		schema = append(schema, ResultColumn{
+			Name:     item.Output.Name,
+			Type:     item.Output.Type,
+			Nullable: item.Output.Nullable,
+		})
+	}
+	return schema
+}
+
+func copyResultSchema(schema []ResultColumn) []ResultColumn {
+	if len(schema) == 0 {
+		return nil
+	}
+	return append([]ResultColumn(nil), schema...)
 }
