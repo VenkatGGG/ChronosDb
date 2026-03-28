@@ -9,9 +9,12 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"time"
 
+	"github.com/VenkatGGG/ChronosDb/internal/adminapi"
+	"github.com/VenkatGGG/ChronosDb/internal/meta"
 	"github.com/VenkatGGG/ChronosDb/internal/observability"
 	"github.com/VenkatGGG/ChronosDb/internal/pgwire"
 	chronossql "github.com/VenkatGGG/ChronosDb/internal/sql"
@@ -25,6 +28,8 @@ type ProcessNodeConfig struct {
 	ObservabilityAddr string
 	ControlAddr       string
 	Catalog           *chronossql.Catalog
+	Ranges            []meta.RangeDescriptor
+	EventBufferSize   int
 }
 
 // ProcessNodeState is the externally readable address/state manifest for one launched node.
@@ -49,10 +54,13 @@ type ProcessNode struct {
 	ctrlListen net.Listener
 	lastError  string
 	partitions map[uint64]struct{}
+	events     []adminapi.ClusterEvent
 	state      ProcessNodeState
 	logPath    string
 	statePath  string
 }
+
+const defaultProcessNodeEventBufferSize = 256
 
 type partitionControlRequest struct {
 	IsolatedFrom []uint64 `json:"isolated_from"`
@@ -86,10 +94,22 @@ func NewProcessNode(cfg ProcessNodeConfig) (*ProcessNode, error) {
 			return nil, err
 		}
 	}
+	if cfg.EventBufferSize <= 0 {
+		cfg.EventBufferSize = defaultProcessNodeEventBufferSize
+	}
+	if len(cfg.Ranges) > 0 {
+		cfg.Ranges = append([]meta.RangeDescriptor(nil), cfg.Ranges...)
+		for _, desc := range cfg.Ranges {
+			if err := desc.Validate(); err != nil {
+				return nil, fmt.Errorf("systemtest: invalid process node range descriptor: %w", err)
+			}
+		}
+	}
 	node := &ProcessNode{
 		cfg:        cfg,
 		metrics:    observability.NewMetrics(),
 		partitions: make(map[uint64]struct{}),
+		events:     make([]adminapi.ClusterEvent, 0, cfg.EventBufferSize),
 		logPath:    NodeLogPath(cfg.DataDir),
 		statePath:  filepath.Join(cfg.DataDir, "state.json"),
 	}
@@ -99,7 +119,11 @@ func NewProcessNode(cfg ProcessNodeConfig) (*ProcessNode, error) {
 			chronossql.NewFlowPlanner(),
 		),
 		record: func(message string) {
-			_ = node.appendLog(message)
+			_ = node.recordEvent(adminapi.ClusterEvent{
+				Type:     "node_activity",
+				Severity: "info",
+				Message:  message,
+			})
 		},
 	}
 	return node, nil
@@ -138,12 +162,7 @@ func (n *ProcessNode) Run(ctx context.Context) error {
 		StartedAt:        time.Now().UTC(),
 	}
 	n.obsServer = &http.Server{
-		Handler: observability.NewHandler(observability.HandlerOptions{
-			Metrics:  n.metrics,
-			Health:   n.probe(),
-			Ready:    n.probe(),
-			Overview: n.overview(),
-		}),
+		Handler: n.observabilityMux(),
 	}
 	n.ctrlServer = &http.Server{Handler: n.controlMux()}
 	n.mu.Unlock()
@@ -151,12 +170,16 @@ func (n *ProcessNode) Run(ctx context.Context) error {
 	if err := n.writeState(); err != nil {
 		return err
 	}
-	if err := n.appendLog(fmt.Sprintf(
-		"node started pgwire=%s observability=%s control=%s",
-		n.state.PGAddr,
-		n.state.ObservabilityURL,
-		n.state.ControlURL,
-	)); err != nil {
+	if err := n.recordEvent(adminapi.ClusterEvent{
+		Type:     "node_started",
+		Severity: "info",
+		Message: fmt.Sprintf(
+			"node started pgwire=%s observability=%s control=%s",
+			n.state.PGAddr,
+			n.state.ObservabilityURL,
+			n.state.ControlURL,
+		),
+	}); err != nil {
 		return err
 	}
 
@@ -257,6 +280,22 @@ func (n *ProcessNode) controlMux() http.Handler {
 	return mux
 }
 
+func (n *ProcessNode) observabilityMux() http.Handler {
+	base := observability.NewHandler(observability.HandlerOptions{
+		Metrics:  n.metrics,
+		Health:   n.probe(),
+		Ready:    n.probe(),
+		Overview: n.overview(),
+	})
+	mux := http.NewServeMux()
+	mux.HandleFunc("/admin/node", n.handleAdminNode)
+	mux.HandleFunc("/admin/ranges", n.handleAdminRanges)
+	mux.HandleFunc("/admin/events", n.handleAdminEvents)
+	mux.HandleFunc("/admin/snapshot", n.handleAdminSnapshot)
+	mux.Handle("/", base)
+	return mux
+}
+
 func (n *ProcessNode) handleState(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -277,12 +316,19 @@ func (n *ProcessNode) handlePartition(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	n.mu.Lock()
-	defer n.mu.Unlock()
 	clear(n.partitions)
 	for _, nodeID := range req.IsolatedFrom {
 		n.partitions[nodeID] = struct{}{}
 	}
-	_ = n.appendLog("partition applied against nodes " + formatNodeSlice(req.IsolatedFrom))
+	n.mu.Unlock()
+	_ = n.recordEvent(adminapi.ClusterEvent{
+		Type:     "partition_applied",
+		Severity: "warning",
+		Message:  "partition applied against nodes " + formatNodeSlice(req.IsolatedFrom),
+		Fields: map[string]string{
+			"isolated_from": formatNodeSlice(req.IsolatedFrom),
+		},
+	})
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -296,7 +342,11 @@ func (n *ProcessNode) handleHeal(w http.ResponseWriter, r *http.Request) {
 	clear(n.partitions)
 	n.mu.Unlock()
 	if hadPartition {
-		_ = n.appendLog("partition healed")
+		_ = n.recordEvent(adminapi.ClusterEvent{
+			Type:     "partition_healed",
+			Severity: "info",
+			Message:  "partition healed",
+		})
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -312,7 +362,14 @@ func (n *ProcessNode) handleAmbiguousCommit(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	n.handler.Install(spec)
-	_ = n.appendLog(fmt.Sprintf("ambiguous commit fault armed for label %q", spec.TxnLabel))
+	_ = n.recordEvent(adminapi.ClusterEvent{
+		Type:     "ambiguous_commit_armed",
+		Severity: "warning",
+		Message:  fmt.Sprintf("ambiguous commit fault armed for label %q", spec.TxnLabel),
+		Fields: map[string]string{
+			"txn_label": spec.TxnLabel,
+		},
+	})
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -344,11 +401,47 @@ func (n *ProcessNode) handleLog(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "message must not be empty", http.StatusBadRequest)
 		return
 	}
-	if err := n.appendLog(req.Message); err != nil {
+	if err := n.recordEvent(adminapi.ClusterEvent{
+		Type:     "operator_log",
+		Severity: "info",
+		Message:  req.Message,
+	}); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (n *ProcessNode) handleAdminNode(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	writeJSONResponse(w, n.nodeView())
+}
+
+func (n *ProcessNode) handleAdminRanges(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	writeJSONResponse(w, n.rangeViews())
+}
+
+func (n *ProcessNode) handleAdminEvents(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	writeJSONResponse(w, n.recentEvents(parsePositiveInt(r.URL.Query().Get("limit"))))
+}
+
+func (n *ProcessNode) handleAdminSnapshot(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	writeJSONResponse(w, n.snapshot(parsePositiveInt(r.URL.Query().Get("event_limit"))))
 }
 
 func (n *ProcessNode) probe() observability.Probe {
@@ -366,26 +459,16 @@ func (n *ProcessNode) overview() observability.OverviewProvider {
 	return func(context.Context) (observability.Overview, error) {
 		n.mu.RLock()
 		defer n.mu.RUnlock()
+		status, notes := n.statusLocked()
 		overview := observability.Overview{
-			Status:      "ok",
+			Status:      status,
 			GeneratedAt: time.Now().UTC(),
 			Components: map[string]string{
 				"pgwire":        "up",
 				"observability": "up",
 				"control":       "up",
 			},
-		}
-		if len(n.partitions) > 0 {
-			overview.Status = "degraded"
-			overview.Notes = append(overview.Notes, fmt.Sprintf("partitioned from nodes %s", formatNodeSet(n.partitions)))
-		}
-		if n.handler != nil && n.handler.HasFault() {
-			overview.Status = "degraded"
-			overview.Notes = append(overview.Notes, "ambiguous commit fault armed")
-		}
-		if n.lastError != "" {
-			overview.Status = "degraded"
-			overview.Notes = append(overview.Notes, n.lastError)
+			Notes: append([]string(nil), notes...),
 		}
 		return overview, nil
 	}
@@ -397,9 +480,167 @@ func (n *ProcessNode) appendLog(message string) error {
 
 func (n *ProcessNode) recordServeError(component string, err error) {
 	n.mu.Lock()
-	defer n.mu.Unlock()
 	n.lastError = fmt.Sprintf("%s: %v", component, err)
-	_ = n.appendLog("serve error " + n.lastError)
+	message := "serve error " + n.lastError
+	n.mu.Unlock()
+	_ = n.recordEvent(adminapi.ClusterEvent{
+		Type:     "serve_error",
+		Severity: "error",
+		Message:  message,
+		Fields: map[string]string{
+			"component": component,
+		},
+	})
+}
+
+func (n *ProcessNode) nodeView() adminapi.NodeView {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+
+	status, notes := n.statusLocked()
+	replicaCount := 0
+	leaseCount := 0
+	for _, desc := range n.cfg.Ranges {
+		if descriptorReplicaOnNode(desc, n.cfg.NodeID) {
+			replicaCount++
+			if leaseholderNodeID(desc) == n.cfg.NodeID {
+				leaseCount++
+			}
+		}
+	}
+	return adminapi.NodeView{
+		NodeID:           n.state.NodeID,
+		PGAddr:           n.state.PGAddr,
+		ObservabilityURL: n.state.ObservabilityURL,
+		ControlURL:       n.state.ControlURL,
+		Status:           status,
+		StartedAt:        n.state.StartedAt,
+		PartitionedFrom:  sortedNodeSet(n.partitions),
+		Notes:            notes,
+		ReplicaCount:     replicaCount,
+		LeaseCount:       leaseCount,
+	}
+}
+
+func (n *ProcessNode) rangeViews() []adminapi.RangeView {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+
+	views := make([]adminapi.RangeView, 0, len(n.cfg.Ranges))
+	for _, desc := range n.cfg.Ranges {
+		if !descriptorReplicaOnNode(desc, n.cfg.NodeID) {
+			continue
+		}
+		views = append(views, adminapi.RangeViewFromDescriptor(desc, "local_node_state"))
+	}
+	return views
+}
+
+func (n *ProcessNode) recentEvents(limit int) []adminapi.ClusterEvent {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+
+	events := append([]adminapi.ClusterEvent(nil), n.events...)
+	if limit <= 0 || limit >= len(events) {
+		return events
+	}
+	return append([]adminapi.ClusterEvent(nil), events[len(events)-limit:]...)
+}
+
+func (n *ProcessNode) snapshot(eventLimit int) adminapi.ClusterSnapshot {
+	return adminapi.ClusterSnapshot{
+		GeneratedAt: time.Now().UTC(),
+		Nodes:       []adminapi.NodeView{n.nodeView()},
+		Ranges:      n.rangeViews(),
+		Events:      n.recentEvents(eventLimit),
+	}
+}
+
+func (n *ProcessNode) statusLocked() (string, []string) {
+	status := "ok"
+	notes := make([]string, 0, 3)
+	if len(n.partitions) > 0 {
+		status = "degraded"
+		notes = append(notes, fmt.Sprintf("partitioned from nodes %s", formatNodeSet(n.partitions)))
+	}
+	if n.handler != nil && n.handler.HasFault() {
+		status = "degraded"
+		notes = append(notes, "ambiguous commit fault armed")
+	}
+	if n.lastError != "" {
+		status = "degraded"
+		notes = append(notes, n.lastError)
+	}
+	return status, notes
+}
+
+func (n *ProcessNode) recordEvent(event adminapi.ClusterEvent) error {
+	if event.Timestamp.IsZero() {
+		event.Timestamp = time.Now().UTC()
+	}
+	if event.NodeID == 0 {
+		event.NodeID = n.cfg.NodeID
+	}
+	n.mu.Lock()
+	n.events = append(n.events, event)
+	if len(n.events) > n.cfg.EventBufferSize {
+		n.events = append([]adminapi.ClusterEvent(nil), n.events[len(n.events)-n.cfg.EventBufferSize:]...)
+	}
+	n.mu.Unlock()
+	if event.Message == "" {
+		return nil
+	}
+	return n.appendLog(event.Message)
+}
+
+func descriptorReplicaOnNode(desc meta.RangeDescriptor, nodeID uint64) bool {
+	for _, replica := range desc.Replicas {
+		if replica.NodeID == nodeID {
+			return true
+		}
+	}
+	return false
+}
+
+func leaseholderNodeID(desc meta.RangeDescriptor) uint64 {
+	for _, replica := range desc.Replicas {
+		if replica.ReplicaID == desc.LeaseholderReplicaID {
+			return replica.NodeID
+		}
+	}
+	return 0
+}
+
+func sortedNodeSet(nodes map[uint64]struct{}) []uint64 {
+	if len(nodes) == 0 {
+		return nil
+	}
+	ordered := make([]uint64, 0, len(nodes))
+	for nodeID := range nodes {
+		ordered = append(ordered, nodeID)
+	}
+	for i := 1; i < len(ordered); i++ {
+		for j := i; j > 0 && ordered[j-1] > ordered[j]; j-- {
+			ordered[j-1], ordered[j] = ordered[j], ordered[j-1]
+		}
+	}
+	return ordered
+}
+
+func parsePositiveInt(raw string) int {
+	if raw == "" {
+		return 0
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil || value <= 0 {
+		return 0
+	}
+	return value
+}
+
+func writeJSONResponse(w http.ResponseWriter, payload any) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(payload)
 }
 
 // ReadProcessNodeState reads the process state manifest written by a launched node.
