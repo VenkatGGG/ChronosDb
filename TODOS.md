@@ -275,8 +275,10 @@ promotion through the replicated membership state machine. A dedicated
 with Prometheus metrics, `healthz`/`readyz`, pprof handlers, and a structured
 overview endpoint. The deterministic simulator now also covers stale
 generation rejection after split triggers and repeated lease churn with stale
-closed-timestamp publication rejection. Broader simulation coverage and chaos
-validation are still open.
+closed-timestamp publication rejection. The operator metrics surface now also
+exposes explicit snapshot-pressure and allocator-decision signals alongside the
+earlier Raft, split, compaction, and routing metrics. Broader simulation
+coverage and chaos validation are still open.
 
 ## Ongoing Discipline
 
@@ -306,5 +308,5 @@ Rule:
 ### [ ] Phase 8 Remaining Execution
 
 - [ ] 8.1 Expand deterministic simulation to cover split races, lease churn, and multi-range transaction recovery
-- [ ] 8.2 Add snapshot-pressure and allocator-observability metrics around the new operator HTTP surface
+- [x] 8.2 Add snapshot-pressure and allocator-observability metrics around the new operator HTTP surface
 - [ ] 8.3 Add a chaos/system-test harness skeleton for partitions, crash/restart, and ambiguous commit timing

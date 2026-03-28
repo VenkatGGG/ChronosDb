@@ -18,7 +18,10 @@ func TestHandlerServesMetricsHealthReadyOverviewAndPprof(t *testing.T) {
 	metrics := NewMetrics()
 	metrics.ObserveRangeCacheLookup(false)
 	metrics.ObserveSplit("success", 2*time.Second)
+	metrics.SetSnapshotPressure("store-1", "send", 3)
 	metrics.SetPebbleCompactionPressure("store-1", "critical", 0.9)
+	metrics.SetAllocatorRebalanceScore("range-7", true, 0.84)
+	metrics.ObserveAllocatorDecision("rebalance", true)
 
 	handler := NewHandler(HandlerOptions{
 		Metrics: metrics,
@@ -50,7 +53,10 @@ func TestHandlerServesMetricsHealthReadyOverviewAndPprof(t *testing.T) {
 	for _, want := range []string{
 		"chronosdb_range_cache_lookups_total",
 		"chronosdb_split_duration_seconds",
+		"chronosdb_snapshot_pressure",
 		"chronosdb_pebble_compaction_pressure",
+		"chronosdb_allocator_rebalance_score",
+		"chronosdb_allocator_decisions_total",
 	} {
 		if !strings.Contains(metricsBody, want) {
 			t.Fatalf("metrics output missing %q", want)

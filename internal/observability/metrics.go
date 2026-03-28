@@ -17,9 +17,12 @@ type Metrics struct {
 	lockWaitDuration         *prometheus.HistogramVec
 	splitDuration            *prometheus.HistogramVec
 	snapshotDuration         *prometheus.HistogramVec
+	snapshotPressure         *prometheus.GaugeVec
 	pebbleCompactionPressure *prometheus.GaugeVec
 	rangeCacheLookups        *prometheus.CounterVec
 	followerReadLag          *prometheus.GaugeVec
+	allocatorRebalanceScore  *prometheus.GaugeVec
+	allocatorDecisions       *prometheus.CounterVec
 }
 
 // NewMetrics constructs a fresh registry with ChronosDB collectors registered.
@@ -76,6 +79,11 @@ func NewMetricsWithRegistry(registry *prometheus.Registry) *Metrics {
 			Help:      "Snapshot send/install duration by direction and result.",
 			Buckets:   prometheus.DefBuckets,
 		}, []string{"direction", "result"}),
+		snapshotPressure: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Namespace: "chronosdb",
+			Name:      "snapshot_pressure",
+			Help:      "Current snapshot backpressure by store and phase.",
+		}, []string{"store", "phase"}),
 		pebbleCompactionPressure: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: "chronosdb",
 			Name:      "pebble_compaction_pressure",
@@ -91,6 +99,16 @@ func NewMetricsWithRegistry(registry *prometheus.Registry) *Metrics {
 			Name:      "follower_read_lag_seconds",
 			Help:      "Follower historical-read lag behind the leaseholder frontier by scope.",
 		}, []string{"scope"}),
+		allocatorRebalanceScore: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Namespace: "chronosdb",
+			Name:      "allocator_rebalance_score",
+			Help:      "Allocator-visible rebalance score by scope and preferred-region alignment.",
+		}, []string{"scope", "preferred"}),
+		allocatorDecisions: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: "chronosdb",
+			Name:      "allocator_decisions_total",
+			Help:      "Allocator decisions partitioned by action and locality outcome.",
+		}, []string{"action", "preferred"}),
 	}
 
 	registry.MustRegister(
@@ -101,9 +119,12 @@ func NewMetricsWithRegistry(registry *prometheus.Registry) *Metrics {
 		m.lockWaitDuration,
 		m.splitDuration,
 		m.snapshotDuration,
+		m.snapshotPressure,
 		m.pebbleCompactionPressure,
 		m.rangeCacheLookups,
 		m.followerReadLag,
+		m.allocatorRebalanceScore,
+		m.allocatorDecisions,
 	)
 	return m
 }
@@ -151,6 +172,11 @@ func (m *Metrics) ObserveSnapshot(direction, result string, duration time.Durati
 	m.snapshotDuration.WithLabelValues(direction, result).Observe(duration.Seconds())
 }
 
+// SetSnapshotPressure records snapshot pressure by store and phase.
+func (m *Metrics) SetSnapshotPressure(store, phase string, value float64) {
+	m.snapshotPressure.WithLabelValues(store, phase).Set(value)
+}
+
 // SetPebbleCompactionPressure records a compaction-pressure score for the store.
 func (m *Metrics) SetPebbleCompactionPressure(store, priority string, value float64) {
 	m.pebbleCompactionPressure.WithLabelValues(store, priority).Set(value)
@@ -168,4 +194,21 @@ func (m *Metrics) ObserveRangeCacheLookup(hit bool) {
 // SetFollowerReadLag records follower historical-read freshness lag.
 func (m *Metrics) SetFollowerReadLag(scope string, duration time.Duration) {
 	m.followerReadLag.WithLabelValues(scope).Set(duration.Seconds())
+}
+
+// SetAllocatorRebalanceScore records allocator scoring by scope and locality alignment.
+func (m *Metrics) SetAllocatorRebalanceScore(scope string, preferred bool, value float64) {
+	m.allocatorRebalanceScore.WithLabelValues(scope, boolLabel(preferred)).Set(value)
+}
+
+// ObserveAllocatorDecision records one allocator action and whether it aligned with locality policy.
+func (m *Metrics) ObserveAllocatorDecision(action string, preferred bool) {
+	m.allocatorDecisions.WithLabelValues(action, boolLabel(preferred)).Inc()
+}
+
+func boolLabel(v bool) string {
+	if v {
+		return "true"
+	}
+	return "false"
 }
