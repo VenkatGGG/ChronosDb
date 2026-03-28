@@ -214,6 +214,12 @@ Exit criteria:
 - follower reads are freshness-bounded and observable
 - placement policy is user-expressible and internally consistent
 
+**Status:** In progress. The closed-timestamp publication core and follower-read
+eligibility checks now exist as a dedicated package, including monotonic
+publication, lease-sequence invalidation, intent-backlog stalling, and
+fail-closed behavior under clock-offset violations. Placement policy and SQL-
+visible locality semantics are still open.
+
 ### [ ] Phase 8: Hardening and Operability
 
 Deliver:
