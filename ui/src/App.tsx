@@ -1,13 +1,23 @@
 import { startTransition, useDeferredValue, useEffect, useEffectEvent, useState } from "react";
-import { BrowserRouter, NavLink, Navigate, Route, Routes } from "react-router-dom";
-import { fetchKeyLocation, fetchScenarioRun, fetchScenarioRuns } from "./lib/api";
+import { BrowserRouter, Link, NavLink, Navigate, Route, Routes, useParams } from "react-router-dom";
+import {
+  fetchKeyLocation,
+  fetchNodeDetail,
+  fetchRangeDetail,
+  fetchScenarioRun,
+  fetchScenarioRuns,
+  fetchTopology,
+} from "./lib/api";
 import { useClusterSnapshot } from "./hooks/useClusterSnapshot";
 import { useEventStream } from "./hooks/useEventStream";
 import type {
   ClusterEvent,
   ClusterSnapshot,
+  ClusterTopologyView,
   KeyLocationView,
+  NodeDetailView,
   NodeView,
+  RangeDetailView,
   RangeView,
   ScenarioRunDetail,
   ScenarioRunView,
@@ -35,6 +45,7 @@ export function App() {
           </div>
           <nav className="console-nav" aria-label="Primary">
             <NavItem to="/overview" label="Overview" subtitle="State and signals" />
+            <NavItem to="/topology" label="Topology" subtitle="Replica graph and edges" />
             <NavItem to="/nodes" label="Nodes" subtitle="Health and residency" />
             <NavItem to="/ranges" label="Ranges" subtitle="Descriptors and placement" />
             <NavItem to="/events" label="Events" subtitle="Live operations stream" />
@@ -94,8 +105,11 @@ export function App() {
                 />
               }
             />
+            <Route path="/topology" element={<TopologyPage />} />
             <Route path="/nodes" element={<NodesPage nodes={snapshot?.nodes ?? []} />} />
+            <Route path="/nodes/:nodeId" element={<NodeDetailPage />} />
             <Route path="/ranges" element={<RangesPage nodes={snapshot?.nodes ?? []} ranges={snapshot?.ranges ?? []} />} />
+            <Route path="/ranges/:rangeId" element={<RangeDetailPage />} />
             <Route path="/events" element={<EventsPage events={streamState.events} />} />
             <Route path="/scenarios" element={<ScenariosPage />} />
             <Route path="*" element={<Navigate to="/overview" replace />} />
@@ -212,7 +226,11 @@ function NodesPage(props: { nodes: NodeView[] }) {
             <article className="node-card" key={node.node_id}>
               <div className="node-card-header">
                 <div>
-                  <p className="node-id">node {node.node_id}</p>
+                  <p className="node-id">
+                    <Link className="detail-link" to={`/nodes/${node.node_id}`}>
+                      node {node.node_id}
+                    </Link>
+                  </p>
                   <StatusPill tone={node.status === "ok" ? "good" : "warn"} label={node.status} />
                 </div>
                 <div className="endpoint-list">
@@ -306,7 +324,11 @@ function RangesPage(props: { nodes: NodeView[]; ranges: RangeView[] }) {
                       onClick={() => setSelectedRangeID(range.range_id)}
                     >
                       <td>
-                        <strong>{range.range_id}</strong>
+                        <strong>
+                          <Link className="detail-link" to={`/ranges/${range.range_id}`}>
+                            {range.range_id}
+                          </Link>
+                        </strong>
                         <span className="subtle-mono">gen {range.generation}</span>
                       </td>
                       <td className="subtle-mono">
@@ -464,6 +486,302 @@ function RangesPage(props: { nodes: NodeView[]; ranges: RangeView[] }) {
               </div>
             ) : null}
         </div>
+      </div>
+    </section>
+  );
+}
+
+function TopologyPage() {
+  const [topology, setTopology] = useState<ClusterTopologyView | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const loadTopology = useEffectEvent(async () => {
+    setLoading(true);
+    try {
+      const nextTopology = await fetchTopology();
+      startTransition(() => {
+        setTopology(nextTopology);
+        setError(null);
+        setLoading(false);
+      });
+    } catch (loadError) {
+      const message = loadError instanceof Error ? loadError.message : "failed to load topology";
+      startTransition(() => {
+        setTopology(null);
+        setError(message);
+        setLoading(false);
+      });
+    }
+  });
+
+  useEffect(() => {
+    void loadTopology();
+  }, []);
+
+  const edgesByNode = new Map<number, ClusterTopologyView["edges"]>();
+  for (const edge of topology?.edges ?? []) {
+    const current = edgesByNode.get(edge.node_id) ?? [];
+    current.push(edge);
+    edgesByNode.set(edge.node_id, current);
+  }
+
+  return (
+    <section className="page-grid">
+      <div className="panel">
+        <div className="panel-header">
+          <div>
+            <p className="eyebrow">Topology</p>
+            <h3>Replica graph and leaseholder spread</h3>
+          </div>
+          <button className="refresh-button" onClick={() => void loadTopology()} type="button">
+            Refresh topology
+          </button>
+        </div>
+        {loading ? <EmptyState label="Loading topology graph…" /> : null}
+        {!loading && error ? <p className="lookup-error">{error}</p> : null}
+        {!loading && topology ? (
+          <div className="topology-grid">
+            {topology.nodes.map((node) => {
+              const edges = edgesByNode.get(node.node_id) ?? [];
+              return (
+                <article className="topology-node" key={node.node_id}>
+                  <div className="topology-node-header">
+                    <div>
+                      <p className="node-id">
+                        <Link className="detail-link" to={`/nodes/${node.node_id}`}>
+                          node {node.node_id}
+                        </Link>
+                      </p>
+                      <p className="subtle-copy">{edges.length} hosted replicas</p>
+                    </div>
+                    <StatusPill tone={node.status === "ok" ? "good" : "warn"} label={node.status} />
+                  </div>
+                  <div className="field-chip-row">
+                    {edges.length === 0 ? <span className="field-chip">no visible replicas</span> : null}
+                    {edges.map((edge) => (
+                      <Link className="field-chip field-chip-link" key={`${edge.range_id}-${edge.replica_id}`} to={`/ranges/${edge.range_id}`}>
+                        r{edge.range_id} n{edge.node_id}:{edge.role}
+                        {edge.leaseholder ? " leaseholder" : ""}
+                      </Link>
+                    ))}
+                  </div>
+                </article>
+              );
+            })}
+          </div>
+        ) : null}
+      </div>
+    </section>
+  );
+}
+
+function NodeDetailPage() {
+  const params = useParams();
+  const nodeID = Number(params.nodeId);
+  const [detail, setDetail] = useState<NodeDetailView | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const loadDetail = useEffectEvent(async (nextNodeID: number) => {
+    setLoading(true);
+    try {
+      const nextDetail = await fetchNodeDetail(nextNodeID);
+      startTransition(() => {
+        setDetail(nextDetail);
+        setError(null);
+        setLoading(false);
+      });
+    } catch (loadError) {
+      const message = loadError instanceof Error ? loadError.message : "failed to load node detail";
+      startTransition(() => {
+        setDetail(null);
+        setError(message);
+        setLoading(false);
+      });
+    }
+  });
+
+  useEffect(() => {
+    if (!Number.isFinite(nodeID) || nodeID <= 0) {
+      setError("invalid node id");
+      setLoading(false);
+      return;
+    }
+    void loadDetail(nodeID);
+  }, [nodeID]);
+
+  return (
+    <section className="page-grid">
+      <div className="panel">
+        <div className="panel-header">
+          <div>
+            <p className="eyebrow">Node drilldown</p>
+            <h3>{detail ? `node ${detail.node.node_id}` : "Node detail"}</h3>
+          </div>
+          <Link className="detail-link" to="/nodes">
+            Back to nodes
+          </Link>
+        </div>
+        {loading ? <EmptyState label="Loading node detail…" /> : null}
+        {!loading && error ? <p className="lookup-error">{error}</p> : null}
+        {detail ? (
+          <div className="detail-grid">
+            <article className="detail-section">
+              <h4>Node surface</h4>
+              <dl className="metric-list">
+                <div>
+                  <dt>status</dt>
+                  <dd>{detail.node.status}</dd>
+                </div>
+                <div>
+                  <dt>replicas</dt>
+                  <dd>{detail.node.replica_count}</dd>
+                </div>
+                <div>
+                  <dt>leases</dt>
+                  <dd>{detail.node.lease_count}</dd>
+                </div>
+                <div>
+                  <dt>started</dt>
+                  <dd>{formatInstant(detail.node.started_at)}</dd>
+                </div>
+              </dl>
+            </article>
+            <article className="detail-section">
+              <h4>Hosted ranges</h4>
+              <div className="field-chip-row">
+                {detail.hosted_ranges.map((range) => (
+                  <Link className="field-chip field-chip-link" key={`${range.range_id}-${range.replica_id}`} to={`/ranges/${range.range_id}`}>
+                    r{range.range_id} {range.replica_role}
+                    {range.leaseholder ? " leaseholder" : ""}
+                  </Link>
+                ))}
+              </div>
+            </article>
+            <article className="detail-section">
+              <h4>Recent related events</h4>
+              <div className="event-stack">
+                {detail.recent_events.length === 0 ? <EmptyState label="No related events recorded." /> : null}
+                {detail.recent_events.map((event) => (
+                  <EventRow event={event} key={event.id ?? `${event.timestamp}-${event.type}-${event.message}`} />
+                ))}
+              </div>
+            </article>
+          </div>
+        ) : null}
+      </div>
+    </section>
+  );
+}
+
+function RangeDetailPage() {
+  const params = useParams();
+  const rangeID = Number(params.rangeId);
+  const [detail, setDetail] = useState<RangeDetailView | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const loadDetail = useEffectEvent(async (nextRangeID: number) => {
+    setLoading(true);
+    try {
+      const nextDetail = await fetchRangeDetail(nextRangeID);
+      startTransition(() => {
+        setDetail(nextDetail);
+        setError(null);
+        setLoading(false);
+      });
+    } catch (loadError) {
+      const message = loadError instanceof Error ? loadError.message : "failed to load range detail";
+      startTransition(() => {
+        setDetail(null);
+        setError(message);
+        setLoading(false);
+      });
+    }
+  });
+
+  useEffect(() => {
+    if (!Number.isFinite(rangeID) || rangeID <= 0) {
+      setError("invalid range id");
+      setLoading(false);
+      return;
+    }
+    void loadDetail(rangeID);
+  }, [rangeID]);
+
+  return (
+    <section className="page-grid">
+      <div className="panel">
+        <div className="panel-header">
+          <div>
+            <p className="eyebrow">Range drilldown</p>
+            <h3>{detail ? `range ${detail.range.range_id}` : "Range detail"}</h3>
+          </div>
+          <Link className="detail-link" to="/ranges">
+            Back to ranges
+          </Link>
+        </div>
+        {loading ? <EmptyState label="Loading range detail…" /> : null}
+        {!loading && error ? <p className="lookup-error">{error}</p> : null}
+        {detail ? (
+          <div className="detail-grid">
+            <article className="detail-section">
+              <h4>Descriptor</h4>
+              <dl className="metric-list">
+                <div>
+                  <dt>generation</dt>
+                  <dd>{detail.range.generation}</dd>
+                </div>
+                <div>
+                  <dt>keys</dt>
+                  <dd className="subtle-mono">
+                    {detail.range.start_key || "∅"} .. {detail.range.end_key || "∞"}
+                  </dd>
+                </div>
+                <div>
+                  <dt>leaseholder</dt>
+                  <dd>{detail.range.leaseholder_node_id ? `node ${detail.range.leaseholder_node_id}` : "unknown"}</dd>
+                </div>
+                <div>
+                  <dt>placement</dt>
+                  <dd>{detail.range.placement_mode ?? "unplaced"}</dd>
+                </div>
+              </dl>
+            </article>
+            <article className="detail-section">
+              <h4>Replica residency</h4>
+              <div className="placement-board">
+                {detail.replica_nodes.map((entry) => (
+                  <article
+                    className={`placement-node placement-node-hosting${entry.leaseholder ? " placement-node-leaseholder" : ""}`}
+                    key={entry.replica.replica_id}
+                  >
+                    <div className="placement-node-header">
+                      <strong>
+                        {entry.node ? <Link className="detail-link" to={`/nodes/${entry.node.node_id}`}>node {entry.node.node_id}</Link> : `node ${entry.replica.node_id}`}
+                      </strong>
+                      <StatusPill tone={entry.node?.status === "ok" ? "good" : "warn"} label={entry.replica.role} />
+                    </div>
+                    <p className="placement-role-copy">
+                      replica {entry.replica.replica_id}
+                      {entry.leaseholder ? ", current leaseholder" : ""}
+                    </p>
+                  </article>
+                ))}
+              </div>
+            </article>
+            <article className="detail-section">
+              <h4>Recent range events</h4>
+              <div className="event-stack">
+                {detail.recent_events.length === 0 ? <EmptyState label="No range-scoped events recorded." /> : null}
+                {detail.recent_events.map((event) => (
+                  <EventRow event={event} key={event.id ?? `${event.timestamp}-${event.type}-${event.message}`} />
+                ))}
+              </div>
+            </article>
+          </div>
+        ) : null}
       </div>
     </section>
   );

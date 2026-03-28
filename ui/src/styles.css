@@ -155,6 +155,14 @@ a {
   font-size: 0.88rem;
 }
 
+.detail-link {
+  color: var(--accent);
+}
+
+.detail-link:hover {
+  color: #9cf6d9;
+}
+
 .nav-item-active {
   border-color: rgba(110, 240, 194, 0.32);
   background: linear-gradient(180deg, rgba(110, 240, 194, 0.12), rgba(110, 240, 194, 0.04));
@@ -240,6 +248,12 @@ a {
   gap: 1rem;
 }
 
+.detail-grid,
+.topology-grid {
+  display: grid;
+  gap: 1rem;
+}
+
 .scenario-layout {
   display: grid;
   grid-template-columns: minmax(280px, 0.8fr) minmax(0, 1.4fr);
@@ -322,9 +336,28 @@ a {
   gap: 0.75rem;
 }
 
+.topology-node {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 1rem;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.topology-node-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.8rem;
+}
+
 .scenario-detail-stack {
   display: grid;
   gap: 1rem;
+}
+
+.detail-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 .detail-section {
@@ -516,6 +549,11 @@ a {
   font-size: 0.76rem;
 }
 
+.field-chip-link {
+  border: 1px solid rgba(110, 240, 194, 0.22);
+  background: rgba(110, 240, 194, 0.08);
+}
+
 .table-wrap {
   overflow-x: auto;
 }
@@ -649,6 +687,10 @@ a {
   }
 
   .range-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .detail-grid {
     grid-template-columns: 1fr;
   }
 

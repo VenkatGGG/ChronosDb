@@ -49,6 +49,50 @@ export interface ClusterSnapshot {
   events?: ClusterEvent[];
 }
 
+export interface TopologyEdgeView {
+  node_id: number;
+  range_id: number;
+  replica_id: number;
+  role: string;
+  leaseholder: boolean;
+}
+
+export interface ClusterTopologyView {
+  generated_at: string;
+  nodes: NodeView[];
+  ranges: RangeView[];
+  edges: TopologyEdgeView[];
+}
+
+export interface NodeHostedRangeView {
+  range_id: number;
+  generation: number;
+  start_key: string;
+  end_key?: string;
+  replica_id: number;
+  replica_role: string;
+  leaseholder: boolean;
+  placement_mode?: string;
+}
+
+export interface NodeDetailView {
+  node: NodeView;
+  hosted_ranges: NodeHostedRangeView[];
+  recent_events: ClusterEvent[];
+}
+
+export interface RangeReplicaNodeView {
+  replica: ReplicaView;
+  node?: NodeView;
+  leaseholder: boolean;
+}
+
+export interface RangeDetailView {
+  range: RangeView;
+  replica_nodes: RangeReplicaNodeView[];
+  recent_events: ClusterEvent[];
+}
+
 export interface KeyLocationView {
   key: string;
   encoding?: string;
