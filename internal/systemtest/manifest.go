@@ -3,6 +3,7 @@ package systemtest
 import (
 	"encoding/json"
 	"fmt"
+	"time"
 )
 
 const manifestVersion = "chronosdb.systemtest.v1"
@@ -74,4 +75,48 @@ func ExportManifest(scenario Scenario) ([]byte, error) {
 		return nil, err
 	}
 	return json.MarshalIndent(manifest, "", "  ")
+}
+
+// ScenarioFromManifest reconstructs one executable scenario from the exported manifest.
+func ScenarioFromManifest(manifest Manifest) (Scenario, error) {
+	if manifest.Version != manifestVersion {
+		return Scenario{}, fmt.Errorf("systemtest: unsupported manifest version %q", manifest.Version)
+	}
+	scenario := Scenario{
+		Name:  manifest.Scenario,
+		Nodes: append([]uint64(nil), manifest.Nodes...),
+		Steps: make([]Step, 0, len(manifest.Steps)),
+	}
+	for _, entry := range manifest.Steps {
+		step := Step{Action: entry.Action, NodeID: entry.NodeID}
+		switch entry.Action {
+		case ActionPartition:
+			step.Partition = &PartitionSpec{
+				Left:  append([]uint64(nil), entry.PartitionLeft...),
+				Right: append([]uint64(nil), entry.PartitionRight...),
+			}
+		case ActionWait:
+			duration, err := time.ParseDuration(entry.Duration)
+			if err != nil {
+				return Scenario{}, fmt.Errorf("systemtest: parse wait duration %q: %w", entry.Duration, err)
+			}
+			step.Duration = duration
+		case ActionAmbiguousCommit:
+			ackDelay, err := time.ParseDuration(entry.AckDelay)
+			if err != nil {
+				return Scenario{}, fmt.Errorf("systemtest: parse ack delay %q: %w", entry.AckDelay, err)
+			}
+			step.AmbiguousCommit = &AmbiguousCommitSpec{
+				GatewayNodeID: entry.GatewayNodeID,
+				TxnLabel:      entry.TxnLabel,
+				AckDelay:      ackDelay,
+				DropResponse:  entry.DropResponse,
+			}
+		case ActionCrashNode, ActionRestartNode, ActionHeal:
+		default:
+			return Scenario{}, fmt.Errorf("systemtest: unsupported action %q in manifest import", entry.Action)
+		}
+		scenario.Steps = append(scenario.Steps, step)
+	}
+	return scenario, scenario.Validate()
 }

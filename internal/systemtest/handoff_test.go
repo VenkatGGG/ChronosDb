@@ -70,3 +70,34 @@ func TestWriteHandoffBundlePersistsJSON(t *testing.T) {
 		t.Fatalf("first handoff step = %+v, want crash node", bundle.Manifest.Steps[0])
 	}
 }
+
+func TestLoadHandoffBundleRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	scenario, err := PartitionRecoveryScenario(PartitionRecoveryConfig{
+		Name:  "handoff-load",
+		Nodes: []uint64{1, 2, 3},
+		Partition: PartitionSpec{
+			Left:  []uint64{1},
+			Right: []uint64{2, 3},
+		},
+		SettleFor: time.Second,
+	})
+	if err != nil {
+		t.Fatalf("scenario: %v", err)
+	}
+	root := t.TempDir()
+	if err := WriteHandoffBundle(root, scenario); err != nil {
+		t.Fatalf("write handoff: %v", err)
+	}
+	bundle, err := LoadHandoffBundle(filepath.Join(root, "handoff.json"))
+	if err != nil {
+		t.Fatalf("load handoff bundle: %v", err)
+	}
+	if bundle.Manifest.Scenario != scenario.Name {
+		t.Fatalf("handoff manifest scenario = %q, want %q", bundle.Manifest.Scenario, scenario.Name)
+	}
+	if _, err := os.Stat(filepath.Join(root, "handoff.json")); err != nil {
+		t.Fatalf("stat handoff.json: %v", err)
+	}
+}

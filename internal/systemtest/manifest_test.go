@@ -70,3 +70,37 @@ func TestExportManifestProducesJSON(t *testing.T) {
 		t.Fatalf("wait durations = %+v, want 5s and 4s", manifest.Steps)
 	}
 }
+
+func TestScenarioFromManifestRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	original, err := AmbiguousCommitRecoveryScenario(AmbiguousCommitRecoveryConfig{
+		Name:          "manifest-roundtrip",
+		Nodes:         []uint64{1, 2, 3},
+		GatewayNodeID: 1,
+		TxnLabel:      "transfer-8",
+		AckDelay:      200 * time.Millisecond,
+		SettleFor:     time.Second,
+		PartitionBefore: &PartitionSpec{
+			Left:  []uint64{1},
+			Right: []uint64{2, 3},
+		},
+	})
+	if err != nil {
+		t.Fatalf("scenario: %v", err)
+	}
+	manifest, err := BuildManifest(original)
+	if err != nil {
+		t.Fatalf("build manifest: %v", err)
+	}
+	roundTrip, err := ScenarioFromManifest(manifest)
+	if err != nil {
+		t.Fatalf("scenario from manifest: %v", err)
+	}
+	if roundTrip.Name != original.Name || len(roundTrip.Steps) != len(original.Steps) {
+		t.Fatalf("round-trip scenario = %+v, want %+v", roundTrip, original)
+	}
+	if roundTrip.Steps[1].AmbiguousCommit == nil || roundTrip.Steps[1].AmbiguousCommit.TxnLabel != "transfer-8" {
+		t.Fatalf("ambiguous step = %+v, want transfer-8", roundTrip.Steps[1])
+	}
+}

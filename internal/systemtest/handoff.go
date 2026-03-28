@@ -87,3 +87,16 @@ func WriteHandoffBundle(root string, scenario Scenario) error {
 	}
 	return os.WriteFile(filepath.Join(root, "handoff.json"), append(payload, '\n'), 0o644)
 }
+
+// LoadHandoffBundle reads and decodes one persisted handoff bundle.
+func LoadHandoffBundle(path string) (HandoffBundle, error) {
+	payload, err := os.ReadFile(path)
+	if err != nil {
+		return HandoffBundle{}, err
+	}
+	var bundle HandoffBundle
+	if err := json.Unmarshal(payload, &bundle); err != nil {
+		return HandoffBundle{}, err
+	}
+	return bundle, nil
+}
