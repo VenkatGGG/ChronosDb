@@ -8,7 +8,8 @@ Implementation is underway. The repository already contains:
 - the Phase 0 protocol spec pack
 - the Phase 1 Pebble-backed storage core
 - the Phase 2 single-range replication and lease/read foundations
-- the first Phase 3 meta and routing primitives
+- the full Phase 3 through Phase 8 distributed systems core, locality, and hardening work
+- the Phase 11 cluster console with live nodes, ranges, key lookup, events, and retained scenario browsing
 
 The repo still follows a plan-first discipline: protocol and scope changes
 should be written down before the corresponding code lands.
@@ -125,12 +126,14 @@ flowchart TD
 1. **Phase 0**: freeze keyspace, state machines, retry contract, errors, closed timestamps, placement, and invariants. Status: complete.
 2. **Phase 1**: Pebble-backed single-node storage core. Status: complete.
 3. **Phase 2**: shared MultiRaft scheduler, lease system, fast reads, and durability batching. Status: complete.
-4. **Phase 3**: meta ranges, routing, liveness, split, rebalance, and membership changes. Status: in progress.
-5. **Phase 4**: transaction core
-6. **Phase 5**: multi-range transactions, `STAGING`, and parallel commit
-7. **Phase 6**: PostgreSQL wire protocol and distributed SQL front door
-8. **Phase 7**: locality semantics and follower historical reads
-9. **Phase 8**: hardening, large-scale simulation, and chaos/Jepsen testing
+4. **Phase 3**: meta ranges, routing, liveness, split, rebalance, and membership changes. Status: complete.
+5. **Phase 4**: transaction core. Status: complete.
+6. **Phase 5**: multi-range transactions, `STAGING`, and parallel commit. Status: complete.
+7. **Phase 6**: PostgreSQL wire protocol and distributed SQL front door. Status: complete.
+8. **Phase 7**: locality semantics and follower historical reads. Status: complete.
+9. **Phase 8**: hardening, simulation, and external chaos runner integration. Status: complete for current scope.
+10. **Phase 11**: cluster console and real-time operations UI. Status: complete.
+11. **Phase 12**: topology drilldowns and operational forensics. Status: in progress.
 
 ## Phase 8 Evidence
 

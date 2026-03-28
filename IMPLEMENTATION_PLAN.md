@@ -352,6 +352,46 @@ Definition of done:
 
 - the system can be operated, profiled, and failure-tested at realistic scale
 
+### Phase 11: Cluster console and real-time operations UI
+
+Deliver:
+
+- typed admin API contracts
+- node-level admin read endpoints
+- cluster snapshot aggregator
+- live event stream
+- authoritative range placement API
+- key location lookup
+- operator web UI
+- retained scenario and artifact browsing
+
+Definition of done:
+
+- an operator can inspect nodes, ranges, replicas, leaseholders, placement,
+  and recent operations from one UI
+- the UI answers "where does key K live?" from authoritative metadata instead
+  of inference
+
+### Phase 12: Console topology and operational forensics
+
+Deliver:
+
+- topology graph and placement summary APIs
+- node drilldown API with hosted ranges, lease ownership, and recent related events
+- range drilldown API with replica residency, lease state, placement policy, and recent related events
+- event correlation surfaces keyed by node and range
+- console drilldown pages and deep links for node/range investigation
+- retained-run to live-topology correlation hooks where artifacts reference nodes and ranges
+
+Definition of done:
+
+- an operator can move from a cluster overview to a specific node or range
+  without leaving the console
+- the console exposes enough structured state to explain where data resides,
+  who currently serves it, and what changed recently
+- topology and drilldown APIs remain derived from authoritative descriptors and
+  live node state rather than UI-side inference
+
 ## 6. Acceptance Gates
 
 Before any code commit is allowed:

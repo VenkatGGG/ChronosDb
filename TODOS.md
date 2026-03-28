@@ -435,3 +435,35 @@ manifest/report/handoff surfaces and recent node-log evidence.
 - [x] 11.6 Add range placement and leaseholder visualization from authoritative descriptors
 - [x] 11.7 Add key-location lookup and placement drilldown
 - [x] 11.8 Add scenario/artifact browsing for retained fault runs
+
+### [ ] 12. Console Topology and Operational Forensics
+
+Deliver:
+
+- topology graph and placement summary APIs
+- node drilldown API with hosted ranges, lease ownership, and recent related events
+- range drilldown API with replica residency, lease state, placement policy, and related events
+- event-correlation views keyed by node and range
+- console drilldown pages and deep links for node/range investigation
+- retained-run correlation surfaces so scenario artifacts can jump into affected nodes and ranges
+
+Exit criteria:
+
+- an operator can move from the cluster overview to a specific node or range
+  and understand current ownership, residency, and recent changes without
+  leaving the console
+- topology and drilldown views are derived from authoritative descriptors and
+  live node state instead of UI-side inference
+
+**Status:** In progress. Phase 12 starts by freezing the topology and drilldown
+contracts, then adding backend APIs before deeper UI navigation and forensics
+surfaces.
+
+### [ ] Phase 12 Remaining Execution
+
+- [ ] 12.1 Freeze topology and drilldown view contracts plus HTTP endpoints
+- [ ] 12.2 Add backend topology summary, node detail, and range detail APIs
+- [ ] 12.3 Correlate recent events by node and range on the backend
+- [ ] 12.4 Add console topology and drilldown pages with deep-linkable routes
+- [ ] 12.5 Link retained scenario artifacts to affected nodes and ranges in the console
+- [ ] 12.6 Add focused tests for topology merges, drilldown correctness, and deep-link behavior
