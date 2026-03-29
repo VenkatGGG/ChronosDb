@@ -512,10 +512,10 @@ is to replace the current planner-backed demo shell with a true live runtime.
 - [x] 13.1 Replace the planner-only `chronos-node` shell with a real runtime assembly layer
   that opens the storage engine, bootstraps store identity, constructs hosted
   replicas, and wires MultiRaft, leases, metadata, and observability together
-- [ ] 13.2 Add a persistent node/store bootstrap path
+- [x] 13.2 Add a persistent node/store bootstrap path
   that creates cluster/store identities, bootstraps meta ranges, and records
   the first authoritative range descriptors and leaseholders on disk
-- [ ] 13.3 Add real inter-node Raft transport and message handling
+- [x] 13.3 Add real inter-node Raft transport and message handling
   so outbound `ProcessReady` messages are delivered across processes and
   inbound messages are stepped into the correct local groups
 - [x] 13.4 Replace static `ProcessNodeConfig.Ranges` with live descriptor-backed hosting

@@ -26,6 +26,7 @@ type ProcessNodeConfig struct {
 	NodeID            uint64
 	ClusterID         string
 	StoreID           uint64
+	BootstrapPath     string
 	DataDir           string
 	PGListenAddr      string
 	ObservabilityAddr string
@@ -101,6 +102,9 @@ func NewProcessNode(cfg ProcessNodeConfig) (*ProcessNode, error) {
 	if cfg.EventBufferSize <= 0 {
 		cfg.EventBufferSize = defaultProcessNodeEventBufferSize
 	}
+	if cfg.BootstrapPath == "" {
+		cfg.BootstrapPath = filepath.Join(filepath.Dir(cfg.DataDir), "bootstrap.json")
+	}
 	if len(cfg.Ranges) > 0 {
 		cfg.Ranges = append([]meta.RangeDescriptor(nil), cfg.Ranges...)
 		for _, desc := range cfg.Ranges {
@@ -110,11 +114,13 @@ func NewProcessNode(cfg ProcessNodeConfig) (*ProcessNode, error) {
 		}
 	}
 	host, err := chronosruntime.Open(context.Background(), chronosruntime.Config{
-		NodeID:     cfg.NodeID,
-		StoreID:    cfg.StoreID,
-		ClusterID:  cfg.ClusterID,
-		DataDir:    filepath.Join(cfg.DataDir, "store"),
-		SeedRanges: cfg.Ranges,
+		NodeID:        cfg.NodeID,
+		StoreID:       cfg.StoreID,
+		ClusterID:     cfg.ClusterID,
+		DataDir:       filepath.Join(cfg.DataDir, "store"),
+		SeedRanges:    cfg.Ranges,
+		BootstrapPath: cfg.BootstrapPath,
+		Transport:     newProcessNodeTransport(cfg.NodeID, filepath.Dir(cfg.DataDir)),
 	})
 	if err != nil {
 		return nil, err
@@ -305,6 +311,7 @@ func (n *ProcessNode) controlMux() http.Handler {
 	mux.HandleFunc("/control/state", n.handleState)
 	mux.HandleFunc("/control/partition", n.handlePartition)
 	mux.HandleFunc("/control/heal", n.handleHeal)
+	mux.HandleFunc("/control/raft/message", n.handleRaftMessage)
 	mux.HandleFunc("/control/ambiguous-commit", n.handleAmbiguousCommit)
 	mux.HandleFunc("/control/logs", n.handleLogs)
 	mux.HandleFunc("/control/log", n.handleLog)
@@ -401,6 +408,30 @@ func (n *ProcessNode) handleAmbiguousCommit(w http.ResponseWriter, r *http.Reque
 			"txn_label": spec.TxnLabel,
 		},
 	})
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (n *ProcessNode) handleRaftMessage(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req raftMessageBatchRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	for _, message := range req.Messages {
+		decoded, err := unmarshalRaftMessage(message.Message)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := n.host.Step(r.Context(), message.RangeID, decoded); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 

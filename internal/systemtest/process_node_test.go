@@ -211,6 +211,64 @@ func TestProcessNodePersistsHostedDescriptorsAcrossRestart(t *testing.T) {
 	}
 }
 
+func TestProcessNodeRaftTransportElectsAcrossProcesses(t *testing.T) {
+	t.Parallel()
+
+	rootDir := t.TempDir()
+	desc := meta.RangeDescriptor{
+		RangeID:    31,
+		Generation: 1,
+		StartKey:   []byte("a"),
+		EndKey:     []byte("z"),
+		Replicas: []meta.ReplicaDescriptor{
+			{ReplicaID: 11, NodeID: 1, Role: meta.ReplicaRoleVoter},
+			{ReplicaID: 12, NodeID: 2, Role: meta.ReplicaRoleVoter},
+		},
+		LeaseholderReplicaID: 11,
+	}
+
+	node1, cancel1, done1 := startProcessNodeForTest(t, ProcessNodeConfig{
+		NodeID:            1,
+		DataDir:           filepath.Join(rootDir, "node-1"),
+		PGListenAddr:      "127.0.0.1:0",
+		ObservabilityAddr: "127.0.0.1:0",
+		ControlAddr:       "127.0.0.1:0",
+		Ranges:            []meta.RangeDescriptor{desc},
+	})
+	t.Cleanup(func() {
+		cancel1()
+		waitProcessNodeDone(t, done1, "node1")
+	})
+	node2, cancel2, done2 := startProcessNodeForTest(t, ProcessNodeConfig{
+		NodeID:            2,
+		DataDir:           filepath.Join(rootDir, "node-2"),
+		PGListenAddr:      "127.0.0.1:0",
+		ObservabilityAddr: "127.0.0.1:0",
+		ControlAddr:       "127.0.0.1:0",
+		Ranges:            []meta.RangeDescriptor{desc},
+	})
+	t.Cleanup(func() {
+		cancel2()
+		waitProcessNodeDone(t, done2, "node2")
+	})
+
+	if err := node1.host.Campaign(context.Background(), 31); err != nil {
+		t.Fatalf("campaign node1 range 31: %v", err)
+	}
+	deadline := time.Now().Add(4 * time.Second)
+	for time.Now().Before(deadline) {
+		leader1, err1 := node1.host.Leader(31)
+		leader2, err2 := node2.host.Leader(31)
+		if err1 == nil && err2 == nil && leader1 == 11 && leader2 == 11 {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	leader1, _ := node1.host.Leader(31)
+	leader2, _ := node2.host.Leader(31)
+	t.Fatalf("leaders after transport election = node1:%d node2:%d, want both 11", leader1, leader2)
+}
+
 func waitForProcessNodeState(t *testing.T, path string) ProcessNodeState {
 	t.Helper()
 
@@ -256,6 +314,38 @@ func runNodeOnce(t *testing.T, cfg ProcessNodeConfig) ProcessNodeState {
 		t.Fatal("timed out waiting for process node shutdown")
 	}
 	return state
+}
+
+func startProcessNodeForTest(t *testing.T, cfg ProcessNodeConfig) (*ProcessNode, context.CancelFunc, chan error) {
+	t.Helper()
+
+	if err := os.Remove(filepath.Join(cfg.DataDir, "state.json")); err != nil && !os.IsNotExist(err) {
+		t.Fatalf("remove stale state file: %v", err)
+	}
+	node, err := NewProcessNode(cfg)
+	if err != nil {
+		t.Fatalf("new process node: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- node.Run(ctx)
+	}()
+	_ = waitForProcessNodeState(t, filepath.Join(cfg.DataDir, "state.json"))
+	return node, cancel, done
+}
+
+func waitProcessNodeDone(t *testing.T, done chan error, label string) {
+	t.Helper()
+
+	select {
+	case err := <-done:
+		if err != nil && err != context.Canceled {
+			t.Fatalf("%s run: %v", label, err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for %s shutdown", label)
+	}
 }
 
 func getJSON(t *testing.T, client *http.Client, url string, out any) {
