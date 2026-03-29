@@ -470,7 +470,7 @@ through retained scenario evidence without requiring UI-side inference.
 - [x] 12.5 Link retained scenario artifacts to affected nodes and ranges in the console
 - [x] 12.6 Add focused tests for topology merges, drilldown correctness, and deep-link behavior
 
-### [ ] 13. Live Data Plane and Integrated Runtime
+### [x] 13. Live Data Plane and Integrated Runtime
 
 Deliver:
 
