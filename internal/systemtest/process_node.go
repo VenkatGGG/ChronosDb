@@ -25,22 +25,23 @@ import (
 
 // ProcessNodeConfig configures one externally launched ChronosDB node process.
 type ProcessNodeConfig struct {
-	NodeID            uint64
-	ClusterID         string
-	StoreID           uint64
-	BootstrapPath     string
-	DataDir           string
-	PGListenAddr      string
-	ObservabilityAddr string
-	ControlAddr       string
-	Catalog           *chronossql.Catalog
-	Ranges            []meta.RangeDescriptor
-	EventBufferSize   int
-	HeartbeatInterval time.Duration
-	AllocatorInterval time.Duration
-	LeaseTTL          time.Duration
-	ClosedTSLag       time.Duration
-	AutoSplitRows     int
+	NodeID              uint64
+	ClusterID           string
+	StoreID             uint64
+	BootstrapPath       string
+	DataDir             string
+	PGListenAddr        string
+	ObservabilityAddr   string
+	ControlAddr         string
+	Catalog             *chronossql.Catalog
+	Ranges              []meta.RangeDescriptor
+	EventBufferSize     int
+	HeartbeatInterval   time.Duration
+	AllocatorInterval   time.Duration
+	TxnRecoveryInterval time.Duration
+	LeaseTTL            time.Duration
+	ClosedTSLag         time.Duration
+	AutoSplitRows       int
 }
 
 // ProcessNodeState is the externally readable address/state manifest for one launched node.
@@ -386,9 +387,11 @@ func (n *ProcessNode) controlMux() http.Handler {
 	mux.HandleFunc("/control/kv/put", n.handleKVPut)
 	mux.HandleFunc("/control/kv/scan", n.handleKVScan)
 	mux.HandleFunc("/control/kv/intent/put", n.handleKVIntentPut)
+	mux.HandleFunc("/control/kv/intent/get", n.handleKVIntentGet)
 	mux.HandleFunc("/control/kv/intent/delete", n.handleKVIntentDelete)
 	mux.HandleFunc("/control/kv/txn-record/put", n.handleKVTxnRecordPut)
 	mux.HandleFunc("/control/kv/txn-record/get", n.handleKVTxnRecordGet)
+	mux.HandleFunc("/control/kv/txn-record/scan", n.handleKVTxnRecordScan)
 	mux.HandleFunc("/control/txn/lock/acquire", n.handleTxnLockAcquire)
 	mux.HandleFunc("/control/txn/lock/release", n.handleTxnLockRelease)
 	mux.HandleFunc("/control/ambiguous-commit", n.handleAmbiguousCommit)
@@ -642,6 +645,27 @@ func (n *ProcessNode) handleKVIntentPut(w http.ResponseWriter, r *http.Request) 
 	w.WriteHeader(http.StatusNoContent)
 }
 
+func (n *ProcessNode) handleKVIntentGet(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req kvGetRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	intent, err := n.host.GetIntentLocal(r.Context(), req.Key)
+	switch {
+	case err == nil:
+		writeJSONResponse(w, kvIntentResponse{Found: true, Intent: intent})
+	case errors.Is(err, storage.ErrIntentNotFound):
+		writeJSONResponse(w, kvIntentResponse{Found: false})
+	default:
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+}
+
 func (n *ProcessNode) handleKVIntentDelete(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -700,6 +724,24 @@ func (n *ProcessNode) handleKVTxnRecordGet(w http.ResponseWriter, r *http.Reques
 		Found:  true,
 		Record: record,
 	})
+}
+
+func (n *ProcessNode) handleKVTxnRecordScan(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req kvTxnRecordScanRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	records, _, err := n.host.ScanTxnRecordsLocal(r.Context(), req.StartKey, req.EndKey)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSONResponse(w, kvTxnRecordScanResponse{Records: records})
 }
 
 func (n *ProcessNode) handleTxnLockAcquire(w http.ResponseWriter, r *http.Request) {

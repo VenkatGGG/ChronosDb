@@ -3,17 +3,20 @@ package systemtest
 import (
 	"context"
 	"encoding/binary"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/VenkatGGG/ChronosDb/internal/hlc"
 	"github.com/VenkatGGG/ChronosDb/internal/meta"
 	"github.com/VenkatGGG/ChronosDb/internal/pgwire"
 	chronosruntime "github.com/VenkatGGG/ChronosDb/internal/runtime"
 	chronossql "github.com/VenkatGGG/ChronosDb/internal/sql"
 	"github.com/VenkatGGG/ChronosDb/internal/storage"
+	"github.com/VenkatGGG/ChronosDb/internal/txn"
 )
 
 func TestProcessNodeExecutesPointInsertAndSelectAcrossNodes(t *testing.T) {
@@ -1181,6 +1184,264 @@ func TestProcessNodeRestartsAndResumesServingReplicatedRows(t *testing.T) {
 	}
 }
 
+func TestProcessNodeRecoversStagingTxnInBackground(t *testing.T) {
+	t.Parallel()
+
+	rootDir := t.TempDir()
+	bootstrapPath := filepath.Join(rootDir, "bootstrap.json")
+	splitKey := usersPrimaryKey(50)
+	rangeOne := meta.RangeDescriptor{
+		RangeID:    71,
+		Generation: 1,
+		StartKey:   storage.GlobalTablePrimaryPrefix(7),
+		EndKey:     splitKey,
+		Replicas: []meta.ReplicaDescriptor{
+			{ReplicaID: 61, NodeID: 1, Role: meta.ReplicaRoleVoter},
+			{ReplicaID: 62, NodeID: 2, Role: meta.ReplicaRoleVoter},
+			{ReplicaID: 63, NodeID: 3, Role: meta.ReplicaRoleVoter},
+		},
+		LeaseholderReplicaID: 61,
+	}
+	rangeTwo := meta.RangeDescriptor{
+		RangeID:    72,
+		Generation: 1,
+		StartKey:   splitKey,
+		EndKey:     storage.GlobalTablePrimaryPrefix(8),
+		Replicas: []meta.ReplicaDescriptor{
+			{ReplicaID: 64, NodeID: 1, Role: meta.ReplicaRoleVoter},
+			{ReplicaID: 65, NodeID: 2, Role: meta.ReplicaRoleVoter},
+			{ReplicaID: 66, NodeID: 3, Role: meta.ReplicaRoleVoter},
+		},
+		LeaseholderReplicaID: 66,
+	}
+	manifest, err := chronosruntime.BuildBootstrapManifest("cluster-background-staging-recovery", []chronosruntime.BootstrapNode{
+		{NodeID: 1, StoreID: 61},
+		{NodeID: 2, StoreID: 62},
+		{NodeID: 3, StoreID: 63},
+	}, []meta.RangeDescriptor{rangeOne, rangeTwo})
+	if err != nil {
+		t.Fatalf("build bootstrap manifest: %v", err)
+	}
+	if err := chronosruntime.WriteBootstrapManifest(bootstrapPath, manifest); err != nil {
+		t.Fatalf("write bootstrap manifest: %v", err)
+	}
+
+	startCfg := func(nodeID, storeID uint64) ProcessNodeConfig {
+		return ProcessNodeConfig{
+			NodeID:              nodeID,
+			StoreID:             storeID,
+			DataDir:             filepath.Join(rootDir, fmt.Sprintf("node-%d", nodeID)),
+			BootstrapPath:       bootstrapPath,
+			PGListenAddr:        "127.0.0.1:0",
+			ObservabilityAddr:   "127.0.0.1:0",
+			ControlAddr:         "127.0.0.1:0",
+			HeartbeatInterval:   50 * time.Millisecond,
+			TxnRecoveryInterval: 50 * time.Millisecond,
+		}
+	}
+
+	node1, cancel1, done1 := startProcessNodeForTest(t, startCfg(1, 61))
+	t.Cleanup(func() {
+		cancel1()
+		waitProcessNodeDone(t, done1, "staging-recovery-node1")
+	})
+	node2, cancel2, done2 := startProcessNodeForTest(t, startCfg(2, 62))
+	t.Cleanup(func() {
+		cancel2()
+		waitProcessNodeDone(t, done2, "staging-recovery-node2")
+	})
+	node3, cancel3, done3 := startProcessNodeForTest(t, startCfg(3, 63))
+	t.Cleanup(func() {
+		cancel3()
+		waitProcessNodeDone(t, done3, "staging-recovery-node3")
+	})
+
+	if err := node1.host.Campaign(context.Background(), rangeOne.RangeID); err != nil {
+		t.Fatalf("campaign first range: %v", err)
+	}
+	if err := node3.host.Campaign(context.Background(), rangeTwo.RangeID); err != nil {
+		t.Fatalf("campaign second range: %v", err)
+	}
+	waitForRangeLeader(t, node1.host, rangeOne.RangeID, 61)
+	waitForRangeLeader(t, node3.host, rangeTwo.RangeID, 66)
+
+	catalog, err := defaultSystemTestCatalog()
+	if err != nil {
+		t.Fatalf("default catalog: %v", err)
+	}
+	users, err := catalog.ResolveTable("users")
+	if err != nil {
+		t.Fatalf("resolve users table: %v", err)
+	}
+	planner := chronossql.NewPlanner(chronossql.NewParser(), catalog)
+	insertAlice := mustInsertPlan(t, planner, "insert into users (id, name, email) values (7, 'alice', 'a@example.com')")
+	insertBob := mustInsertPlan(t, planner, "insert into users (id, name, email) values (70, 'bob', 'b@example.com')")
+
+	now := hlc.Timestamp{WallTime: uint64(time.Now().UTC().UnixNano())}
+	record := txn.Record{
+		ID:         newTxnID(),
+		Status:     txn.StatusPending,
+		ReadTS:     now,
+		WriteTS:    now,
+		Priority:   1,
+		DeadlineTS: hlc.Timestamp{WallTime: now.WallTime + uint64(30*time.Second)},
+	}
+	record, err = record.Anchor(rangeOne.RangeID, now)
+	if err != nil {
+		t.Fatalf("anchor record: %v", err)
+	}
+	record, err = record.TrackIntent(txn.IntentRef{RangeID: rangeOne.RangeID, Key: insertAlice.Key, Strength: storage.IntentStrengthExclusive})
+	if err != nil {
+		t.Fatalf("track alice intent: %v", err)
+	}
+	record, err = record.TrackIntent(txn.IntentRef{RangeID: rangeTwo.RangeID, Key: insertBob.Key, Strength: storage.IntentStrengthExclusive})
+	if err != nil {
+		t.Fatalf("track bob intent: %v", err)
+	}
+
+	if err := node1.kv.PutIntent(context.Background(), insertAlice.Key, storage.Intent{
+		TxnID:          record.ID,
+		Epoch:          record.Epoch,
+		WriteTimestamp: record.WriteTS,
+		Strength:       storage.IntentStrengthExclusive,
+		Value:          insertAlice.Value,
+	}); err != nil {
+		t.Fatalf("put alice intent: %v", err)
+	}
+	if err := node1.kv.PutIntent(context.Background(), insertBob.Key, storage.Intent{
+		TxnID:          record.ID,
+		Epoch:          record.Epoch,
+		WriteTimestamp: record.WriteTS,
+		Strength:       storage.IntentStrengthExclusive,
+		Value:          insertBob.Value,
+	}); err != nil {
+		t.Fatalf("put bob intent: %v", err)
+	}
+	required, err := intentSetFromRecord(record)
+	if err != nil {
+		t.Fatalf("intent set from record: %v", err)
+	}
+	staged, err := record.StageForParallelCommit(required)
+	if err != nil {
+		t.Fatalf("stage record: %v", err)
+	}
+	if err := node1.kv.PutTxnRecord(context.Background(), staged); err != nil {
+		t.Fatalf("put staged txn record: %v", err)
+	}
+
+	waitForTxnRecordStatus(t, node1.kv, staged.ID, txn.StatusCommitted)
+	waitForDecodedUserRow(t, node2.kv, users, insertAlice.Key, "7", "alice")
+	waitForDecodedUserRow(t, node2.kv, users, insertBob.Key, "70", "bob")
+	waitForIntentMissing(t, node1.kv, insertAlice.Key)
+	waitForIntentMissing(t, node1.kv, insertBob.Key)
+}
+
+func TestProcessNodeAbortsExpiredPendingTxnInBackground(t *testing.T) {
+	t.Parallel()
+
+	rootDir := t.TempDir()
+	bootstrapPath := filepath.Join(rootDir, "bootstrap.json")
+	usersRange := meta.RangeDescriptor{
+		RangeID:    73,
+		Generation: 1,
+		StartKey:   storage.GlobalTablePrimaryPrefix(7),
+		EndKey:     storage.GlobalTablePrimaryPrefix(8),
+		Replicas: []meta.ReplicaDescriptor{
+			{ReplicaID: 67, NodeID: 1, Role: meta.ReplicaRoleVoter},
+			{ReplicaID: 68, NodeID: 2, Role: meta.ReplicaRoleVoter},
+			{ReplicaID: 69, NodeID: 3, Role: meta.ReplicaRoleVoter},
+		},
+		LeaseholderReplicaID: 68,
+	}
+	manifest, err := chronosruntime.BuildBootstrapManifest("cluster-background-pending-abort", []chronosruntime.BootstrapNode{
+		{NodeID: 1, StoreID: 67},
+		{NodeID: 2, StoreID: 68},
+		{NodeID: 3, StoreID: 69},
+	}, []meta.RangeDescriptor{usersRange})
+	if err != nil {
+		t.Fatalf("build bootstrap manifest: %v", err)
+	}
+	if err := chronosruntime.WriteBootstrapManifest(bootstrapPath, manifest); err != nil {
+		t.Fatalf("write bootstrap manifest: %v", err)
+	}
+
+	startCfg := func(nodeID, storeID uint64) ProcessNodeConfig {
+		return ProcessNodeConfig{
+			NodeID:              nodeID,
+			StoreID:             storeID,
+			DataDir:             filepath.Join(rootDir, fmt.Sprintf("pending-node-%d", nodeID)),
+			BootstrapPath:       bootstrapPath,
+			PGListenAddr:        "127.0.0.1:0",
+			ObservabilityAddr:   "127.0.0.1:0",
+			ControlAddr:         "127.0.0.1:0",
+			HeartbeatInterval:   50 * time.Millisecond,
+			TxnRecoveryInterval: 50 * time.Millisecond,
+		}
+	}
+
+	node1, cancel1, done1 := startProcessNodeForTest(t, startCfg(1, 67))
+	t.Cleanup(func() {
+		cancel1()
+		waitProcessNodeDone(t, done1, "pending-recovery-node1")
+	})
+	node2, cancel2, done2 := startProcessNodeForTest(t, startCfg(2, 68))
+	t.Cleanup(func() {
+		cancel2()
+		waitProcessNodeDone(t, done2, "pending-recovery-node2")
+	})
+	_, cancel3, done3 := startProcessNodeForTest(t, startCfg(3, 69))
+	t.Cleanup(func() {
+		cancel3()
+		waitProcessNodeDone(t, done3, "pending-recovery-node3")
+	})
+
+	if err := node2.host.Campaign(context.Background(), usersRange.RangeID); err != nil {
+		t.Fatalf("campaign pending range: %v", err)
+	}
+	waitForRangeLeader(t, node2.host, usersRange.RangeID, 68)
+
+	catalog, err := defaultSystemTestCatalog()
+	if err != nil {
+		t.Fatalf("default catalog: %v", err)
+	}
+	planner := chronossql.NewPlanner(chronossql.NewParser(), catalog)
+	insertCarol := mustInsertPlan(t, planner, "insert into users (id, name, email) values (11, 'carol', 'c@example.com')")
+
+	now := hlc.Timestamp{WallTime: uint64(time.Now().UTC().UnixNano())}
+	record := txn.Record{
+		ID:         newTxnID(),
+		Status:     txn.StatusPending,
+		ReadTS:     now,
+		WriteTS:    now,
+		Priority:   1,
+		DeadlineTS: hlc.Timestamp{WallTime: now.WallTime - uint64(time.Second)},
+	}
+	record, err = record.Anchor(usersRange.RangeID, now)
+	if err != nil {
+		t.Fatalf("anchor pending record: %v", err)
+	}
+	record, err = record.TrackIntent(txn.IntentRef{RangeID: usersRange.RangeID, Key: insertCarol.Key, Strength: storage.IntentStrengthExclusive})
+	if err != nil {
+		t.Fatalf("track pending intent: %v", err)
+	}
+	if err := node1.kv.PutIntent(context.Background(), insertCarol.Key, storage.Intent{
+		TxnID:          record.ID,
+		Epoch:          record.Epoch,
+		WriteTimestamp: record.WriteTS,
+		Strength:       storage.IntentStrengthExclusive,
+		Value:          insertCarol.Value,
+	}); err != nil {
+		t.Fatalf("put pending intent: %v", err)
+	}
+	if err := node1.kv.PutTxnRecord(context.Background(), record); err != nil {
+		t.Fatalf("put pending txn record: %v", err)
+	}
+
+	waitForTxnRecordStatus(t, node1.kv, record.ID, txn.StatusAborted)
+	waitForIntentMissing(t, node1.kv, insertCarol.Key)
+	waitForKeyAbsent(t, node1.kv, insertCarol.Key)
+}
+
 func waitForRangeLeader(t *testing.T, host *chronosruntime.Host, rangeID, leaderReplicaID uint64) {
 	t.Helper()
 
@@ -1208,6 +1469,84 @@ func waitForReplicatedUserRow(t *testing.T, node *ProcessNode, key []byte) {
 		time.Sleep(25 * time.Millisecond)
 	}
 	t.Fatalf("timed out waiting for replicated row %q on node %d", key, node.cfg.NodeID)
+}
+
+func waitForTxnRecordStatus(t *testing.T, kv *kvClient, txnID storage.TxnID, want txn.Status) {
+	t.Helper()
+
+	deadline := time.Now().Add(4 * time.Second)
+	for time.Now().Before(deadline) {
+		record, found, err := kv.GetTxnRecord(context.Background(), txnID)
+		if err == nil && found && record.Status == want {
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	record, _, _ := kv.GetTxnRecord(context.Background(), txnID)
+	t.Fatalf("txn %x status = %s, want %s", txnID[:], record.Status, want)
+}
+
+func waitForIntentMissing(t *testing.T, kv *kvClient, key []byte) {
+	t.Helper()
+
+	deadline := time.Now().Add(4 * time.Second)
+	for time.Now().Before(deadline) {
+		_, found, err := kv.GetIntent(context.Background(), key)
+		if err == nil && !found {
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatalf("intent for key %q still present", key)
+}
+
+func waitForKeyAbsent(t *testing.T, kv *kvClient, key []byte) {
+	t.Helper()
+
+	deadline := time.Now().Add(4 * time.Second)
+	for time.Now().Before(deadline) {
+		_, found, err := kv.GetLatest(context.Background(), key)
+		if err == nil && !found {
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatalf("key %q is still present", key)
+}
+
+func waitForDecodedUserRow(t *testing.T, kv *kvClient, table chronossql.TableDescriptor, key []byte, wantID, wantName string) {
+	t.Helper()
+
+	deadline := time.Now().Add(4 * time.Second)
+	for time.Now().Before(deadline) {
+		value, found, err := kv.GetLatest(context.Background(), key)
+		if err == nil && found {
+			row, decodeErr := chronossql.DecodeRowValue(table, value)
+			if decodeErr == nil {
+				id, idErr := chronossql.FormatValueText(row["id"])
+				name, nameErr := chronossql.FormatValueText(row["name"])
+				if idErr == nil && nameErr == nil && string(id) == wantID && string(name) == wantName {
+					return
+				}
+			}
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for decoded row %q/%q", wantID, wantName)
+}
+
+func mustInsertPlan(t *testing.T, planner *chronossql.Planner, query string) chronossql.InsertPlan {
+	t.Helper()
+
+	plan, err := planner.Plan(query)
+	if err != nil {
+		t.Fatalf("plan insert %q: %v", query, err)
+	}
+	insert, ok := plan.(chronossql.InsertPlan)
+	if !ok {
+		t.Fatalf("plan type = %T, want InsertPlan", plan)
+	}
+	return insert
 }
 
 func usersPrimaryKey(id int64) []byte {

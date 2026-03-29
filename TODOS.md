@@ -503,17 +503,17 @@ Exit criteria:
 - range placement, leaseholders, and key location in the console are sourced
   from the live replicated runtime rather than static node config
 
-**Status:** In progress. The runtime-backed `chronos-node`, persistent
-bootstrap, live inter-node Raft transport, descriptor-backed hosting, point KV
-reads/writes, explicit transaction plumbing, persisted catalog descriptors, and
-the first real pgwire-backed point/range-scan `SELECT` plus `INSERT` path now
-exist. Live background maintenance now also runs inside `chronos-node`,
-including liveness heartbeats, allocator-driven rebalance recommendations, and
-learner snapshot catch-up for real replica movement. Remaining work is the
-broader autonomous recovery surface and closing the last unchecked Phase 13
-items to match what is already live in the runtime.
+**Status:** Complete. The runtime-backed `chronos-node`, persistent
+bootstrap, live inter-node Raft transport, descriptor-backed hosting, full KV
+request path, explicit transaction plumbing, persisted catalog descriptors, and
+real pgwire-backed point/range-scan `SELECT`, `INSERT`, aggregate, and join
+execution now exist. Live background maintenance also runs inside
+`chronos-node`, including liveness heartbeats, allocator-driven rebalance
+recommendations, learner snapshot catch-up for real replica movement, and
+autonomous durable transaction recovery from persisted txn records and required
+intent sets.
 
-### [ ] Phase 13 Remaining Execution
+### [x] Phase 13 Remaining Execution
 
 - [x] 13.1 Replace the planner-only `chronos-node` shell with a real runtime assembly layer
   that opens the storage engine, bootstraps store identity, constructs hosted
@@ -527,7 +527,7 @@ items to match what is already live in the runtime.
 - [x] 13.4 Replace static `ProcessNodeConfig.Ranges` with live descriptor-backed hosting
   so node/range views come from the actual replicated runtime instead of
   synthetic local config
-- [ ] 13.5 Build the KV request path
+- [x] 13.5 Build the KV request path
   for point lookup, range scan, put, intent write, intent resolution, and txn
   record operations against live replicas and the MVCC storage engine
   - point lookup, point put, and descriptor-aware range scan are now live
@@ -538,28 +538,28 @@ items to match what is already live in the runtime.
   - explicit session transactions now drive lock acquisition, provisional
     intents, durable txn records, and intent resolution through the live node
     control path instead of buffering writes only in-process
-- [ ] 13.6 Wire the transaction coordinator into the live KV path
+- [x] 13.6 Wire the transaction coordinator into the live KV path
   including begin/heartbeat/commit/abort, lock acquisition, refresh/retry, and
   coordinator recovery in the normal request flow
   - single-statement `INSERT` now routes through the transaction package's
     one-phase commit path before writing to the live runtime; explicit session
     transactions now also support `BEGIN`/`COMMIT`/`ROLLBACK`, heartbeats,
-    lock acquisition, read-your-own-writes, and multi-range staged commit;
-    the remaining follow-up is broader autonomous recovery outside the owning
-    pgwire session
-- [ ] 13.7 Build the first real SQL executor slice
+    lock acquisition, read-your-own-writes, multi-range staged commit, and
+    autonomous background recovery for `PENDING`, `STAGING`, `COMMITTED`, and
+    `ABORTED` txn records outside the owning pgwire session
+- [x] 13.7 Build the first real SQL executor slice
   that can run point lookups and inserts end-to-end through pgwire, the planner,
   KV routing, leases, transactions, and storage, returning real rows/results
   - point `SELECT`, simple range-scan `SELECT`, and `INSERT` now execute through
     the live runtime and return real rows/results; explicit transaction blocks
     now also execute through the same pgwire/planner/KV/runtime path with
     read-your-own-writes and multi-range commit coverage
-- [ ] 13.8 Extend SQL execution to distributed scans, aggregates, and joins
+- [x] 13.8 Extend SQL execution to distributed scans, aggregates, and joins
   by executing the physical flow operators built in `internal/sql/flow.go`
   across leaseholders and gateway merge stages
   - aggregate and hash-join queries now execute over live distributed scan
     results instead of stopping at flow planning
-- [ ] 13.9 Persist catalog and SQL descriptors in the cluster
+- [x] 13.9 Persist catalog and SQL descriptors in the cluster
   so the demo no longer depends on the hardcoded `users` and `orders` tables in
   the systemtest catalog bootstrap path
   - SQL table descriptors are now persisted under the system span and reloaded

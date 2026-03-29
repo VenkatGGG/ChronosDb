@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/VenkatGGG/ChronosDb/internal/hlc"
+	"github.com/VenkatGGG/ChronosDb/internal/storage"
 )
 
 func TestRecordRestartAdvancesEpochAndTimestamps(t *testing.T) {
@@ -85,6 +86,21 @@ func TestRecordAnchorHeartbeatAndTouchedRanges(t *testing.T) {
 	}
 	if heartbeat.LastHeartbeatTS.Compare(hlc.Timestamp{WallTime: 12, Logical: 0}) != 0 {
 		t.Fatalf("heartbeat ts = %s, want 12.0", heartbeat.LastHeartbeatTS)
+	}
+
+	withIntent, err := heartbeat.TrackIntent(IntentRef{
+		RangeID:  9,
+		Key:      []byte("users/9"),
+		Strength: storage.IntentStrengthExclusive,
+	})
+	if err != nil {
+		t.Fatalf("track intent: %v", err)
+	}
+	if len(withIntent.RequiredIntents) != 1 {
+		t.Fatalf("required intents = %+v, want one tracked intent", withIntent.RequiredIntents)
+	}
+	if string(withIntent.RequiredIntents[0].Key) != "users/9" {
+		t.Fatalf("tracked intent key = %q, want users/9", withIntent.RequiredIntents[0].Key)
 	}
 }
 

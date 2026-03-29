@@ -11,15 +11,19 @@ func TestRecordBinaryRoundTrip(t *testing.T) {
 	t.Parallel()
 
 	record := Record{
-		ID:              storage.TxnID{1, 2, 3, 4, 5},
-		Status:          StatusStaging,
-		ReadTS:          hlc.Timestamp{WallTime: 10, Logical: 1},
-		WriteTS:         hlc.Timestamp{WallTime: 12, Logical: 0},
-		MinCommitTS:     hlc.Timestamp{WallTime: 13, Logical: 2},
-		Epoch:           2,
-		Priority:        7,
-		AnchorRangeID:   44,
-		TouchedRanges:   []uint64{44, 45, 99},
+		ID:            storage.TxnID{1, 2, 3, 4, 5},
+		Status:        StatusStaging,
+		ReadTS:        hlc.Timestamp{WallTime: 10, Logical: 1},
+		WriteTS:       hlc.Timestamp{WallTime: 12, Logical: 0},
+		MinCommitTS:   hlc.Timestamp{WallTime: 13, Logical: 2},
+		Epoch:         2,
+		Priority:      7,
+		AnchorRangeID: 44,
+		TouchedRanges: []uint64{44, 45, 99},
+		RequiredIntents: []IntentRef{
+			{RangeID: 44, Key: []byte("accounts/alice"), Strength: storage.IntentStrengthExclusive},
+			{RangeID: 99, Key: []byte("accounts/bob"), Strength: storage.IntentStrengthExclusive},
+		},
 		LastHeartbeatTS: hlc.Timestamp{WallTime: 14, Logical: 1},
 		DeadlineTS:      hlc.Timestamp{WallTime: 50, Logical: 0},
 	}
@@ -47,6 +51,16 @@ func TestRecordBinaryRoundTrip(t *testing.T) {
 	for i := range record.TouchedRanges {
 		if decoded.TouchedRanges[i] != record.TouchedRanges[i] {
 			t.Fatalf("touched range[%d] = %d, want %d", i, decoded.TouchedRanges[i], record.TouchedRanges[i])
+		}
+	}
+	if len(decoded.RequiredIntents) != len(record.RequiredIntents) {
+		t.Fatalf("required intents len = %d, want %d", len(decoded.RequiredIntents), len(record.RequiredIntents))
+	}
+	for i := range record.RequiredIntents {
+		if decoded.RequiredIntents[i].RangeID != record.RequiredIntents[i].RangeID ||
+			decoded.RequiredIntents[i].Strength != record.RequiredIntents[i].Strength ||
+			string(decoded.RequiredIntents[i].Key) != string(record.RequiredIntents[i].Key) {
+			t.Fatalf("required intent[%d] = %+v, want %+v", i, decoded.RequiredIntents[i], record.RequiredIntents[i])
 		}
 	}
 	if decoded.LastHeartbeatTS != record.LastHeartbeatTS || decoded.DeadlineTS != record.DeadlineTS {

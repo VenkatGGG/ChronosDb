@@ -61,6 +61,11 @@ type kvIntentRequest struct {
 	Intent storage.Intent `json:"intent"`
 }
 
+type kvIntentResponse struct {
+	Found  bool           `json:"found"`
+	Intent storage.Intent `json:"intent"`
+}
+
 type kvTxnRecordRequest struct {
 	Record txn.Record `json:"record"`
 }
@@ -68,6 +73,15 @@ type kvTxnRecordRequest struct {
 type kvTxnRecordResponse struct {
 	Found  bool       `json:"found"`
 	Record txn.Record `json:"record"`
+}
+
+type kvTxnRecordScanRequest struct {
+	StartKey []byte `json:"start_key"`
+	EndKey   []byte `json:"end_key"`
+}
+
+type kvTxnRecordScanResponse struct {
+	Records []txn.Record `json:"records"`
 }
 
 type kvLockAcquireRequest struct {
@@ -279,6 +293,33 @@ func (c *kvClient) DeleteIntent(ctx context.Context, key []byte) error {
 	return c.postJSON(ctx, targetNodeID, "/control/kv/intent/delete", kvGetRequest{Key: key}, nil)
 }
 
+func (c *kvClient) GetIntent(ctx context.Context, key []byte) (storage.Intent, bool, error) {
+	desc, err := c.host.LookupRange(ctx, key)
+	if err != nil {
+		return storage.Intent{}, false, err
+	}
+	targetNodeID, err := leaseholderNodeIDForRange(desc)
+	if err != nil {
+		return storage.Intent{}, false, err
+	}
+	if targetNodeID == c.nodeID {
+		intent, err := c.host.GetIntentLocal(ctx, key)
+		switch {
+		case err == nil:
+			return intent, true, nil
+		case err == storage.ErrIntentNotFound:
+			return storage.Intent{}, false, nil
+		default:
+			return storage.Intent{}, false, err
+		}
+	}
+	var resp kvIntentResponse
+	if err := c.postJSON(ctx, targetNodeID, "/control/kv/intent/get", kvGetRequest{Key: key}, &resp); err != nil {
+		return storage.Intent{}, false, err
+	}
+	return resp.Intent, resp.Found, nil
+}
+
 func (c *kvClient) RangeStatus(ctx context.Context, targetNodeID, rangeID uint64) (rangeStatusResponse, error) {
 	if targetNodeID == c.nodeID {
 		status, err := c.host.RangeStatus(rangeID)
@@ -352,6 +393,94 @@ func (c *kvClient) GetTxnRecord(ctx context.Context, txnID storage.TxnID) (txn.R
 		return txn.Record{}, false, err
 	}
 	return resp.Record, resp.Found, nil
+}
+
+func (c *kvClient) ScanTxnRecords(ctx context.Context) ([]txn.Record, error) {
+	currentStart := storage.GlobalSystemTxnPrefix()
+	endKey := storage.PrefixEnd(storage.GlobalSystemTxnPrefix())
+	records := make([]txn.Record, 0)
+	for {
+		desc, err := c.host.LookupRange(ctx, currentStart)
+		if err != nil {
+			return nil, err
+		}
+		targetNodeID, err := leaseholderNodeIDForRange(desc)
+		if err != nil {
+			return nil, err
+		}
+		segmentEnd, _, done := clampScanEnd(desc, endKey, false)
+		var resp kvTxnRecordScanResponse
+		if targetNodeID == c.nodeID {
+			localRecords, _, err := c.host.ScanTxnRecordsLocal(ctx, currentStart, segmentEnd)
+			if err != nil {
+				return nil, err
+			}
+			resp.Records = localRecords
+		} else {
+			if err := c.postJSON(ctx, targetNodeID, "/control/kv/txn-record/scan", kvTxnRecordScanRequest{
+				StartKey: currentStart,
+				EndKey:   segmentEnd,
+			}, &resp); err != nil {
+				return nil, err
+			}
+		}
+		records = append(records, resp.Records...)
+		if done || len(desc.EndKey) == 0 {
+			return records, nil
+		}
+		currentStart = append([]byte(nil), desc.EndKey...)
+	}
+}
+
+func (c *kvClient) ObserveIntents(ctx context.Context, refs []txn.IntentRef) ([]txn.ObservedIntent, error) {
+	observed := make([]txn.ObservedIntent, 0, len(refs))
+	for _, ref := range refs {
+		intent, found, err := c.GetIntent(ctx, ref.Key)
+		if err != nil {
+			return nil, err
+		}
+		observed = append(observed, txn.ObservedIntent{
+			Ref:       ref,
+			Intent:    intent,
+			Present:   found,
+			Contested: false,
+		})
+	}
+	return observed, nil
+}
+
+func (c *kvClient) ResolveTxnRecord(ctx context.Context, record txn.Record) error {
+	required, err := intentSetFromRecord(record)
+	if err != nil {
+		return err
+	}
+	actions, err := txn.BuildAsyncResolution(record, required)
+	if err != nil {
+		return err
+	}
+	for _, action := range actions {
+		intent, found, err := c.GetIntent(ctx, action.Ref.Key)
+		if err != nil {
+			return err
+		}
+		if found && (intent.TxnID != record.ID || intent.Epoch != record.Epoch) {
+			found = false
+		}
+		if found && action.Kind == txn.ResolveActionCommit {
+			if err := c.PutAt(ctx, action.Ref.Key, record.WriteTS, intent.Value); err != nil {
+				return err
+			}
+		}
+		if found {
+			if err := c.DeleteIntent(ctx, action.Ref.Key); err != nil {
+				return err
+			}
+		}
+		if err := c.ReleaseLock(ctx, action.Ref.Key, record.ID); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (c *kvClient) AcquireLock(ctx context.Context, key []byte, record txn.Record, strength storage.IntentStrength) (txn.LockDecision, error) {

@@ -30,6 +30,7 @@ type Record struct {
 	Priority        uint32
 	AnchorRangeID   uint64
 	TouchedRanges   []uint64
+	RequiredIntents []IntentRef
 	LastHeartbeatTS hlc.Timestamp
 	DeadlineTS      hlc.Timestamp
 }
@@ -53,11 +54,16 @@ func (r Record) Validate() error {
 	if r.WriteTS.Compare(r.ReadTS) < 0 {
 		return fmt.Errorf("txn: write timestamp must not move behind read timestamp")
 	}
-	if r.AnchorRangeID == 0 && len(r.TouchedRanges) > 0 {
-		return fmt.Errorf("txn: touched ranges require an anchor range")
+	if r.AnchorRangeID == 0 && (len(r.TouchedRanges) > 0 || len(r.RequiredIntents) > 0) {
+		return fmt.Errorf("txn: touched ranges and required intents require an anchor range")
 	}
 	if !r.MinCommitTS.IsZero() && r.MinCommitTS.Compare(r.WriteTS) > 0 && r.Status != StatusPending && r.Status != StatusStaging {
 		return fmt.Errorf("txn: terminal write timestamp must not trail min commit timestamp")
+	}
+	for _, intent := range r.RequiredIntents {
+		if err := intent.Validate(); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -96,6 +102,7 @@ func (r Record) Restart(nextReadTS hlc.Timestamp) (Record, error) {
 	r.ReadTS = readTS
 	r.WriteTS = writeTS
 	r.Status = StatusPending
+	r.RequiredIntents = nil
 	return r, r.Validate()
 }
 
@@ -138,6 +145,26 @@ func (r Record) TouchRange(rangeID uint64) (Record, error) {
 	return r, r.Validate()
 }
 
+// TrackIntent records one durable required intent for recovery and async cleanup.
+func (r Record) TrackIntent(ref IntentRef) (Record, error) {
+	if err := r.Validate(); err != nil {
+		return Record{}, err
+	}
+	if err := ref.Validate(); err != nil {
+		return Record{}, err
+	}
+	if r.AnchorRangeID == 0 {
+		return Record{}, fmt.Errorf("txn: transaction must be anchored before tracking intents")
+	}
+	var err error
+	r, err = r.TouchRange(ref.RangeID)
+	if err != nil {
+		return Record{}, err
+	}
+	r.RequiredIntents = appendUniqueIntentRef(r.RequiredIntents, ref)
+	return r, r.Validate()
+}
+
 // Heartbeat advances the transaction heartbeat while the record is live.
 func (r Record) Heartbeat(now hlc.Timestamp) (Record, error) {
 	if err := r.Validate(); err != nil {
@@ -177,4 +204,13 @@ func appendUniqueRange(ranges []uint64, rangeID uint64) []uint64 {
 		return ranges
 	}
 	return append(ranges, rangeID)
+}
+
+func appendUniqueIntentRef(intents []IntentRef, ref IntentRef) []IntentRef {
+	for _, existing := range intents {
+		if sameIntentIdentity(existing, ref) {
+			return intents
+		}
+	}
+	return append(intents, cloneIntentRef(ref))
 }

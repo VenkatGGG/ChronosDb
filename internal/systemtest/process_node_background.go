@@ -16,12 +16,14 @@ import (
 	"github.com/VenkatGGG/ChronosDb/internal/meta"
 	"github.com/VenkatGGG/ChronosDb/internal/replica"
 	"github.com/VenkatGGG/ChronosDb/internal/storage"
+	"github.com/VenkatGGG/ChronosDb/internal/txn"
 	raftpb "go.etcd.io/raft/v3/raftpb"
 )
 
 const (
-	defaultHeartbeatInterval = time.Second
-	defaultAllocatorInterval = 2 * time.Second
+	defaultHeartbeatInterval   = time.Second
+	defaultAllocatorInterval   = 2 * time.Second
+	defaultTxnRecoveryInterval = time.Second
 )
 
 func (n *ProcessNode) serveBackground(ctx context.Context) {
@@ -34,10 +36,16 @@ func (n *ProcessNode) serveBackground(ctx context.Context) {
 	if allocatorInterval <= 0 {
 		allocatorInterval = defaultAllocatorInterval
 	}
+	txnRecoveryInterval := n.cfg.TxnRecoveryInterval
+	if txnRecoveryInterval <= 0 {
+		txnRecoveryInterval = defaultTxnRecoveryInterval
+	}
 	heartbeatTicker := time.NewTicker(heartbeatInterval)
 	defer heartbeatTicker.Stop()
 	allocatorTicker := time.NewTicker(allocatorInterval)
 	defer allocatorTicker.Stop()
+	recoveryTicker := time.NewTicker(txnRecoveryInterval)
+	defer recoveryTicker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
@@ -46,6 +54,8 @@ func (n *ProcessNode) serveBackground(ctx context.Context) {
 			_ = n.heartbeatLiveness(ctx)
 		case <-allocatorTicker.C:
 			_ = n.recommendRebalances(ctx)
+		case <-recoveryTicker.C:
+			_ = n.recoverTransactions(ctx)
 		}
 	}
 }
@@ -204,6 +214,107 @@ func (n *ProcessNode) recommendRebalances(ctx context.Context) error {
 	n.rebalanceRecommendations = nextRecommendations
 	n.mu.Unlock()
 	return nil
+}
+
+func (n *ProcessNode) recoverTransactions(ctx context.Context) error {
+	if n.kv == nil {
+		return nil
+	}
+	records, err := n.kv.ScanTxnRecords(ctx)
+	if err != nil {
+		return err
+	}
+	now := wallClockHLC()
+	for _, record := range records {
+		recovered, changed, err := n.recoverTransactionRecord(ctx, now, record)
+		if err != nil {
+			_ = n.recordEvent(adminapi.ClusterEvent{
+				Type:     "txn_recovery_failed",
+				Severity: "error",
+				Message:  err.Error(),
+				Fields: map[string]string{
+					"txn_id": fmt.Sprintf("%x", record.ID[:]),
+					"status": string(record.Status),
+				},
+			})
+			continue
+		}
+		if !changed {
+			continue
+		}
+		_ = n.recordEvent(adminapi.ClusterEvent{
+			Type:     "txn_recovered",
+			Severity: "info",
+			Message:  fmt.Sprintf("transaction %x moved to %s", record.ID[:], recovered.Status),
+			Fields: map[string]string{
+				"txn_id":      fmt.Sprintf("%x", record.ID[:]),
+				"from_status": string(record.Status),
+				"to_status":   string(recovered.Status),
+			},
+		})
+	}
+	return nil
+}
+
+func (n *ProcessNode) recoverTransactionRecord(ctx context.Context, now hlc.Timestamp, record txn.Record) (txn.Record, bool, error) {
+	switch record.Status {
+	case txn.StatusPending:
+		if record.CanRetry(now) {
+			return record, false, nil
+		}
+		record.Status = txn.StatusAborted
+		if err := n.kv.PutTxnRecord(ctx, record); err != nil {
+			return txn.Record{}, false, err
+		}
+		if err := n.kv.ResolveTxnRecord(ctx, record); err != nil {
+			return txn.Record{}, false, err
+		}
+		return record, true, nil
+	case txn.StatusStaging:
+		required, err := intentSetFromRecord(record)
+		if err != nil {
+			return txn.Record{}, false, err
+		}
+		observed, err := n.kv.ObserveIntents(ctx, record.RequiredIntents)
+		if err != nil {
+			return txn.Record{}, false, err
+		}
+		recovered, _, err := txn.RecoverAfterCoordinatorFailure(record, required, observed)
+		if err != nil {
+			return txn.Record{}, false, err
+		}
+		if err := n.kv.PutTxnRecord(ctx, recovered); err != nil {
+			return txn.Record{}, false, err
+		}
+		if err := n.kv.ResolveTxnRecord(ctx, recovered); err != nil {
+			return txn.Record{}, false, err
+		}
+		return recovered, true, nil
+	case txn.StatusCommitted, txn.StatusAborted:
+		if len(record.RequiredIntents) == 0 {
+			return record, false, nil
+		}
+		observed, err := n.kv.ObserveIntents(ctx, record.RequiredIntents)
+		if err != nil {
+			return txn.Record{}, false, err
+		}
+		needsCleanup := false
+		for _, intent := range observed {
+			if intent.Present {
+				needsCleanup = true
+				break
+			}
+		}
+		if !needsCleanup {
+			return record, false, nil
+		}
+		if err := n.kv.ResolveTxnRecord(ctx, record); err != nil {
+			return txn.Record{}, false, err
+		}
+		return record, true, nil
+	default:
+		return record, false, nil
+	}
 }
 
 func (n *ProcessNode) liveNodeLoads(ctx context.Context) ([]allocator.NodeLoad, error) {

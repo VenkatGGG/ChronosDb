@@ -390,6 +390,22 @@ func (h *Host) DeleteIntentLocal(ctx context.Context, key []byte) (meta.RangeDes
 	return desc, nil
 }
 
+// GetIntentLocal loads one provisional intent from a locally hosted range.
+func (h *Host) GetIntentLocal(ctx context.Context, key []byte) (storage.Intent, error) {
+	h.mu.Lock()
+	desc, err := h.catalog.Lookup(ctx, key)
+	if err != nil {
+		h.mu.Unlock()
+		return storage.Intent{}, err
+	}
+	if !descriptorReplicaOnNode(desc, h.ident.NodeID) {
+		h.mu.Unlock()
+		return storage.Intent{}, ErrRangeNotHosted
+	}
+	h.mu.Unlock()
+	return h.engine.GetIntent(ctx, key)
+}
+
 // PutTxnRecordLocal stores one durable transaction record on its system-span anchor range.
 func (h *Host) PutTxnRecordLocal(ctx context.Context, record txn.Record) (meta.RangeDescriptor, error) {
 	if err := record.Validate(); err != nil {
@@ -444,6 +460,39 @@ func (h *Host) GetTxnRecordLocal(ctx context.Context, txnID storage.TxnID) (txn.
 		return txn.Record{}, err
 	}
 	return record, nil
+}
+
+// ScanTxnRecordsLocal loads durable transaction records from one locally hosted
+// segment of the system transaction span.
+func (h *Host) ScanTxnRecordsLocal(ctx context.Context, startKey, endKey []byte) ([]txn.Record, meta.RangeDescriptor, error) {
+	h.mu.Lock()
+	desc, err := h.catalog.Lookup(ctx, startKey)
+	if err != nil {
+		h.mu.Unlock()
+		return nil, meta.RangeDescriptor{}, err
+	}
+	if !descriptorReplicaOnNode(desc, h.ident.NodeID) {
+		h.mu.Unlock()
+		return nil, meta.RangeDescriptor{}, ErrRangeNotHosted
+	}
+	h.mu.Unlock()
+
+	kvs, err := h.engine.ScanRawRange(startKey, endKey)
+	if err != nil {
+		return nil, meta.RangeDescriptor{}, err
+	}
+	records := make([]txn.Record, 0, len(kvs))
+	for _, kv := range kvs {
+		if _, ok := storage.DecodeGlobalTxnRecordKey(kv.Key); !ok {
+			continue
+		}
+		var record txn.Record
+		if err := record.UnmarshalBinary(kv.Value); err != nil {
+			return nil, meta.RangeDescriptor{}, err
+		}
+		records = append(records, record)
+	}
+	return records, desc, nil
 }
 
 // LoadSQLCatalog loads persisted SQL table descriptors from the system span.
@@ -988,6 +1037,16 @@ func recordsEqual(left, right txn.Record) bool {
 	}
 	for i := range left.TouchedRanges {
 		if left.TouchedRanges[i] != right.TouchedRanges[i] {
+			return false
+		}
+	}
+	if len(left.RequiredIntents) != len(right.RequiredIntents) {
+		return false
+	}
+	for i := range left.RequiredIntents {
+		if left.RequiredIntents[i].RangeID != right.RequiredIntents[i].RangeID ||
+			left.RequiredIntents[i].Strength != right.RequiredIntents[i].Strength ||
+			!bytes.Equal(left.RequiredIntents[i].Key, right.RequiredIntents[i].Key) {
 			return false
 		}
 	}

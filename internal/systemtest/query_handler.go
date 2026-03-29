@@ -179,7 +179,7 @@ func (h *runtimeQueryHandler) commitSessionTxn(ctx context.Context, session *pgw
 	record.WriteTS = maxTimestamp(record.WriteTS, maxTimestamp(record.MinCommitTS, now))
 
 	if len(writes) > 1 || len(record.TouchedRanges) > 1 {
-		required, err := buildIntentSet(writes)
+		required, err := intentSetFromRecord(record)
 		if err != nil {
 			return pgwire.QueryResult{}, wrapExecutionError("build staged intent set", err)
 		}
@@ -200,12 +200,9 @@ func (h *runtimeQueryHandler) commitSessionTxn(ctx context.Context, session *pgw
 	if err := h.kv.PutTxnRecord(ctx, record); err != nil {
 		return pgwire.QueryResult{}, wrapExecutionError("persist committed txn record", err)
 	}
-	for _, write := range writes {
-		if err := h.kv.PutAt(ctx, write.key, record.WriteTS, write.value); err != nil {
-			return pgwire.QueryResult{}, wrapExecutionError("resolve committed write", err)
-		}
+	if err := h.resolveTxnRecord(ctx, record, writes); err != nil {
+		return pgwire.QueryResult{}, wrapExecutionError("resolve committed txn", err)
 	}
-	h.releaseTxnResources(ctx, record.ID, writes)
 
 	h.deleteSessionState(session)
 	session.SetTxStatus(pgwire.TxIdle)
@@ -234,7 +231,9 @@ func (h *runtimeQueryHandler) rollbackSessionTxn(ctx context.Context, session *p
 			return pgwire.QueryResult{}, wrapExecutionError("persist aborted txn record", err)
 		}
 	}
-	h.releaseTxnResources(ctx, record.ID, writes)
+	if err := h.resolveTxnRecord(ctx, record, writes); err != nil {
+		return pgwire.QueryResult{}, wrapExecutionError("resolve aborted txn", err)
+	}
 
 	h.deleteSessionState(session)
 	session.SetTxStatus(pgwire.TxIdle)
@@ -257,7 +256,7 @@ func (h *runtimeQueryHandler) failActiveTxn(ctx context.Context, session *pgwire
 		record.Status = txn.StatusAborted
 		_ = h.kv.PutTxnRecord(ctx, record)
 	}
-	h.releaseTxnResources(ctx, record.ID, writes)
+	_ = h.resolveTxnRecord(ctx, record, writes)
 
 	state.mu.Lock()
 	state.record = record
@@ -362,11 +361,25 @@ func (h *runtimeQueryHandler) executeInsert(ctx context.Context, session *pgwire
 		Strength:       storage.IntentStrengthExclusive,
 		Value:          append([]byte(nil), plan.Value...),
 	}
+	record, err = record.TrackIntent(txn.IntentRef{
+		RangeID:  desc.RangeID,
+		Key:      append([]byte(nil), plan.Key...),
+		Strength: storage.IntentStrengthExclusive,
+	})
+	if err != nil {
+		_ = h.kv.ReleaseLock(ctx, plan.Key, record.ID)
+		return pgwire.QueryResult{}, err
+	}
+	if err := h.kv.PutTxnRecord(ctx, record); err != nil {
+		_ = h.kv.ReleaseLock(ctx, plan.Key, record.ID)
+		return pgwire.QueryResult{}, err
+	}
 	if err := h.kv.PutIntent(ctx, plan.Key, intent); err != nil {
 		_ = h.kv.ReleaseLock(ctx, plan.Key, record.ID)
 		return pgwire.QueryResult{}, err
 	}
 	state.mu.Lock()
+	state.record = record
 	state.writes[string(plan.Key)] = pendingTxnWrite{
 		key:     append([]byte(nil), plan.Key...),
 		value:   append([]byte(nil), plan.Value...),
@@ -608,11 +621,15 @@ func (h *runtimeQueryHandler) ensureAnchoredRecord(ctx context.Context, state *s
 	return record, nil
 }
 
-func (h *runtimeQueryHandler) releaseTxnResources(ctx context.Context, txnID storage.TxnID, writes []pendingTxnWrite) {
+func (h *runtimeQueryHandler) resolveTxnRecord(ctx context.Context, record txn.Record, writes []pendingTxnWrite) error {
+	if len(record.RequiredIntents) > 0 {
+		return h.kv.ResolveTxnRecord(ctx, record)
+	}
 	for _, write := range writes {
 		_ = h.kv.DeleteIntent(ctx, write.key)
-		_ = h.kv.ReleaseLock(ctx, write.key, txnID)
+		_ = h.kv.ReleaseLock(ctx, write.key, record.ID)
 	}
+	return nil
 }
 
 func (h *runtimeQueryHandler) storeSessionState(session *pgwire.Session, state *sessionTxnState) {
@@ -744,6 +761,16 @@ func buildIntentSet(writes []pendingTxnWrite) (txn.IntentSet, error) {
 			Key:      append([]byte(nil), write.key...),
 			Strength: storage.IntentStrengthExclusive,
 		}); err != nil {
+			return txn.IntentSet{}, err
+		}
+	}
+	return set, nil
+}
+
+func intentSetFromRecord(record txn.Record) (txn.IntentSet, error) {
+	var set txn.IntentSet
+	for _, ref := range record.RequiredIntents {
+		if err := set.Add(ref); err != nil {
 			return txn.IntentSet{}, err
 		}
 	}
