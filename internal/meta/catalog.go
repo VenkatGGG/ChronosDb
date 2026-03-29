@@ -89,21 +89,25 @@ func (c *Catalog) Lookup(ctx context.Context, key []byte) (RangeDescriptor, erro
 
 func (c *Catalog) lookup(level Level, key []byte) (RangeDescriptor, error) {
 	prefix := descriptorPrefix(level)
-	item, ok, err := c.engine.SeekRawGE(prefix, prefixUpperBound(level), lookupKey(level, key))
-	if err != nil {
-		return RangeDescriptor{}, err
+	upperBound := prefixUpperBound(level)
+	seekKey := lookupKey(level, key)
+	for {
+		item, ok, err := c.engine.SeekRawGE(prefix, upperBound, seekKey)
+		if err != nil {
+			return RangeDescriptor{}, err
+		}
+		if !ok {
+			return RangeDescriptor{}, ErrDescriptorNotFound
+		}
+		var desc RangeDescriptor
+		if err := desc.UnmarshalBinary(item.Value); err != nil {
+			return RangeDescriptor{}, err
+		}
+		if desc.ContainsKey(key) {
+			return desc, nil
+		}
+		seekKey = storage.PrefixEnd(item.Key)
 	}
-	if !ok {
-		return RangeDescriptor{}, ErrDescriptorNotFound
-	}
-	var desc RangeDescriptor
-	if err := desc.UnmarshalBinary(item.Value); err != nil {
-		return RangeDescriptor{}, err
-	}
-	if !desc.ContainsKey(key) {
-		return RangeDescriptor{}, ErrDescriptorNotFound
-	}
-	return desc, nil
 }
 
 func stageDescriptor(batch *storage.WriteBatch, level Level, desc RangeDescriptor) error {

@@ -35,6 +35,23 @@ type kvPutRequest struct {
 	Value     []byte        `json:"value"`
 }
 
+type kvScanRequest struct {
+	StartKey       []byte `json:"start_key"`
+	EndKey         []byte `json:"end_key"`
+	StartInclusive bool   `json:"start_inclusive"`
+	EndInclusive   bool   `json:"end_inclusive"`
+}
+
+type kvScanRow struct {
+	LogicalKey []byte        `json:"logical_key"`
+	Timestamp  hlc.Timestamp `json:"timestamp"`
+	Value      []byte        `json:"value"`
+}
+
+type kvScanResponse struct {
+	Rows []kvScanRow `json:"rows"`
+}
+
 func newKVClient(nodeID uint64, rootDir string, host *chronosruntime.Host) *kvClient {
 	return &kvClient{
 		nodeID:  nodeID,
@@ -85,6 +102,54 @@ func (c *kvClient) Put(ctx context.Context, key, value []byte) error {
 	}, nil)
 }
 
+func (c *kvClient) ScanRange(ctx context.Context, startKey, endKey []byte, startInclusive, endInclusive bool) ([]kvScanRow, error) {
+	currentStart := append([]byte(nil), startKey...)
+	currentStartInclusive := startInclusive
+	rows := make([]kvScanRow, 0)
+	for {
+		desc, err := c.host.LookupRange(ctx, currentStart)
+		if err != nil {
+			return nil, err
+		}
+		targetNodeID, err := leaseholderNodeIDForRange(desc)
+		if err != nil {
+			return nil, err
+		}
+		segmentEnd, segmentEndInclusive, done := clampScanEnd(desc, endKey, endInclusive)
+		request := kvScanRequest{
+			StartKey:       currentStart,
+			EndKey:         segmentEnd,
+			StartInclusive: currentStartInclusive,
+			EndInclusive:   segmentEndInclusive,
+		}
+		var segment kvScanResponse
+		if targetNodeID == c.nodeID {
+			localRows, _, err := c.host.ScanRangeLocal(ctx, request.StartKey, request.EndKey, request.StartInclusive, request.EndInclusive)
+			if err != nil {
+				return nil, err
+			}
+			segment.Rows = make([]kvScanRow, 0, len(localRows))
+			for _, row := range localRows {
+				segment.Rows = append(segment.Rows, kvScanRow{
+					LogicalKey: row.LogicalKey,
+					Timestamp:  row.Timestamp,
+					Value:      row.Value,
+				})
+			}
+		} else {
+			if err := c.postJSON(ctx, targetNodeID, "/control/kv/scan", request, &segment); err != nil {
+				return nil, err
+			}
+		}
+		rows = append(rows, segment.Rows...)
+		if done || len(desc.EndKey) == 0 {
+			return rows, nil
+		}
+		currentStart = append([]byte(nil), desc.EndKey...)
+		currentStartInclusive = true
+	}
+}
+
 func (c *kvClient) postJSON(ctx context.Context, nodeID uint64, path string, reqBody any, respBody any) error {
 	controlURL, err := resolveNodeControlURL(c.rootDir, nodeID)
 	if err != nil {
@@ -120,4 +185,17 @@ func leaseholderNodeIDForRange(desc meta.RangeDescriptor) (uint64, error) {
 		}
 	}
 	return 0, fmt.Errorf("systemtest kv client: leaseholder replica %d not found for range %d", desc.LeaseholderReplicaID, desc.RangeID)
+}
+
+func clampScanEnd(desc meta.RangeDescriptor, requestedEnd []byte, requestedEndInclusive bool) ([]byte, bool, bool) {
+	if len(desc.EndKey) == 0 {
+		return append([]byte(nil), requestedEnd...), requestedEndInclusive, true
+	}
+	if len(requestedEnd) == 0 {
+		return append([]byte(nil), desc.EndKey...), false, false
+	}
+	if bytes.Compare(requestedEnd, desc.EndKey) <= 0 {
+		return append([]byte(nil), requestedEnd...), requestedEndInclusive, true
+	}
+	return append([]byte(nil), desc.EndKey...), false, false
 }

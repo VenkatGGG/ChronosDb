@@ -53,6 +53,33 @@ func (h *runtimeQueryHandler) HandleSimpleQuery(ctx context.Context, query strin
 		result.Rows = [][][]byte{projected}
 		result.CommandTag = "SELECT 1"
 		return result, nil
+	case chronossql.RangeScanPlan:
+		rows, err := h.kv.ScanRange(ctx, plan.StartKey, plan.EndKey, plan.StartInclusive, plan.EndInclusive)
+		if err != nil {
+			return pgwire.QueryResult{}, err
+		}
+		result.Rows = make([][][]byte, 0, len(rows))
+		for _, scanned := range rows {
+			row, err := chronossql.DecodeRowValue(plan.Table, scanned.Value)
+			if err != nil {
+				return pgwire.QueryResult{}, pgwire.Error{
+					Severity: "ERROR",
+					Code:     "XX000",
+					Message:  fmt.Sprintf("decode row payload: %v", err),
+				}
+			}
+			projected, err := chronossql.ProjectRowText(plan.Projection, row)
+			if err != nil {
+				return pgwire.QueryResult{}, pgwire.Error{
+					Severity: "ERROR",
+					Code:     "XX000",
+					Message:  fmt.Sprintf("project row payload: %v", err),
+				}
+			}
+			result.Rows = append(result.Rows, projected)
+		}
+		result.CommandTag = fmt.Sprintf("SELECT %d", len(result.Rows))
+		return result, nil
 	case chronossql.InsertPlan:
 		if err := h.kv.Put(ctx, plan.Key, plan.Value); err != nil {
 			return pgwire.QueryResult{}, pgwire.Error{

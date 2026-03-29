@@ -64,6 +64,13 @@ func TestCatalogLookupMeta2(t *testing.T) {
 	if got.RangeID != right.RangeID {
 		t.Fatalf("lookup right range = %d, want %d", got.RangeID, right.RangeID)
 	}
+	got, err = catalog.LookupMeta2(context.Background(), []byte("m"))
+	if err != nil {
+		t.Fatalf("lookup split boundary: %v", err)
+	}
+	if got.RangeID != right.RangeID {
+		t.Fatalf("lookup split boundary range = %d, want %d", got.RangeID, right.RangeID)
+	}
 }
 
 func TestCatalogLookupMeta1(t *testing.T) {

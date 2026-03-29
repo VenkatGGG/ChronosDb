@@ -527,16 +527,18 @@ hardening, and a one-command seeded demo bootstrap.
 - [ ] 13.5 Build the KV request path
   for point lookup, range scan, put, intent write, intent resolution, and txn
   record operations against live replicas and the MVCC storage engine
-  - point lookup and point put are now live through runtime-hosted replicas and
-    node control RPCs; scans, intents, and txn record operations still remain
+  - point lookup, point put, and descriptor-aware range scan are now live
+    through runtime-hosted replicas and node control RPCs; intents and txn
+    record operations still remain
 - [ ] 13.6 Wire the transaction coordinator into the live KV path
   including begin/heartbeat/commit/abort, lock acquisition, refresh/retry, and
   coordinator recovery in the normal request flow
 - [ ] 13.7 Build the first real SQL executor slice
   that can run point lookups and inserts end-to-end through pgwire, the planner,
   KV routing, leases, transactions, and storage, returning real rows/results
-  - point `SELECT` and `INSERT` now execute through the live runtime and return
-    real rows/results; transaction wiring and broader operator coverage remain
+  - point `SELECT`, simple range-scan `SELECT`, and `INSERT` now execute through
+    the live runtime and return real rows/results; transaction wiring and
+    broader operator coverage remain
 - [ ] 13.8 Extend SQL execution to distributed scans, aggregates, and joins
   by executing the physical flow operators built in `internal/sql/flow.go`
   across leaseholders and gateway merge stages

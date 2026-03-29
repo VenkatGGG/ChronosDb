@@ -313,6 +313,7 @@ func (n *ProcessNode) controlMux() http.Handler {
 	mux.HandleFunc("/control/raft/message", n.handleRaftMessage)
 	mux.HandleFunc("/control/kv/get", n.handleKVGet)
 	mux.HandleFunc("/control/kv/put", n.handleKVPut)
+	mux.HandleFunc("/control/kv/scan", n.handleKVScan)
 	mux.HandleFunc("/control/ambiguous-commit", n.handleAmbiguousCommit)
 	mux.HandleFunc("/control/logs", n.handleLogs)
 	mux.HandleFunc("/control/log", n.handleLog)
@@ -472,6 +473,32 @@ func (n *ProcessNode) handleKVPut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (n *ProcessNode) handleKVScan(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req kvScanRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	rows, _, err := n.host.ScanRangeLocal(r.Context(), req.StartKey, req.EndKey, req.StartInclusive, req.EndInclusive)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	resp := kvScanResponse{Rows: make([]kvScanRow, 0, len(rows))}
+	for _, row := range rows {
+		resp.Rows = append(resp.Rows, kvScanRow{
+			LogicalKey: row.LogicalKey,
+			Timestamp:  row.Timestamp,
+			Value:      row.Value,
+		})
+	}
+	writeJSONResponse(w, resp)
 }
 
 func (n *ProcessNode) handleLogs(w http.ResponseWriter, r *http.Request) {

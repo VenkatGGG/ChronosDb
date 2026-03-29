@@ -66,6 +66,13 @@ type Host struct {
 	bootstrapped bool
 }
 
+// KVRow is one live logical row returned from a local runtime scan.
+type KVRow struct {
+	LogicalKey []byte
+	Timestamp  hlc.Timestamp
+	Value      []byte
+}
+
 type noopTransport struct{}
 
 func (noopTransport) Send(context.Context, []OutboundMessage) error {
@@ -211,6 +218,33 @@ func (h *Host) ReadLatestLocal(ctx context.Context, key []byte) ([]byte, meta.Ra
 	return value, desc, true, nil
 }
 
+// ScanRangeLocal returns the latest committed row version for each key in the span hosted locally.
+func (h *Host) ScanRangeLocal(ctx context.Context, startKey, endKey []byte, startInclusive, endInclusive bool) ([]KVRow, meta.RangeDescriptor, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	desc, err := h.catalog.Lookup(ctx, startKey)
+	if err != nil {
+		return nil, meta.RangeDescriptor{}, err
+	}
+	if !descriptorReplicaOnNode(desc, h.ident.NodeID) {
+		return nil, meta.RangeDescriptor{}, ErrRangeNotHosted
+	}
+	versions, err := h.engine.ScanLatestMVCCRange(ctx, startKey, endKey, startInclusive, endInclusive)
+	if err != nil {
+		return nil, meta.RangeDescriptor{}, err
+	}
+	rows := make([]KVRow, 0, len(versions))
+	for _, version := range versions {
+		rows = append(rows, KVRow{
+			LogicalKey: append([]byte(nil), version.LogicalKey...),
+			Timestamp:  version.Timestamp,
+			Value:      append([]byte(nil), version.Value...),
+		})
+	}
+	return rows, desc, nil
+}
+
 // PutValueLocal proposes one committed value on a locally hosted range and waits
 // until the version is durably visible on the local store.
 func (h *Host) PutValueLocal(ctx context.Context, key []byte, ts hlc.Timestamp, value []byte) (meta.RangeDescriptor, error) {
@@ -341,6 +375,8 @@ func (h *Host) Close() error {
 	if h == nil {
 		return nil
 	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	return h.engine.Close()
 }
 
