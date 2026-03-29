@@ -504,6 +504,122 @@ func TestProcessNodeLoadsPersistedCustomCatalogAcrossRestart(t *testing.T) {
 	}
 }
 
+func TestProcessNodeRestartsAndResumesServingReplicatedRows(t *testing.T) {
+	t.Parallel()
+
+	rootDir := t.TempDir()
+	bootstrapPath := filepath.Join(rootDir, "bootstrap.json")
+	usersRange := meta.RangeDescriptor{
+		RangeID:    81,
+		Generation: 1,
+		StartKey:   storage.GlobalTablePrimaryPrefix(7),
+		EndKey:     storage.GlobalTablePrimaryPrefix(8),
+		Replicas: []meta.ReplicaDescriptor{
+			{ReplicaID: 51, NodeID: 1, Role: meta.ReplicaRoleVoter},
+			{ReplicaID: 52, NodeID: 2, Role: meta.ReplicaRoleVoter},
+			{ReplicaID: 53, NodeID: 3, Role: meta.ReplicaRoleVoter},
+		},
+		LeaseholderReplicaID: 52,
+	}
+	manifest, err := chronosruntime.BuildBootstrapManifest("cluster-restart-recovery", []chronosruntime.BootstrapNode{
+		{NodeID: 1, StoreID: 51},
+		{NodeID: 2, StoreID: 52},
+		{NodeID: 3, StoreID: 53},
+	}, []meta.RangeDescriptor{usersRange})
+	if err != nil {
+		t.Fatalf("build bootstrap manifest: %v", err)
+	}
+	if err := chronosruntime.WriteBootstrapManifest(bootstrapPath, manifest); err != nil {
+		t.Fatalf("write bootstrap manifest: %v", err)
+	}
+
+	node1, cancel1, done1 := startProcessNodeForTest(t, ProcessNodeConfig{
+		NodeID:            1,
+		DataDir:           filepath.Join(rootDir, "node-1"),
+		BootstrapPath:     bootstrapPath,
+		PGListenAddr:      "127.0.0.1:0",
+		ObservabilityAddr: "127.0.0.1:0",
+		ControlAddr:       "127.0.0.1:0",
+	})
+	t.Cleanup(func() {
+		cancel1()
+		waitProcessNodeDone(t, done1, "restart-node1")
+	})
+	node2DataDir := filepath.Join(rootDir, "node-2")
+	node2, cancel2, done2 := startProcessNodeForTest(t, ProcessNodeConfig{
+		NodeID:            2,
+		DataDir:           node2DataDir,
+		BootstrapPath:     bootstrapPath,
+		PGListenAddr:      "127.0.0.1:0",
+		ObservabilityAddr: "127.0.0.1:0",
+		ControlAddr:       "127.0.0.1:0",
+	})
+	node3, cancel3, done3 := startProcessNodeForTest(t, ProcessNodeConfig{
+		NodeID:            3,
+		DataDir:           filepath.Join(rootDir, "node-3"),
+		BootstrapPath:     bootstrapPath,
+		PGListenAddr:      "127.0.0.1:0",
+		ObservabilityAddr: "127.0.0.1:0",
+		ControlAddr:       "127.0.0.1:0",
+	})
+	t.Cleanup(func() {
+		cancel3()
+		waitProcessNodeDone(t, done3, "restart-node3")
+	})
+
+	if err := node2.host.Campaign(context.Background(), usersRange.RangeID); err != nil {
+		t.Fatalf("campaign restart leaseholder: %v", err)
+	}
+	waitForRangeLeader(t, node2.host, usersRange.RangeID, 52)
+
+	insertConn := openPGConn(t, node1.state.PGAddr)
+	if _, err := insertConn.Write(queryFrame("insert into users (id, name, email) values (7, 'alice', 'a@example.com')")); err != nil {
+		t.Fatalf("write restart insert: %v", err)
+	}
+	if got := frameTags(readFrames(t, insertConn, 2)); got != "CZ" {
+		t.Fatalf("restart insert frame tags = %q, want CZ", got)
+	}
+	insertConn.Close()
+
+	key := usersPrimaryKey(7)
+	waitForReplicatedUserRow(t, node3, key)
+
+	cancel2()
+	waitProcessNodeDone(t, done2, "restart-node2-initial")
+
+	restarted, cancelRestart, doneRestart := startProcessNodeForTest(t, ProcessNodeConfig{
+		NodeID:            2,
+		DataDir:           node2DataDir,
+		BootstrapPath:     bootstrapPath,
+		PGListenAddr:      "127.0.0.1:0",
+		ObservabilityAddr: "127.0.0.1:0",
+		ControlAddr:       "127.0.0.1:0",
+	})
+	t.Cleanup(func() {
+		cancelRestart()
+		waitProcessNodeDone(t, doneRestart, "restart-node2-restarted")
+	})
+
+	waitForReplicatedUserRow(t, restarted, key)
+
+	selectConn := openPGConn(t, restarted.state.PGAddr)
+	defer selectConn.Close()
+	if _, err := selectConn.Write(queryFrame("select id, name from users where id = 7")); err != nil {
+		t.Fatalf("write restart select: %v", err)
+	}
+	frames := readFrames(t, selectConn, 4)
+	if got := frameTags(frames); got != "TDCZ" {
+		t.Fatalf("restart select frame tags = %q, want TDCZ", got)
+	}
+	values, err := decodeDataRowFrame(frames[1])
+	if err != nil {
+		t.Fatalf("decode restart data row: %v", err)
+	}
+	if len(values) != 2 || string(values[0]) != "7" || string(values[1]) != "alice" {
+		t.Fatalf("restart selected values = %q/%q, want 7/alice", values[0], values[1])
+	}
+}
+
 func waitForRangeLeader(t *testing.T, host *chronosruntime.Host, rangeID, leaderReplicaID uint64) {
 	t.Helper()
 

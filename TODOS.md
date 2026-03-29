@@ -559,9 +559,12 @@ hardening, and a one-command seeded demo bootstrap.
 - [ ] 13.10 Promote background subsystem logic into live services
   for liveness heartbeats, lease maintenance, closed timestamp publication,
   split triggers, allocator decisions, learner snapshot catch-up, and rebalance
-- [ ] 13.11 Implement restart and recovery wiring
+- [x] 13.11 Implement restart and recovery wiring
   so a restarted node reopens its engine, reconstructs hosted groups, reloads
   descriptors and applied indexes, rejoins the cluster, and resumes serving
+  - the runtime now reloads persisted SQL descriptors and restores Raft
+    membership on reopen, and process-node recovery tests cover restart,
+    replica-state rehydration, and resumed pgwire reads after a node restart
 - [x] 13.12 Add a real seeded demo/bootstrap command
   that starts a 3-node cluster with pre-seeded range descriptors, visible range
   placement in the console, and a repeatable `psql` smoke test for `INSERT` and
