@@ -171,6 +171,21 @@ func GlobalTxnRecordKey(txnID TxnID) []byte {
 	return append(bytes.Clone(prefixSystemTxn), txnID[:]...)
 }
 
+// DecodeGlobalTxnRecordKey extracts the transaction id from one logical txn
+// record key.
+func DecodeGlobalTxnRecordKey(key []byte) (TxnID, bool) {
+	if !bytes.HasPrefix(key, prefixSystemTxn) {
+		return TxnID{}, false
+	}
+	payload := key[len(prefixSystemTxn):]
+	if len(payload) != len(TxnID{}) {
+		return TxnID{}, false
+	}
+	var txnID TxnID
+	copy(txnID[:], payload)
+	return txnID, true
+}
+
 // GlobalTableDescriptorKey returns the logical key for one SQL table descriptor.
 func GlobalTableDescriptorKey(tableID uint64) []byte {
 	return append(bytes.Clone(prefixSystemDescTable), encodeUint64(tableID)...)

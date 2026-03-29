@@ -47,7 +47,7 @@ func (h *PlanningHandler) DescribeQuery(query string) (chronossql.OptimizedPlan,
 
 // HandleSimpleQuery validates the SQL statement, derives its flow plan, and
 // returns row metadata plus a command tag. Execution is still delegated to later phases.
-func (h *PlanningHandler) HandleSimpleQuery(ctx context.Context, query string) (QueryResult, error) {
+func (h *PlanningHandler) HandleSimpleQuery(ctx context.Context, session *Session, query string) (QueryResult, error) {
 	_, _, result, err := h.DescribeQuery(query)
 	return result, err
 }

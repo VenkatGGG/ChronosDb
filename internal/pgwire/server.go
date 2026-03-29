@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"sync"
+	"time"
 )
 
 // Server serves PostgreSQL wire-protocol sessions over network connections.
@@ -49,6 +50,11 @@ func (s *Server) ServeConn(ctx context.Context, conn net.Conn) error {
 	defer conn.Close()
 
 	session := NewSession(s.handler)
+	defer func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+		_ = session.Close(closeCtx)
+		cancel()
+	}()
 	startup, err := decodeStartupNegotiation(conn)
 	if err != nil {
 		return err

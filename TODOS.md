@@ -532,18 +532,25 @@ hardening, and a one-command seeded demo bootstrap.
   - the replicated substrate for intent writes/deletes and durable txn record
     storage now also exists, including a real system-span bootstrap range and
     local runtime helpers for intent and txn record proposals
+  - explicit session transactions now drive lock acquisition, provisional
+    intents, durable txn records, and intent resolution through the live node
+    control path instead of buffering writes only in-process
 - [ ] 13.6 Wire the transaction coordinator into the live KV path
   including begin/heartbeat/commit/abort, lock acquisition, refresh/retry, and
   coordinator recovery in the normal request flow
   - single-statement `INSERT` now routes through the transaction package's
     one-phase commit path before writing to the live runtime; explicit session
-    transactions, retries, and recovery still remain
+    transactions now also support `BEGIN`/`COMMIT`/`ROLLBACK`, heartbeats,
+    lock acquisition, read-your-own-writes, and multi-range staged commit;
+    the remaining follow-up is broader autonomous recovery outside the owning
+    pgwire session
 - [ ] 13.7 Build the first real SQL executor slice
   that can run point lookups and inserts end-to-end through pgwire, the planner,
   KV routing, leases, transactions, and storage, returning real rows/results
   - point `SELECT`, simple range-scan `SELECT`, and `INSERT` now execute through
-    the live runtime and return real rows/results; transaction wiring and
-    broader operator coverage still remains only around explicit transactions
+    the live runtime and return real rows/results; explicit transaction blocks
+    now also execute through the same pgwire/planner/KV/runtime path with
+    read-your-own-writes and multi-range commit coverage
 - [ ] 13.8 Extend SQL execution to distributed scans, aggregates, and joins
   by executing the physical flow operators built in `internal/sql/flow.go`
   across leaseholders and gateway merge stages

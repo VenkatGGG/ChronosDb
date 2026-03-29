@@ -15,7 +15,13 @@ type QueryResult struct {
 
 // QueryHandler executes one simple query string.
 type QueryHandler interface {
-	HandleSimpleQuery(ctx context.Context, query string) (QueryResult, error)
+	HandleSimpleQuery(ctx context.Context, session *Session, query string) (QueryResult, error)
+}
+
+// SessionCloseHandler allows handlers to clean up per-session resources when a
+// connection terminates.
+type SessionCloseHandler interface {
+	CloseSession(ctx context.Context, session *Session) error
 }
 
 // Error exposes explicit backend error metadata when a handler wants control over the wire code.
@@ -40,12 +46,14 @@ type SessionTerminationError interface {
 type Session struct {
 	serverParameters map[string]string
 	handler          QueryHandler
+	txStatus         TxStatus
 }
 
 // NewSession constructs a session with default PostgreSQL bootstrap parameters.
 func NewSession(handler QueryHandler) *Session {
 	return &Session{
 		handler: handler,
+		txStatus: TxIdle,
 		serverParameters: map[string]string{
 			"client_encoding": "UTF8",
 			"server_version":  "ChronosDB dev",
@@ -61,8 +69,30 @@ func (s *Session) HandleStartup(msg StartupMessage) ([][]byte, error) {
 	frames := make([][]byte, 0, len(s.serverParameters)+2)
 	frames = append(frames, EncodeAuthenticationOK())
 	frames = append(frames, StartupParameterFrames(s.serverParameters)...)
-	frames = append(frames, EncodeReadyForQuery(TxIdle))
+	frames = append(frames, EncodeReadyForQuery(s.txStatus))
 	return frames, nil
+}
+
+// TxStatus returns the current ReadyForQuery transaction state for the session.
+func (s *Session) TxStatus() TxStatus {
+	return s.txStatus
+}
+
+// SetTxStatus updates the ReadyForQuery transaction state for the session.
+func (s *Session) SetTxStatus(status TxStatus) {
+	s.txStatus = status
+}
+
+// Close releases any handler-managed session resources.
+func (s *Session) Close(ctx context.Context) error {
+	if s == nil || s.handler == nil {
+		return nil
+	}
+	closer, ok := s.handler.(SessionCloseHandler)
+	if !ok {
+		return nil
+	}
+	return closer.CloseSession(ctx, s)
 }
 
 // HandleFrontend processes one frontend message into backend frames.
@@ -74,15 +104,15 @@ func (s *Session) HandleFrontend(ctx context.Context, msg FrontendMessage) (fram
 				Severity: "ERROR",
 				Code:     "0A000",
 				Message:  "simple-query handler is not configured",
-			}), false, nil
+			}, s.txStatus), false, nil
 		}
-		result, handlerErr := s.handler.HandleSimpleQuery(ctx, typed.SQL)
+		result, handlerErr := s.handler.HandleSimpleQuery(ctx, s, typed.SQL)
 		if handlerErr != nil {
 			var terminationErr SessionTerminationError
 			if errors.As(handlerErr, &terminationErr) && terminationErr.TerminateSession() {
 				return nil, true, nil
 			}
-			return errorFrames(asWireError(handlerErr)), false, nil
+			return errorFrames(asWireError(handlerErr), s.txStatus), false, nil
 		}
 		frames = make([][]byte, 0, len(result.Rows)+3)
 		if len(result.Fields) > 0 {
@@ -92,7 +122,7 @@ func (s *Session) HandleFrontend(ctx context.Context, msg FrontendMessage) (fram
 			}
 		}
 		frames = append(frames, EncodeCommandComplete(result.CommandTag))
-		frames = append(frames, EncodeReadyForQuery(TxIdle))
+		frames = append(frames, EncodeReadyForQuery(s.txStatus))
 		return frames, false, nil
 	case Terminate:
 		return nil, true, nil
@@ -101,10 +131,10 @@ func (s *Session) HandleFrontend(ctx context.Context, msg FrontendMessage) (fram
 	}
 }
 
-func errorFrames(err Error) [][]byte {
+func errorFrames(err Error, status TxStatus) [][]byte {
 	return [][]byte{
 		EncodeErrorResponse(err.Severity, err.Code, err.Message),
-		EncodeReadyForQuery(TxIdle),
+		EncodeReadyForQuery(status),
 	}
 }
 

@@ -59,6 +59,25 @@ func TestSessionHandleQuery(t *testing.T) {
 	}
 }
 
+func TestSessionCarriesTransactionStatus(t *testing.T) {
+	t.Parallel()
+
+	session := NewSession(staticHandler{
+		result: QueryResult{CommandTag: "BEGIN"},
+		setTx:  TxInTransaction,
+	})
+	frames, close, err := session.HandleFrontend(context.Background(), Query{SQL: "begin"})
+	if err != nil {
+		t.Fatalf("handle begin: %v", err)
+	}
+	if close {
+		t.Fatalf("begin should not close session")
+	}
+	if len(frames) != 2 || frames[1][0] != 'Z' || TxStatus(frames[1][5]) != TxInTransaction {
+		t.Fatalf("ready status = %q, want %q", frames[1][5], TxInTransaction)
+	}
+}
+
 func TestSessionHandleHandlerError(t *testing.T) {
 	t.Parallel()
 
@@ -100,9 +119,13 @@ func TestSessionHandleTerminate(t *testing.T) {
 type staticHandler struct {
 	result QueryResult
 	err    error
+	setTx  TxStatus
 }
 
-func (h staticHandler) HandleSimpleQuery(context.Context, string) (QueryResult, error) {
+func (h staticHandler) HandleSimpleQuery(_ context.Context, session *Session, _ string) (QueryResult, error) {
+	if h.setTx != 0 {
+		session.SetTxStatus(h.setTx)
+	}
 	if h.err != nil {
 		return QueryResult{}, h.err
 	}

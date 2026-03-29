@@ -37,7 +37,7 @@ func TestPlanningHandlerDescribeInsert(t *testing.T) {
 	t.Parallel()
 
 	handler := newPlanningHandler(t)
-	result, err := handler.HandleSimpleQuery(context.Background(), "insert into users (id, name, email) values (1, 'alice', 'a@example.com')")
+	result, err := handler.HandleSimpleQuery(context.Background(), NewSession(handler), "insert into users (id, name, email) values (1, 'alice', 'a@example.com')")
 	if err != nil {
 		t.Fatalf("handle query: %v", err)
 	}
@@ -88,7 +88,7 @@ func TestPlanningHandlerMapsPlannerErrors(t *testing.T) {
 	t.Parallel()
 
 	handler := newPlanningHandler(t)
-	_, err := handler.HandleSimpleQuery(context.Background(), "select id from users where name = 'alice'")
+	_, err := handler.HandleSimpleQuery(context.Background(), NewSession(handler), "select id from users where name = 'alice'")
 	if err == nil {
 		t.Fatalf("expected planner error")
 	}

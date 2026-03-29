@@ -23,7 +23,7 @@ type terminateSessionError struct {
 	message string
 }
 
-func (h *faultInjectingHandler) HandleSimpleQuery(ctx context.Context, query string) (pgwire.QueryResult, error) {
+func (h *faultInjectingHandler) HandleSimpleQuery(ctx context.Context, session *pgwire.Session, query string) (pgwire.QueryResult, error) {
 	spec, match := h.matchingFault(query)
 	if match {
 		if h.record != nil {
@@ -45,7 +45,7 @@ func (h *faultInjectingHandler) HandleSimpleQuery(ctx context.Context, query str
 			}
 		}
 	}
-	return h.delegate.HandleSimpleQuery(ctx, query)
+	return h.delegate.HandleSimpleQuery(ctx, session, query)
 }
 
 func (h *faultInjectingHandler) Install(spec AmbiguousCommitSpec) {
@@ -79,6 +79,14 @@ func (e terminateSessionError) Error() string {
 
 func (e terminateSessionError) TerminateSession() bool {
 	return true
+}
+
+func (h *faultInjectingHandler) CloseSession(ctx context.Context, session *pgwire.Session) error {
+	closer, ok := h.delegate.(pgwire.SessionCloseHandler)
+	if !ok {
+		return nil
+	}
+	return closer.CloseSession(ctx, session)
 }
 
 func defaultSystemTestCatalog() (*chronossql.Catalog, error) {

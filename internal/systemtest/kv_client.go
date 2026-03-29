@@ -56,6 +56,35 @@ type kvScanResponse struct {
 	Rows []kvScanRow `json:"rows"`
 }
 
+type kvIntentRequest struct {
+	Key    []byte         `json:"key"`
+	Intent storage.Intent `json:"intent"`
+}
+
+type kvTxnRecordRequest struct {
+	Record txn.Record `json:"record"`
+}
+
+type kvTxnRecordResponse struct {
+	Found  bool       `json:"found"`
+	Record txn.Record `json:"record"`
+}
+
+type kvLockAcquireRequest struct {
+	Key      []byte                 `json:"key"`
+	Txn      txn.Record             `json:"txn"`
+	Strength storage.IntentStrength `json:"strength"`
+}
+
+type kvLockAcquireResponse struct {
+	Decision txn.LockDecision `json:"decision"`
+}
+
+type kvLockReleaseRequest struct {
+	Key   []byte        `json:"key"`
+	TxnID storage.TxnID `json:"txn_id"`
+}
+
 func newKVClient(nodeID uint64, rootDir string, host *chronosruntime.Host) *kvClient {
 	return &kvClient{
 		nodeID:  nodeID,
@@ -83,6 +112,10 @@ func (c *kvClient) GetLatest(ctx context.Context, key []byte) ([]byte, bool, err
 		return nil, false, err
 	}
 	return resp.Value, resp.Found, nil
+}
+
+func (c *kvClient) LookupRange(ctx context.Context, key []byte) (meta.RangeDescriptor, error) {
+	return c.host.LookupRange(ctx, key)
 }
 
 func (c *kvClient) Put(ctx context.Context, key, value []byte) error {
@@ -189,6 +222,134 @@ func (c *kvClient) ScanRange(ctx context.Context, startKey, endKey []byte, start
 		currentStart = append([]byte(nil), desc.EndKey...)
 		currentStartInclusive = true
 	}
+}
+
+func (c *kvClient) PutIntent(ctx context.Context, key []byte, intent storage.Intent) error {
+	desc, err := c.host.LookupRange(ctx, key)
+	if err != nil {
+		return err
+	}
+	targetNodeID, err := leaseholderNodeIDForRange(desc)
+	if err != nil {
+		return err
+	}
+	if targetNodeID == c.nodeID {
+		_, err := c.host.PutIntentLocal(ctx, key, intent)
+		return err
+	}
+	return c.postJSON(ctx, targetNodeID, "/control/kv/intent/put", kvIntentRequest{
+		Key:    key,
+		Intent: intent,
+	}, nil)
+}
+
+func (c *kvClient) DeleteIntent(ctx context.Context, key []byte) error {
+	desc, err := c.host.LookupRange(ctx, key)
+	if err != nil {
+		return err
+	}
+	targetNodeID, err := leaseholderNodeIDForRange(desc)
+	if err != nil {
+		return err
+	}
+	if targetNodeID == c.nodeID {
+		_, err := c.host.DeleteIntentLocal(ctx, key)
+		return err
+	}
+	return c.postJSON(ctx, targetNodeID, "/control/kv/intent/delete", kvGetRequest{Key: key}, nil)
+}
+
+func (c *kvClient) PutTxnRecord(ctx context.Context, record txn.Record) error {
+	key := storage.GlobalTxnRecordKey(record.ID)
+	desc, err := c.host.LookupRange(ctx, key)
+	if err != nil {
+		return err
+	}
+	targetNodeID, err := leaseholderNodeIDForRange(desc)
+	if err != nil {
+		return err
+	}
+	if targetNodeID == c.nodeID {
+		_, err := c.host.PutTxnRecordLocal(ctx, record)
+		return err
+	}
+	return c.postJSON(ctx, targetNodeID, "/control/kv/txn-record/put", kvTxnRecordRequest{Record: record}, nil)
+}
+
+func (c *kvClient) GetTxnRecord(ctx context.Context, txnID storage.TxnID) (txn.Record, bool, error) {
+	key := storage.GlobalTxnRecordKey(txnID)
+	desc, err := c.host.LookupRange(ctx, key)
+	if err != nil {
+		return txn.Record{}, false, err
+	}
+	targetNodeID, err := leaseholderNodeIDForRange(desc)
+	if err != nil {
+		return txn.Record{}, false, err
+	}
+	if targetNodeID == c.nodeID {
+		record, err := c.host.GetTxnRecordLocal(ctx, txnID)
+		if err != nil {
+			return txn.Record{}, false, err
+		}
+		return record, true, nil
+	}
+	var resp kvTxnRecordResponse
+	if err := c.postJSON(ctx, targetNodeID, "/control/kv/txn-record/get", kvGetRequest{Key: key}, &resp); err != nil {
+		return txn.Record{}, false, err
+	}
+	return resp.Record, resp.Found, nil
+}
+
+func (c *kvClient) AcquireLock(ctx context.Context, key []byte, record txn.Record, strength storage.IntentStrength) (txn.LockDecision, error) {
+	desc, err := c.host.LookupRange(ctx, key)
+	if err != nil {
+		return txn.LockDecision{}, err
+	}
+	targetNodeID, err := leaseholderNodeIDForRange(desc)
+	if err != nil {
+		return txn.LockDecision{}, err
+	}
+	if targetNodeID == c.nodeID {
+		var resp kvLockAcquireResponse
+		if err := c.postJSON(ctx, targetNodeID, "/control/txn/lock/acquire", kvLockAcquireRequest{
+			Key:      key,
+			Txn:      record,
+			Strength: strength,
+		}, &resp); err != nil {
+			return txn.LockDecision{}, err
+		}
+		return resp.Decision, nil
+	}
+	var resp kvLockAcquireResponse
+	if err := c.postJSON(ctx, targetNodeID, "/control/txn/lock/acquire", kvLockAcquireRequest{
+		Key:      key,
+		Txn:      record,
+		Strength: strength,
+	}, &resp); err != nil {
+		return txn.LockDecision{}, err
+	}
+	return resp.Decision, nil
+}
+
+func (c *kvClient) ReleaseLock(ctx context.Context, key []byte, txnID storage.TxnID) error {
+	desc, err := c.host.LookupRange(ctx, key)
+	if err != nil {
+		return err
+	}
+	targetNodeID, err := leaseholderNodeIDForRange(desc)
+	if err != nil {
+		return err
+	}
+	if targetNodeID == c.nodeID {
+		return c.postJSON(ctx, targetNodeID, "/control/txn/lock/release", kvLockReleaseRequest{
+			Key:   key,
+			TxnID: txnID,
+		}, nil)
+	}
+	return c.postJSON(ctx, targetNodeID, "/control/txn/lock/release", kvLockReleaseRequest{
+		Key:   key,
+		TxnID: txnID,
+	}, nil)
 }
 
 func (c *kvClient) postJSON(ctx context.Context, nodeID uint64, path string, reqBody any, respBody any) error {

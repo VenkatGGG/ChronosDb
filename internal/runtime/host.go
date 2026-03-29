@@ -275,11 +275,7 @@ func (h *Host) PutValueLocal(ctx context.Context, key []byte, ts hlc.Timestamp, 
 		h.mu.Unlock()
 		return meta.RangeDescriptor{}, err
 	}
-	if err := h.scheduler.Propose(desc.RangeID, payload); err != nil {
-		h.mu.Unlock()
-		return meta.RangeDescriptor{}, err
-	}
-	outbound, err := h.processReadyLocked()
+	outbound, err := h.proposeWithLeaseholderRetryLocked(ctx, desc, payload)
 	if err != nil {
 		h.mu.Unlock()
 		return meta.RangeDescriptor{}, err
@@ -319,11 +315,7 @@ func (h *Host) PutIntentLocal(ctx context.Context, key []byte, intent storage.In
 		h.mu.Unlock()
 		return meta.RangeDescriptor{}, err
 	}
-	if err := h.scheduler.Propose(desc.RangeID, payload); err != nil {
-		h.mu.Unlock()
-		return meta.RangeDescriptor{}, err
-	}
-	outbound, err := h.processReadyLocked()
+	outbound, err := h.proposeWithLeaseholderRetryLocked(ctx, desc, payload)
 	if err != nil {
 		h.mu.Unlock()
 		return meta.RangeDescriptor{}, err
@@ -361,11 +353,7 @@ func (h *Host) DeleteIntentLocal(ctx context.Context, key []byte) (meta.RangeDes
 		h.mu.Unlock()
 		return meta.RangeDescriptor{}, err
 	}
-	if err := h.scheduler.Propose(desc.RangeID, payload); err != nil {
-		h.mu.Unlock()
-		return meta.RangeDescriptor{}, err
-	}
-	outbound, err := h.processReadyLocked()
+	outbound, err := h.proposeWithLeaseholderRetryLocked(ctx, desc, payload)
 	if err != nil {
 		h.mu.Unlock()
 		return meta.RangeDescriptor{}, err
@@ -408,11 +396,7 @@ func (h *Host) PutTxnRecordLocal(ctx context.Context, record txn.Record) (meta.R
 		h.mu.Unlock()
 		return meta.RangeDescriptor{}, err
 	}
-	if err := h.scheduler.Propose(desc.RangeID, payload); err != nil {
-		h.mu.Unlock()
-		return meta.RangeDescriptor{}, err
-	}
-	outbound, err := h.processReadyLocked()
+	outbound, err := h.proposeWithLeaseholderRetryLocked(ctx, desc, payload)
 	if err != nil {
 		h.mu.Unlock()
 		return meta.RangeDescriptor{}, err
@@ -679,6 +663,31 @@ func (h *Host) processReadyLocked() ([]OutboundMessage, error) {
 		return nil, err
 	}
 	return outbound, nil
+}
+
+// proposeWithLeaseholderRetryLocked proposes while the host mutex is held. If
+// the range currently has no elected leader and the local replica is the
+// descriptor-designated leaseholder, it campaigns once and retries the
+// proposal before surfacing the error.
+func (h *Host) proposeWithLeaseholderRetryLocked(ctx context.Context, desc meta.RangeDescriptor, payload []byte) ([]OutboundMessage, error) {
+	if err := h.scheduler.Propose(desc.RangeID, payload); err == nil {
+		return h.processReadyLocked()
+	} else {
+		replicaID, ok := localReplicaID(desc, h.ident.NodeID)
+		if !ok || replicaID != desc.LeaseholderReplicaID {
+			return nil, err
+		}
+		h.mu.Unlock()
+		campaignErr := h.Campaign(ctx, desc.RangeID)
+		h.mu.Lock()
+		if campaignErr != nil {
+			return nil, err
+		}
+		if retryErr := h.scheduler.Propose(desc.RangeID, payload); retryErr != nil {
+			return nil, retryErr
+		}
+		return h.processReadyLocked()
+	}
 }
 
 func descriptorReplicaOnNode(desc meta.RangeDescriptor, nodeID uint64) bool {
