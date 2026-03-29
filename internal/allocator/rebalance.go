@@ -142,16 +142,17 @@ func hasNode(replicas []meta.ReplicaDescriptor, nodeID uint64) bool {
 func distinctCount(values []string) int {
 	seen := make(map[string]struct{}, len(values))
 	for _, value := range values {
-		if value == "" {
-			continue
-		}
-		seen[value] = struct{}{}
+		seen[canonicalRegion(value)] = struct{}{}
 	}
 	return len(seen)
 }
 
 func canonicalRegion(region string) string {
-	return strings.ToLower(strings.TrimSpace(region))
+	region = strings.ToLower(strings.TrimSpace(region))
+	if region == "" {
+		return "unknown"
+	}
+	return region
 }
 
 func max(a, b int) int {
@@ -173,7 +174,7 @@ func localityTransitionBias(compiled placement.CompiledPolicy, sourceRegion, tar
 
 func regionPreferred(compiled placement.CompiledPolicy, region string) bool {
 	region = canonicalRegion(region)
-	if region == "" {
+	if region == "unknown" {
 		return false
 	}
 	if len(compiled.LeasePreferences) > 0 {

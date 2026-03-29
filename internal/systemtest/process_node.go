@@ -37,6 +37,7 @@ type ProcessNodeConfig struct {
 	Ranges            []meta.RangeDescriptor
 	EventBufferSize   int
 	HeartbeatInterval time.Duration
+	AllocatorInterval time.Duration
 	LeaseTTL          time.Duration
 	ClosedTSLag       time.Duration
 	AutoSplitRows     int
@@ -53,27 +54,28 @@ type ProcessNodeState struct {
 
 // ProcessNode is a single-node process runtime for the external chaos runner.
 type ProcessNode struct {
-	mu          sync.RWMutex
-	runWG       sync.WaitGroup
-	cfg         ProcessNodeConfig
-	metrics     *observability.Metrics
-	handler     *faultInjectingHandler
-	pgListener  net.Listener
-	obsServer   *http.Server
-	obsListen   net.Listener
-	ctrlServer  *http.Server
-	ctrlListen  net.Listener
-	lastError   string
-	partitions  map[uint64]struct{}
-	events      []adminapi.ClusterEvent
-	state       ProcessNodeState
-	logPath     string
-	statePath   string
-	host        *chronosruntime.Host
-	locks       *txn.LockTable
-	kv          *kvClient
-	liveness    meta.NodeLiveness
-	hasLiveness bool
+	mu                       sync.RWMutex
+	runWG                    sync.WaitGroup
+	cfg                      ProcessNodeConfig
+	metrics                  *observability.Metrics
+	handler                  *faultInjectingHandler
+	pgListener               net.Listener
+	obsServer                *http.Server
+	obsListen                net.Listener
+	ctrlServer               *http.Server
+	ctrlListen               net.Listener
+	lastError                string
+	partitions               map[uint64]struct{}
+	events                   []adminapi.ClusterEvent
+	state                    ProcessNodeState
+	logPath                  string
+	statePath                string
+	host                     *chronosruntime.Host
+	locks                    *txn.LockTable
+	kv                       *kvClient
+	liveness                 meta.NodeLiveness
+	hasLiveness              bool
+	rebalanceRecommendations map[uint64]string
 }
 
 const defaultProcessNodeEventBufferSize = 256
@@ -158,14 +160,15 @@ func NewProcessNode(cfg ProcessNodeConfig) (*ProcessNode, error) {
 		cfg.Catalog = loadedCatalog
 	}
 	node := &ProcessNode{
-		cfg:        cfg,
-		metrics:    observability.NewMetrics(),
-		partitions: make(map[uint64]struct{}),
-		events:     make([]adminapi.ClusterEvent, 0, cfg.EventBufferSize),
-		logPath:    NodeLogPath(cfg.DataDir),
-		statePath:  filepath.Join(cfg.DataDir, "state.json"),
-		host:       host,
-		locks:      txn.NewLockTable(),
+		cfg:                      cfg,
+		metrics:                  observability.NewMetrics(),
+		partitions:               make(map[uint64]struct{}),
+		events:                   make([]adminapi.ClusterEvent, 0, cfg.EventBufferSize),
+		logPath:                  NodeLogPath(cfg.DataDir),
+		statePath:                filepath.Join(cfg.DataDir, "state.json"),
+		host:                     host,
+		locks:                    txn.NewLockTable(),
+		rebalanceRecommendations: make(map[uint64]string),
 	}
 	node.kv = newKVClient(cfg.NodeID, filepath.Dir(cfg.DataDir), host)
 	planner := chronossql.NewPlanner(chronossql.NewParser(), cfg.Catalog)

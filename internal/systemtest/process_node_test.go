@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -346,6 +347,77 @@ func TestProcessNodePublishesPersistedNodeLiveness(t *testing.T) {
 	}
 }
 
+func TestProcessNodeEmitsRebalanceRecommendation(t *testing.T) {
+	t.Parallel()
+
+	rootDir := t.TempDir()
+	bootstrapPath := filepath.Join(rootDir, "bootstrap.json")
+	manifest, err := chronosruntime.BuildBootstrapManifest("cluster-process-rebalance", []chronosruntime.BootstrapNode{
+		{NodeID: 1, StoreID: 21},
+		{NodeID: 2, StoreID: 22},
+		{NodeID: 3, StoreID: 23},
+	}, []meta.RangeDescriptor{
+		{
+			RangeID:    51,
+			Generation: 1,
+			StartKey:   storage.GlobalTablePrimaryPrefix(7),
+			EndKey:     storage.GlobalTablePrimaryPrefix(8),
+			Replicas: []meta.ReplicaDescriptor{
+				{ReplicaID: 21, NodeID: 1, Role: meta.ReplicaRoleVoter},
+				{ReplicaID: 22, NodeID: 2, Role: meta.ReplicaRoleVoter},
+			},
+			LeaseholderReplicaID: 21,
+		},
+	})
+	if err != nil {
+		t.Fatalf("build bootstrap manifest: %v", err)
+	}
+	if err := chronosruntime.WriteBootstrapManifest(bootstrapPath, manifest); err != nil {
+		t.Fatalf("write bootstrap manifest: %v", err)
+	}
+
+	startCfg := func(nodeID uint64, storeID uint64) ProcessNodeConfig {
+		return ProcessNodeConfig{
+			NodeID:            nodeID,
+			StoreID:           storeID,
+			DataDir:           filepath.Join(rootDir, fmt.Sprintf("node-%d", nodeID)),
+			BootstrapPath:     bootstrapPath,
+			PGListenAddr:      "127.0.0.1:0",
+			ObservabilityAddr: "127.0.0.1:0",
+			ControlAddr:       "127.0.0.1:0",
+			HeartbeatInterval: 50 * time.Millisecond,
+			AllocatorInterval: 50 * time.Millisecond,
+		}
+	}
+
+	node1, cancel1, done1 := startProcessNodeForTest(t, startCfg(1, 21))
+	t.Cleanup(func() {
+		cancel1()
+		waitProcessNodeDone(t, done1, "rebalance-node1")
+	})
+	_, cancel2, done2 := startProcessNodeForTest(t, startCfg(2, 22))
+	t.Cleanup(func() {
+		cancel2()
+		waitProcessNodeDone(t, done2, "rebalance-node2")
+	})
+	_, cancel3, done3 := startProcessNodeForTest(t, startCfg(3, 23))
+	t.Cleanup(func() {
+		cancel3()
+		waitProcessNodeDone(t, done3, "rebalance-node3")
+	})
+
+	if err := node1.host.Campaign(context.Background(), 51); err != nil {
+		t.Fatalf("campaign rebalance range: %v", err)
+	}
+	waitForRangeLeader(t, node1.host, 51, 21)
+	if err := node1.recommendRebalances(context.Background()); err != nil {
+		t.Fatalf("recommend rebalances: %v", err)
+	}
+
+	client := &http.Client{Timeout: 2 * time.Second}
+	waitForEventType(t, client, node1.state.ObservabilityURL+"/admin/events?limit=32", "rebalance_recommended")
+}
+
 func waitForProcessNodeState(t *testing.T, path string) ProcessNodeState {
 	t.Helper()
 
@@ -440,6 +512,25 @@ func waitForNodeLivenessEpoch(t *testing.T, client *http.Client, url string, wan
 	var view adminapi.NodeView
 	getJSON(t, client, url, &view)
 	t.Fatalf("node liveness epoch = %d, want %d", view.LivenessEpoch, want)
+}
+
+func waitForEventType(t *testing.T, client *http.Client, url, want string) {
+	t.Helper()
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		var events []adminapi.ClusterEvent
+		getJSON(t, client, url, &events)
+		for _, event := range events {
+			if event.Type == want {
+				return
+			}
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	var events []adminapi.ClusterEvent
+	getJSON(t, client, url, &events)
+	t.Fatalf("event %q not found in %+v", want, events)
 }
 
 func getJSON(t *testing.T, client *http.Client, url string, out any) {

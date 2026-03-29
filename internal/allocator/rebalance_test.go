@@ -102,6 +102,26 @@ func TestChooseRebalancePrefersMoveIntoPreferredRegion(t *testing.T) {
 	}
 }
 
+func TestChooseRebalanceAllowsUnknownRegionWhenPolicyIsUnset(t *testing.T) {
+	t.Parallel()
+
+	desc := testRangeDescriptor(nil)
+	desc.Replicas = desc.Replicas[:2]
+	desc.LeaseholderReplicaID = 1
+
+	decision, err := ChooseRebalance(desc, []NodeLoad{
+		{NodeID: 1, LoadScore: 0.95},
+		{NodeID: 2, LoadScore: 0.60},
+		{NodeID: 3, LoadScore: 0.05},
+	})
+	if err != nil {
+		t.Fatalf("choose rebalance: %v", err)
+	}
+	if decision.TargetNode.NodeID != 3 {
+		t.Fatalf("target node = %d, want 3", decision.TargetNode.NodeID)
+	}
+}
+
 func testRangeDescriptor(policy *placement.Policy) meta.RangeDescriptor {
 	return meta.RangeDescriptor{
 		RangeID:    7,
