@@ -80,7 +80,11 @@ func (t *processNodeTransport) Send(ctx context.Context, messages []chronosrunti
 }
 
 func (t *processNodeTransport) resolveControlURL(targetNodeID uint64) (string, error) {
-	entries, err := os.ReadDir(t.rootDir)
+	return resolveNodeControlURL(t.rootDir, targetNodeID)
+}
+
+func resolveNodeControlURL(rootDir string, targetNodeID uint64) (string, error) {
+	entries, err := os.ReadDir(rootDir)
 	if err != nil {
 		return "", err
 	}
@@ -88,7 +92,7 @@ func (t *processNodeTransport) resolveControlURL(targetNodeID uint64) (string, e
 		if !entry.IsDir() {
 			continue
 		}
-		statePath := filepath.Join(t.rootDir, entry.Name(), "state.json")
+		statePath := filepath.Join(rootDir, entry.Name(), "state.json")
 		state, err := ReadProcessNodeState(statePath)
 		if err != nil {
 			continue
@@ -97,7 +101,7 @@ func (t *processNodeTransport) resolveControlURL(targetNodeID uint64) (string, e
 			return state.ControlURL, nil
 		}
 	}
-	return "", fmt.Errorf("runtime transport: node %d control url not found under %s", targetNodeID, t.rootDir)
+	return "", fmt.Errorf("runtime transport: node %d control url not found under %s", targetNodeID, rootDir)
 }
 
 func unmarshalRaftMessage(data []byte) (raftpb.Message, error) {

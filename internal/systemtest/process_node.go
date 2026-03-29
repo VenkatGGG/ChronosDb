@@ -134,11 +134,10 @@ func NewProcessNode(cfg ProcessNodeConfig) (*ProcessNode, error) {
 		statePath:  filepath.Join(cfg.DataDir, "state.json"),
 		host:       host,
 	}
+	planner := chronossql.NewPlanner(chronossql.NewParser(), cfg.Catalog)
+	flowPlanner := chronossql.NewFlowPlanner()
 	node.handler = &faultInjectingHandler{
-		delegate: pgwire.NewPlanningHandler(
-			chronossql.NewPlanner(chronossql.NewParser(), cfg.Catalog),
-			chronossql.NewFlowPlanner(),
-		),
+		delegate: newRuntimeQueryHandler(planner, flowPlanner, newKVClient(cfg.NodeID, filepath.Dir(cfg.DataDir), host)),
 		record: func(message string) {
 			_ = node.recordEvent(adminapi.ClusterEvent{
 				Type:     "node_activity",
@@ -312,6 +311,8 @@ func (n *ProcessNode) controlMux() http.Handler {
 	mux.HandleFunc("/control/partition", n.handlePartition)
 	mux.HandleFunc("/control/heal", n.handleHeal)
 	mux.HandleFunc("/control/raft/message", n.handleRaftMessage)
+	mux.HandleFunc("/control/kv/get", n.handleKVGet)
+	mux.HandleFunc("/control/kv/put", n.handleKVPut)
 	mux.HandleFunc("/control/ambiguous-commit", n.handleAmbiguousCommit)
 	mux.HandleFunc("/control/logs", n.handleLogs)
 	mux.HandleFunc("/control/log", n.handleLog)
@@ -431,6 +432,44 @@ func (n *ProcessNode) handleRaftMessage(w http.ResponseWriter, r *http.Request) 
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (n *ProcessNode) handleKVGet(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req kvGetRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	value, _, found, err := n.host.ReadLatestLocal(r.Context(), req.Key)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSONResponse(w, kvGetResponse{
+		Found: found,
+		Value: value,
+	})
+}
+
+func (n *ProcessNode) handleKVPut(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req kvPutRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if _, err := n.host.PutValueLocal(r.Context(), req.Key, req.Timestamp, req.Value); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
 	}
 	w.WriteHeader(http.StatusNoContent)
 }

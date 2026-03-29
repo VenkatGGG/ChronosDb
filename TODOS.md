@@ -503,9 +503,12 @@ Exit criteria:
 - range placement, leaseholders, and key location in the console are sourced
   from the live replicated runtime rather than static node config
 
-**Status:** Planned. This phase is the missing integration step between the
-existing subsystem libraries and a real running distributed database. The goal
-is to replace the current planner-backed demo shell with a true live runtime.
+**Status:** In progress. The runtime-backed `chronos-node`, persistent
+bootstrap, live inter-node Raft transport, descriptor-backed hosting, point KV
+reads/writes, and the first real pgwire-backed point `INSERT`/`SELECT` path now
+exist. Remaining work is the broader KV/transaction surface, distributed SQL
+execution, persisted catalog descriptors, background services, recovery
+hardening, and a one-command seeded demo bootstrap.
 
 ### [ ] Phase 13 Remaining Execution
 
@@ -524,12 +527,16 @@ is to replace the current planner-backed demo shell with a true live runtime.
 - [ ] 13.5 Build the KV request path
   for point lookup, range scan, put, intent write, intent resolution, and txn
   record operations against live replicas and the MVCC storage engine
+  - point lookup and point put are now live through runtime-hosted replicas and
+    node control RPCs; scans, intents, and txn record operations still remain
 - [ ] 13.6 Wire the transaction coordinator into the live KV path
   including begin/heartbeat/commit/abort, lock acquisition, refresh/retry, and
   coordinator recovery in the normal request flow
 - [ ] 13.7 Build the first real SQL executor slice
   that can run point lookups and inserts end-to-end through pgwire, the planner,
   KV routing, leases, transactions, and storage, returning real rows/results
+  - point `SELECT` and `INSERT` now execute through the live runtime and return
+    real rows/results; transaction wiring and broader operator coverage remain
 - [ ] 13.8 Extend SQL execution to distributed scans, aggregates, and joins
   by executing the physical flow operators built in `internal/sql/flow.go`
   across leaseholders and gateway merge stages

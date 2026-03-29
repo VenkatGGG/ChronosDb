@@ -197,3 +197,52 @@ func TestScanRawRangeReturnsBoundedMVCCSpan(t *testing.T) {
 		}
 	}
 }
+
+func TestGetLatestMVCCValueReturnsNewestVersion(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	engine, err := Open(ctx, Options{
+		Dir: "latest-mvcc-value",
+		FS:  vfs.NewMem(),
+	})
+	if err != nil {
+		t.Fatalf("open engine: %v", err)
+	}
+	defer engine.Close()
+	if err := engine.Bootstrap(ctx, StoreIdent{ClusterID: "cluster-a", NodeID: 1, StoreID: 1}); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+
+	logicalKey := GlobalTablePrimaryKey(7, []byte("alice"))
+	ts1 := hlc.Timestamp{WallTime: 100, Logical: 1}
+	ts2 := hlc.Timestamp{WallTime: 200, Logical: 1}
+	if err := engine.PutMVCCValue(ctx, logicalKey, ts1, []byte("v1")); err != nil {
+		t.Fatalf("put ts1: %v", err)
+	}
+	if err := engine.PutMVCCValue(ctx, logicalKey, ts2, []byte("v2")); err != nil {
+		t.Fatalf("put ts2: %v", err)
+	}
+
+	value, ts, found, err := engine.GetLatestMVCCValue(ctx, logicalKey)
+	if err != nil {
+		t.Fatalf("get latest mvcc value: %v", err)
+	}
+	if !found {
+		t.Fatal("latest mvcc value found = false, want true")
+	}
+	if ts != ts2 {
+		t.Fatalf("latest timestamp = %+v, want %+v", ts, ts2)
+	}
+	if !bytes.Equal(value, []byte("v2")) {
+		t.Fatalf("latest value = %q, want %q", value, []byte("v2"))
+	}
+
+	_, _, found, err = engine.GetLatestMVCCValue(ctx, GlobalTablePrimaryKey(7, []byte("missing")))
+	if err != nil {
+		t.Fatalf("get latest missing mvcc value: %v", err)
+	}
+	if found {
+		t.Fatal("missing latest mvcc value found = true, want false")
+	}
+}

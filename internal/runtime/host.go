@@ -5,10 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sync"
 	"time"
 
+	"github.com/VenkatGGG/ChronosDb/internal/hlc"
+	"github.com/VenkatGGG/ChronosDb/internal/lease"
 	"github.com/VenkatGGG/ChronosDb/internal/meta"
 	"github.com/VenkatGGG/ChronosDb/internal/multiraft"
+	"github.com/VenkatGGG/ChronosDb/internal/replica"
 	"github.com/VenkatGGG/ChronosDb/internal/storage"
 	"github.com/cockroachdb/pebble/vfs"
 	raftpb "go.etcd.io/raft/v3/raftpb"
@@ -17,6 +21,11 @@ import (
 const (
 	defaultClusterID    = "chronos-local"
 	defaultTickInterval = 100 * time.Millisecond
+)
+
+var (
+	// ErrRangeNotHosted reports that a request targeted a range not present on the local store.
+	ErrRangeNotHosted = errors.New("runtime: range not hosted on local store")
 )
 
 // OutboundMessage is one transport-ready Raft message with its resolved target node.
@@ -47,12 +56,14 @@ type Config struct {
 
 // Host is the live runtime assembly behind one ChronosDB node process.
 type Host struct {
+	mu           sync.Mutex
 	engine       *storage.Engine
 	catalog      *meta.Catalog
 	scheduler    *multiraft.Scheduler
 	ident        storage.StoreIdent
 	transport    Transport
 	tickInterval time.Duration
+	bootstrapped bool
 }
 
 type noopTransport struct{}
@@ -114,6 +125,7 @@ func Open(ctx context.Context, cfg Config) (*Host, error) {
 		ident:        engine.Metadata().Ident,
 		transport:    cfg.Transport,
 		tickInterval: cfg.TickInterval,
+		bootstrapped: manifest != nil || len(cfg.SeedRanges) > 0,
 	}
 	if manifest != nil {
 		if err := host.seedBootstrapManifest(ctx, *manifest); err != nil {
@@ -159,30 +171,147 @@ func (h *Host) HostedDescriptors() ([]meta.RangeDescriptor, error) {
 	return descs, nil
 }
 
+// NodeID returns the local node identifier.
+func (h *Host) NodeID() uint64 {
+	return h.ident.NodeID
+}
+
+// LookupRange resolves the authoritative descriptor for one logical key.
+func (h *Host) LookupRange(ctx context.Context, key []byte) (meta.RangeDescriptor, error) {
+	return h.catalog.Lookup(ctx, key)
+}
+
+// ReadLatestLocal returns the latest committed value for a key hosted on the local store.
+func (h *Host) ReadLatestLocal(ctx context.Context, key []byte) ([]byte, meta.RangeDescriptor, bool, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	desc, err := h.catalog.Lookup(ctx, key)
+	if err != nil {
+		return nil, meta.RangeDescriptor{}, false, err
+	}
+	if !descriptorReplicaOnNode(desc, h.ident.NodeID) {
+		return nil, meta.RangeDescriptor{}, false, ErrRangeNotHosted
+	}
+	replicaState, err := h.scheduler.Replica(desc.RangeID)
+	if err != nil {
+		return nil, meta.RangeDescriptor{}, false, err
+	}
+	value, ts, found, err := h.engine.GetLatestMVCCValue(ctx, key)
+	if err != nil || !found {
+		return value, desc, found, err
+	}
+	if readValue, readErr := readLeaseholderValue(ctx, replicaState, key, ts); readErr == nil {
+		return readValue, desc, true, nil
+	}
+	value, err = replicaState.ReadExact(ctx, key, ts)
+	if err != nil {
+		return nil, meta.RangeDescriptor{}, false, err
+	}
+	return value, desc, true, nil
+}
+
+// PutValueLocal proposes one committed value on a locally hosted range and waits
+// until the version is durably visible on the local store.
+func (h *Host) PutValueLocal(ctx context.Context, key []byte, ts hlc.Timestamp, value []byte) (meta.RangeDescriptor, error) {
+	h.mu.Lock()
+	desc, err := h.catalog.Lookup(ctx, key)
+	if err != nil {
+		h.mu.Unlock()
+		return meta.RangeDescriptor{}, err
+	}
+	if !descriptorReplicaOnNode(desc, h.ident.NodeID) {
+		h.mu.Unlock()
+		return meta.RangeDescriptor{}, ErrRangeNotHosted
+	}
+	payload, err := replica.Command{
+		Version: 1,
+		Type:    replica.CommandTypePutValue,
+		Put: &replica.PutValue{
+			LogicalKey: append([]byte(nil), key...),
+			Timestamp:  ts,
+			Value:      append([]byte(nil), value...),
+		},
+	}.Marshal()
+	if err != nil {
+		h.mu.Unlock()
+		return meta.RangeDescriptor{}, err
+	}
+	if err := h.scheduler.Propose(desc.RangeID, payload); err != nil {
+		h.mu.Unlock()
+		return meta.RangeDescriptor{}, err
+	}
+	outbound, err := h.processReadyLocked()
+	if err != nil {
+		h.mu.Unlock()
+		return meta.RangeDescriptor{}, err
+	}
+	h.mu.Unlock()
+	if err := h.dispatchOutbound(ctx, outbound); err != nil {
+		return meta.RangeDescriptor{}, err
+	}
+
+	if err := h.waitForMVCCValue(ctx, key, ts); err != nil {
+		return meta.RangeDescriptor{}, err
+	}
+	return desc, nil
+}
+
 // Campaign forces the local replica to begin an election for the specified range.
 func (h *Host) Campaign(ctx context.Context, rangeID uint64) error {
+	h.mu.Lock()
 	if err := h.scheduler.Campaign(rangeID); err != nil {
+		h.mu.Unlock()
 		return err
 	}
-	return h.processReady(ctx)
+	outbound, err := h.processReadyLocked()
+	h.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	return h.dispatchOutbound(ctx, outbound)
 }
 
 // Leader returns the current known leader replica id for the range.
 func (h *Host) Leader(rangeID uint64) (uint64, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	return h.scheduler.Leader(rangeID)
 }
 
 // Step delivers one inbound Raft message and persists any resulting Ready state.
 func (h *Host) Step(ctx context.Context, rangeID uint64, msg raftpb.Message) error {
+	h.mu.Lock()
 	if err := h.scheduler.Step(rangeID, msg); err != nil {
+		h.mu.Unlock()
 		return err
 	}
-	return h.processReady(ctx)
+	outbound, err := h.processReadyLocked()
+	h.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	return h.dispatchOutbound(ctx, outbound)
 }
 
 // Run drives the background MultiRaft tick and ready-processing loop.
 func (h *Host) Run(ctx context.Context) error {
-	if err := h.processReady(ctx); err != nil {
+	h.mu.Lock()
+	outbound, err := h.processReadyLocked()
+	if err != nil {
+		h.mu.Unlock()
+		return err
+	}
+	if h.bootstrapped {
+		bootstrapOutbound, err := h.campaignBootstrapLeaseholdersLocked()
+		if err != nil {
+			h.mu.Unlock()
+			return err
+		}
+		outbound = append(outbound, bootstrapOutbound...)
+	}
+	h.mu.Unlock()
+	if err := h.dispatchOutbound(ctx, outbound); err != nil {
 		return err
 	}
 	ticker := time.NewTicker(h.tickInterval)
@@ -192,8 +321,15 @@ func (h *Host) Run(ctx context.Context) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-ticker.C:
+			h.mu.Lock()
 			h.scheduler.Tick()
-			if err := h.processReady(ctx); err != nil {
+			outbound, err := h.processReadyLocked()
+			if err != nil {
+				h.mu.Unlock()
+				return err
+			}
+			h.mu.Unlock()
+			if err := h.dispatchOutbound(ctx, outbound); err != nil {
 				return err
 			}
 		}
@@ -300,31 +436,52 @@ func (h *Host) loadHostedGroups() error {
 	return nil
 }
 
-func (h *Host) processReady(ctx context.Context) error {
+func (h *Host) processReadyLocked() ([]OutboundMessage, error) {
 	result, err := h.scheduler.ProcessReady()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if len(result.Messages) == 0 {
-		return nil
+		return nil, nil
 	}
 	outbound, err := h.resolveOutbound(result.Messages)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	if len(outbound) == 0 {
-		return nil
-	}
-	if err := h.transport.Send(ctx, outbound); err != nil {
-		// Transient transport failures are retried on later Raft ticks.
-		return nil
-	}
-	return nil
+	return outbound, nil
 }
 
 func descriptorReplicaOnNode(desc meta.RangeDescriptor, nodeID uint64) bool {
 	_, ok := localReplicaID(desc, nodeID)
 	return ok
+}
+
+func (h *Host) campaignBootstrapLeaseholdersLocked() ([]OutboundMessage, error) {
+	descs, err := h.HostedDescriptors()
+	if err != nil {
+		return nil, err
+	}
+	var outbound []OutboundMessage
+	for _, desc := range descs {
+		replicaID, ok := localReplicaID(desc, h.ident.NodeID)
+		if !ok || replicaID != desc.LeaseholderReplicaID {
+			continue
+		}
+		leader, err := h.scheduler.Leader(desc.RangeID)
+		if err == nil && leader == replicaID {
+			continue
+		}
+		if err := h.scheduler.Campaign(desc.RangeID); err != nil {
+			return nil, err
+		}
+		readyOutbound, err := h.processReadyLocked()
+		if err != nil {
+			return nil, err
+		}
+		outbound = append(outbound, readyOutbound...)
+	}
+	h.bootstrapped = false
+	return outbound, nil
 }
 
 func localReplicaID(desc meta.RangeDescriptor, nodeID uint64) (uint64, bool) {
@@ -404,4 +561,44 @@ func nodeForReplica(desc meta.RangeDescriptor, replicaID uint64) (uint64, bool) 
 		}
 	}
 	return 0, false
+}
+
+func (h *Host) dispatchOutbound(ctx context.Context, outbound []OutboundMessage) error {
+	if len(outbound) == 0 {
+		return nil
+	}
+	if err := h.transport.Send(ctx, outbound); err != nil {
+		// Transient transport failures are retried on later Raft ticks.
+		return nil
+	}
+	return nil
+}
+
+func (h *Host) waitForMVCCValue(ctx context.Context, key []byte, ts hlc.Timestamp) error {
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		_, err := h.engine.GetMVCCValue(ctx, key, ts)
+		switch {
+		case err == nil:
+			return nil
+		case errors.Is(err, storage.ErrMVCCValueNotFound):
+		default:
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
+func readLeaseholderValue(ctx context.Context, replicaState *replica.StateMachine, key []byte, ts hlc.Timestamp) ([]byte, error) {
+	record := replicaState.Lease()
+	return replicaState.FastGet(ctx, key, ts, lease.FastReadRequest{
+		CurrentLivenessEpoch: record.HolderLivenessEpoch,
+		Now:                  record.StartTS,
+		ReadTimestamp:        ts,
+	})
 }
