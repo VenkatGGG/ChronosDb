@@ -136,6 +136,81 @@ func TestProcessNodeAdminEndpoints(t *testing.T) {
 	}
 }
 
+func TestProcessNodePersistsHostedDescriptorsAcrossRestart(t *testing.T) {
+	t.Parallel()
+
+	dataDir := t.TempDir()
+	seeded := ProcessNodeConfig{
+		NodeID:            1,
+		DataDir:           dataDir,
+		PGListenAddr:      "127.0.0.1:0",
+		ObservabilityAddr: "127.0.0.1:0",
+		ControlAddr:       "127.0.0.1:0",
+		Ranges: []meta.RangeDescriptor{
+			{
+				RangeID:    21,
+				Generation: 4,
+				StartKey:   []byte("alpha"),
+				EndKey:     []byte("omega"),
+				Replicas: []meta.ReplicaDescriptor{
+					{ReplicaID: 11, NodeID: 1, Role: meta.ReplicaRoleVoter},
+					{ReplicaID: 12, NodeID: 2, Role: meta.ReplicaRoleVoter},
+				},
+				LeaseholderReplicaID: 11,
+			},
+		},
+	}
+	runNodeOnce(t, seeded)
+
+	restarted := ProcessNodeConfig{
+		NodeID:            1,
+		DataDir:           dataDir,
+		PGListenAddr:      "127.0.0.1:0",
+		ObservabilityAddr: "127.0.0.1:0",
+		ControlAddr:       "127.0.0.1:0",
+	}
+	if err := os.Remove(filepath.Join(restarted.DataDir, "state.json")); err != nil && !os.IsNotExist(err) {
+		t.Fatalf("remove stale state file: %v", err)
+	}
+	node, err := NewProcessNode(restarted)
+	if err != nil {
+		t.Fatalf("new restarted process node: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- node.Run(ctx)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case err := <-done:
+			if err != nil && err != context.Canceled {
+				t.Fatalf("restarted node run: %v", err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for restarted process node shutdown")
+		}
+	})
+	state := waitForProcessNodeState(t, filepath.Join(restarted.DataDir, "state.json"))
+
+	client := &http.Client{Timeout: 2 * time.Second}
+	var ranges []adminapi.RangeView
+	getJSON(t, client, state.ObservabilityURL+"/admin/ranges", &ranges)
+	if len(ranges) != 1 {
+		t.Fatalf("persisted ranges = %+v, want 1", ranges)
+	}
+	if ranges[0].RangeID != 21 || ranges[0].Source != "runtime_store" {
+		t.Fatalf("persisted range = %+v, want range 21 from runtime_store", ranges[0])
+	}
+
+	var nodeView adminapi.NodeView
+	getJSON(t, client, state.ObservabilityURL+"/admin/node", &nodeView)
+	if nodeView.ReplicaCount != 1 || nodeView.LeaseCount != 1 {
+		t.Fatalf("persisted node counts = replicas %d leases %d, want 1/1", nodeView.ReplicaCount, nodeView.LeaseCount)
+	}
+}
+
 func waitForProcessNodeState(t *testing.T, path string) ProcessNodeState {
 	t.Helper()
 
@@ -152,6 +227,35 @@ func waitForProcessNodeState(t *testing.T, path string) ProcessNodeState {
 	}
 	t.Fatalf("timed out waiting for state file %s", path)
 	return ProcessNodeState{}
+}
+
+func runNodeOnce(t *testing.T, cfg ProcessNodeConfig) ProcessNodeState {
+	t.Helper()
+
+	if err := os.Remove(filepath.Join(cfg.DataDir, "state.json")); err != nil && !os.IsNotExist(err) {
+		t.Fatalf("remove stale state file: %v", err)
+	}
+	node, err := NewProcessNode(cfg)
+	if err != nil {
+		t.Fatalf("new process node: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- node.Run(ctx)
+	}()
+	state := waitForProcessNodeState(t, filepath.Join(cfg.DataDir, "state.json"))
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil && err != context.Canceled {
+			t.Fatalf("node run: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for process node shutdown")
+	}
+	return state
 }
 
 func getJSON(t *testing.T, client *http.Client, url string, out any) {

@@ -17,12 +17,15 @@ import (
 	"github.com/VenkatGGG/ChronosDb/internal/meta"
 	"github.com/VenkatGGG/ChronosDb/internal/observability"
 	"github.com/VenkatGGG/ChronosDb/internal/pgwire"
+	chronosruntime "github.com/VenkatGGG/ChronosDb/internal/runtime"
 	chronossql "github.com/VenkatGGG/ChronosDb/internal/sql"
 )
 
 // ProcessNodeConfig configures one externally launched ChronosDB node process.
 type ProcessNodeConfig struct {
 	NodeID            uint64
+	ClusterID         string
+	StoreID           uint64
 	DataDir           string
 	PGListenAddr      string
 	ObservabilityAddr string
@@ -58,6 +61,7 @@ type ProcessNode struct {
 	state      ProcessNodeState
 	logPath    string
 	statePath  string
+	host       *chronosruntime.Host
 }
 
 const defaultProcessNodeEventBufferSize = 256
@@ -105,6 +109,16 @@ func NewProcessNode(cfg ProcessNodeConfig) (*ProcessNode, error) {
 			}
 		}
 	}
+	host, err := chronosruntime.Open(context.Background(), chronosruntime.Config{
+		NodeID:     cfg.NodeID,
+		StoreID:    cfg.StoreID,
+		ClusterID:  cfg.ClusterID,
+		DataDir:    filepath.Join(cfg.DataDir, "store"),
+		SeedRanges: cfg.Ranges,
+	})
+	if err != nil {
+		return nil, err
+	}
 	node := &ProcessNode{
 		cfg:        cfg,
 		metrics:    observability.NewMetrics(),
@@ -112,6 +126,7 @@ func NewProcessNode(cfg ProcessNodeConfig) (*ProcessNode, error) {
 		events:     make([]adminapi.ClusterEvent, 0, cfg.EventBufferSize),
 		logPath:    NodeLogPath(cfg.DataDir),
 		statePath:  filepath.Join(cfg.DataDir, "state.json"),
+		host:       host,
 	}
 	node.handler = &faultInjectingHandler{
 		delegate: pgwire.NewPlanningHandler(
@@ -186,6 +201,7 @@ func (n *ProcessNode) Run(ctx context.Context) error {
 	go n.servePG(ctx)
 	go n.serveObservability(ctx)
 	go n.serveControl(ctx)
+	go n.serveRuntime(ctx)
 
 	<-ctx.Done()
 	return n.shutdown()
@@ -222,6 +238,15 @@ func (n *ProcessNode) serveControl(ctx context.Context) {
 	}
 }
 
+func (n *ProcessNode) serveRuntime(ctx context.Context) {
+	if n.host == nil {
+		return
+	}
+	if err := n.host.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+		n.recordServeError("runtime", err)
+	}
+}
+
 func (n *ProcessNode) shutdown() error {
 	n.mu.RLock()
 	pgListener := n.pgListener
@@ -229,6 +254,7 @@ func (n *ProcessNode) shutdown() error {
 	obsListen := n.obsListen
 	ctrlServer := n.ctrlServer
 	ctrlListen := n.ctrlListen
+	host := n.host
 	n.mu.RUnlock()
 
 	_ = n.appendLog("node stopping")
@@ -257,6 +283,11 @@ func (n *ProcessNode) shutdown() error {
 	}
 	if ctrlListen != nil {
 		_ = ctrlListen.Close()
+	}
+	if host != nil {
+		if err := host.Close(); err != nil {
+			errs = append(errs, err)
+		}
 	}
 	return errors.Join(errs...)
 }
@@ -417,7 +448,12 @@ func (n *ProcessNode) handleAdminNode(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	writeJSONResponse(w, n.nodeView())
+	view, err := n.nodeView()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSONResponse(w, view)
 }
 
 func (n *ProcessNode) handleAdminRanges(w http.ResponseWriter, r *http.Request) {
@@ -425,7 +461,12 @@ func (n *ProcessNode) handleAdminRanges(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	writeJSONResponse(w, n.rangeViews())
+	views, err := n.rangeViews()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSONResponse(w, views)
 }
 
 func (n *ProcessNode) handleAdminEvents(w http.ResponseWriter, r *http.Request) {
@@ -441,7 +482,12 @@ func (n *ProcessNode) handleAdminSnapshot(w http.ResponseWriter, r *http.Request
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	writeJSONResponse(w, n.snapshot(parsePositiveInt(r.URL.Query().Get("event_limit"))))
+	snapshot, err := n.snapshot(parsePositiveInt(r.URL.Query().Get("event_limit")))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSONResponse(w, snapshot)
 }
 
 func (n *ProcessNode) probe() observability.Probe {
@@ -493,47 +539,47 @@ func (n *ProcessNode) recordServeError(component string, err error) {
 	})
 }
 
-func (n *ProcessNode) nodeView() adminapi.NodeView {
+func (n *ProcessNode) nodeView() (adminapi.NodeView, error) {
 	n.mu.RLock()
-	defer n.mu.RUnlock()
-
 	status, notes := n.statusLocked()
-	replicaCount := 0
+	state := n.state
+	partitions := sortedNodeSet(n.partitions)
+	n.mu.RUnlock()
+
+	descs, err := n.host.HostedDescriptors()
+	if err != nil {
+		return adminapi.NodeView{}, err
+	}
 	leaseCount := 0
-	for _, desc := range n.cfg.Ranges {
-		if descriptorReplicaOnNode(desc, n.cfg.NodeID) {
-			replicaCount++
-			if leaseholderNodeID(desc) == n.cfg.NodeID {
-				leaseCount++
-			}
+	for _, desc := range descs {
+		if leaseholderNodeID(desc) == n.cfg.NodeID {
+			leaseCount++
 		}
 	}
 	return adminapi.NodeView{
-		NodeID:           n.state.NodeID,
-		PGAddr:           n.state.PGAddr,
-		ObservabilityURL: n.state.ObservabilityURL,
-		ControlURL:       n.state.ControlURL,
+		NodeID:           state.NodeID,
+		PGAddr:           state.PGAddr,
+		ObservabilityURL: state.ObservabilityURL,
+		ControlURL:       state.ControlURL,
 		Status:           status,
-		StartedAt:        n.state.StartedAt,
-		PartitionedFrom:  sortedNodeSet(n.partitions),
+		StartedAt:        state.StartedAt,
+		PartitionedFrom:  partitions,
 		Notes:            notes,
-		ReplicaCount:     replicaCount,
+		ReplicaCount:     len(descs),
 		LeaseCount:       leaseCount,
-	}
+	}, nil
 }
 
-func (n *ProcessNode) rangeViews() []adminapi.RangeView {
-	n.mu.RLock()
-	defer n.mu.RUnlock()
-
-	views := make([]adminapi.RangeView, 0, len(n.cfg.Ranges))
-	for _, desc := range n.cfg.Ranges {
-		if !descriptorReplicaOnNode(desc, n.cfg.NodeID) {
-			continue
-		}
-		views = append(views, adminapi.RangeViewFromDescriptor(desc, "local_node_state"))
+func (n *ProcessNode) rangeViews() ([]adminapi.RangeView, error) {
+	descs, err := n.host.HostedDescriptors()
+	if err != nil {
+		return nil, err
 	}
-	return views
+	views := make([]adminapi.RangeView, 0, len(descs))
+	for _, desc := range descs {
+		views = append(views, adminapi.RangeViewFromDescriptor(desc, "runtime_store"))
+	}
+	return views, nil
 }
 
 func (n *ProcessNode) recentEvents(limit int) []adminapi.ClusterEvent {
@@ -547,13 +593,21 @@ func (n *ProcessNode) recentEvents(limit int) []adminapi.ClusterEvent {
 	return append([]adminapi.ClusterEvent(nil), events[len(events)-limit:]...)
 }
 
-func (n *ProcessNode) snapshot(eventLimit int) adminapi.ClusterSnapshot {
+func (n *ProcessNode) snapshot(eventLimit int) (adminapi.ClusterSnapshot, error) {
+	nodeView, err := n.nodeView()
+	if err != nil {
+		return adminapi.ClusterSnapshot{}, err
+	}
+	rangeViews, err := n.rangeViews()
+	if err != nil {
+		return adminapi.ClusterSnapshot{}, err
+	}
 	return adminapi.ClusterSnapshot{
 		GeneratedAt: time.Now().UTC(),
-		Nodes:       []adminapi.NodeView{n.nodeView()},
-		Ranges:      n.rangeViews(),
+		Nodes:       []adminapi.NodeView{nodeView},
+		Ranges:      rangeViews,
 		Events:      n.recentEvents(eventLimit),
-	}
+	}, nil
 }
 
 func (n *ProcessNode) statusLocked() (string, []string) {

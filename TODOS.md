@@ -509,7 +509,7 @@ is to replace the current planner-backed demo shell with a true live runtime.
 
 ### [ ] Phase 13 Remaining Execution
 
-- [ ] 13.1 Replace the planner-only `chronos-node` shell with a real runtime assembly layer
+- [x] 13.1 Replace the planner-only `chronos-node` shell with a real runtime assembly layer
   that opens the storage engine, bootstraps store identity, constructs hosted
   replicas, and wires MultiRaft, leases, metadata, and observability together
 - [ ] 13.2 Add a persistent node/store bootstrap path
@@ -518,7 +518,7 @@ is to replace the current planner-backed demo shell with a true live runtime.
 - [ ] 13.3 Add real inter-node Raft transport and message handling
   so outbound `ProcessReady` messages are delivered across processes and
   inbound messages are stepped into the correct local groups
-- [ ] 13.4 Replace static `ProcessNodeConfig.Ranges` with live descriptor-backed hosting
+- [x] 13.4 Replace static `ProcessNodeConfig.Ranges` with live descriptor-backed hosting
   so node/range views come from the actual replicated runtime instead of
   synthetic local config
 - [ ] 13.5 Build the KV request path
