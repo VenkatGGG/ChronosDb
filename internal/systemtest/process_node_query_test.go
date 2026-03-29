@@ -737,6 +737,234 @@ func TestProcessNodeExecutesExplicitMultiRangeTransactionCommit(t *testing.T) {
 	}
 }
 
+func TestProcessNodeAbortsExplicitTransactionOnDisconnect(t *testing.T) {
+	rootDir := t.TempDir()
+	bootstrapPath := filepath.Join(rootDir, "bootstrap.json")
+	usersRange := meta.RangeDescriptor{
+		RangeID:    67,
+		Generation: 1,
+		StartKey:   storage.GlobalTablePrimaryPrefix(7),
+		EndKey:     storage.GlobalTablePrimaryPrefix(8),
+		Replicas: []meta.ReplicaDescriptor{
+			{ReplicaID: 53, NodeID: 1, Role: meta.ReplicaRoleVoter},
+			{ReplicaID: 54, NodeID: 2, Role: meta.ReplicaRoleVoter},
+			{ReplicaID: 55, NodeID: 3, Role: meta.ReplicaRoleVoter},
+		},
+		LeaseholderReplicaID: 54,
+	}
+	manifest, err := chronosruntime.BuildBootstrapManifest("cluster-explicit-disconnect", []chronosruntime.BootstrapNode{
+		{NodeID: 1, StoreID: 53},
+		{NodeID: 2, StoreID: 54},
+		{NodeID: 3, StoreID: 55},
+	}, []meta.RangeDescriptor{usersRange})
+	if err != nil {
+		t.Fatalf("build bootstrap manifest: %v", err)
+	}
+	if err := chronosruntime.WriteBootstrapManifest(bootstrapPath, manifest); err != nil {
+		t.Fatalf("write bootstrap manifest: %v", err)
+	}
+
+	node1, cancel1, done1 := startProcessNodeForTest(t, ProcessNodeConfig{
+		NodeID:            1,
+		DataDir:           filepath.Join(rootDir, "node-1"),
+		BootstrapPath:     bootstrapPath,
+		PGListenAddr:      "127.0.0.1:0",
+		ObservabilityAddr: "127.0.0.1:0",
+		ControlAddr:       "127.0.0.1:0",
+	})
+	t.Cleanup(func() {
+		cancel1()
+		waitProcessNodeDone(t, done1, "disconnect-node1")
+	})
+	node2, cancel2, done2 := startProcessNodeForTest(t, ProcessNodeConfig{
+		NodeID:            2,
+		DataDir:           filepath.Join(rootDir, "node-2"),
+		BootstrapPath:     bootstrapPath,
+		PGListenAddr:      "127.0.0.1:0",
+		ObservabilityAddr: "127.0.0.1:0",
+		ControlAddr:       "127.0.0.1:0",
+	})
+	t.Cleanup(func() {
+		cancel2()
+		waitProcessNodeDone(t, done2, "disconnect-node2")
+	})
+	node3, cancel3, done3 := startProcessNodeForTest(t, ProcessNodeConfig{
+		NodeID:            3,
+		DataDir:           filepath.Join(rootDir, "node-3"),
+		BootstrapPath:     bootstrapPath,
+		PGListenAddr:      "127.0.0.1:0",
+		ObservabilityAddr: "127.0.0.1:0",
+		ControlAddr:       "127.0.0.1:0",
+	})
+	t.Cleanup(func() {
+		cancel3()
+		waitProcessNodeDone(t, done3, "disconnect-node3")
+	})
+
+	if err := node2.host.Campaign(context.Background(), usersRange.RangeID); err != nil {
+		t.Fatalf("campaign disconnect leaseholder: %v", err)
+	}
+	waitForRangeLeader(t, node2.host, usersRange.RangeID, 54)
+
+	conn := openPGConn(t, node1.state.PGAddr)
+	if _, err := conn.Write(queryFrame("begin")); err != nil {
+		t.Fatalf("write begin: %v", err)
+	}
+	if got := frameTags(readFrames(t, conn, 2)); got != "CZ" {
+		t.Fatalf("begin frame tags = %q, want CZ", got)
+	}
+	if _, err := conn.Write(queryFrame("insert into users (id, name, email) values (11, 'carol', 'c@example.com')")); err != nil {
+		t.Fatalf("write insert before disconnect: %v", err)
+	}
+	if got := frameTags(readFrames(t, conn, 2)); got != "CZ" {
+		t.Fatalf("insert frame tags = %q, want CZ", got)
+	}
+	_ = conn.Close()
+
+	time.Sleep(200 * time.Millisecond)
+
+	checkConn := openPGConn(t, node3.state.PGAddr)
+	defer checkConn.Close()
+	if _, err := checkConn.Write(queryFrame("select id, name from users where id = 11")); err != nil {
+		t.Fatalf("write select after disconnect: %v", err)
+	}
+	checkFrames := readFrames(t, checkConn, 3)
+	if got := frameTags(checkFrames); got != "TCZ" {
+		t.Fatalf("disconnect check frames = %q, want TCZ", got)
+	}
+}
+
+func TestProcessNodeRejectsExplicitTransactionContention(t *testing.T) {
+	rootDir := t.TempDir()
+	bootstrapPath := filepath.Join(rootDir, "bootstrap.json")
+	usersRange := meta.RangeDescriptor{
+		RangeID:    68,
+		Generation: 1,
+		StartKey:   storage.GlobalTablePrimaryPrefix(7),
+		EndKey:     storage.GlobalTablePrimaryPrefix(8),
+		Replicas: []meta.ReplicaDescriptor{
+			{ReplicaID: 56, NodeID: 1, Role: meta.ReplicaRoleVoter},
+			{ReplicaID: 57, NodeID: 2, Role: meta.ReplicaRoleVoter},
+			{ReplicaID: 58, NodeID: 3, Role: meta.ReplicaRoleVoter},
+		},
+		LeaseholderReplicaID: 57,
+	}
+	manifest, err := chronosruntime.BuildBootstrapManifest("cluster-explicit-contention", []chronosruntime.BootstrapNode{
+		{NodeID: 1, StoreID: 56},
+		{NodeID: 2, StoreID: 57},
+		{NodeID: 3, StoreID: 58},
+	}, []meta.RangeDescriptor{usersRange})
+	if err != nil {
+		t.Fatalf("build bootstrap manifest: %v", err)
+	}
+	if err := chronosruntime.WriteBootstrapManifest(bootstrapPath, manifest); err != nil {
+		t.Fatalf("write bootstrap manifest: %v", err)
+	}
+
+	node1, cancel1, done1 := startProcessNodeForTest(t, ProcessNodeConfig{
+		NodeID:            1,
+		DataDir:           filepath.Join(rootDir, "node-1"),
+		BootstrapPath:     bootstrapPath,
+		PGListenAddr:      "127.0.0.1:0",
+		ObservabilityAddr: "127.0.0.1:0",
+		ControlAddr:       "127.0.0.1:0",
+	})
+	t.Cleanup(func() {
+		cancel1()
+		waitProcessNodeDone(t, done1, "contention-node1")
+	})
+	node2, cancel2, done2 := startProcessNodeForTest(t, ProcessNodeConfig{
+		NodeID:            2,
+		DataDir:           filepath.Join(rootDir, "node-2"),
+		BootstrapPath:     bootstrapPath,
+		PGListenAddr:      "127.0.0.1:0",
+		ObservabilityAddr: "127.0.0.1:0",
+		ControlAddr:       "127.0.0.1:0",
+	})
+	t.Cleanup(func() {
+		cancel2()
+		waitProcessNodeDone(t, done2, "contention-node2")
+	})
+	node3, cancel3, done3 := startProcessNodeForTest(t, ProcessNodeConfig{
+		NodeID:            3,
+		DataDir:           filepath.Join(rootDir, "node-3"),
+		BootstrapPath:     bootstrapPath,
+		PGListenAddr:      "127.0.0.1:0",
+		ObservabilityAddr: "127.0.0.1:0",
+		ControlAddr:       "127.0.0.1:0",
+	})
+	t.Cleanup(func() {
+		cancel3()
+		waitProcessNodeDone(t, done3, "contention-node3")
+	})
+
+	if err := node2.host.Campaign(context.Background(), usersRange.RangeID); err != nil {
+		t.Fatalf("campaign contention leaseholder: %v", err)
+	}
+	waitForRangeLeader(t, node2.host, usersRange.RangeID, 57)
+
+	conn1 := openPGConn(t, node1.state.PGAddr)
+	defer conn1.Close()
+	if _, err := conn1.Write(queryFrame("begin")); err != nil {
+		t.Fatalf("write begin on txn1: %v", err)
+	}
+	if got := frameTags(readFrames(t, conn1, 2)); got != "CZ" {
+		t.Fatalf("txn1 begin frame tags = %q, want CZ", got)
+	}
+	if _, err := conn1.Write(queryFrame("insert into users (id, name, email) values (21, 'alice', 'a@example.com')")); err != nil {
+		t.Fatalf("write insert on txn1: %v", err)
+	}
+	if got := frameTags(readFrames(t, conn1, 2)); got != "CZ" {
+		t.Fatalf("txn1 insert frame tags = %q, want CZ", got)
+	}
+
+	conn2 := openPGConn(t, node3.state.PGAddr)
+	defer conn2.Close()
+	if _, err := conn2.Write(queryFrame("begin")); err != nil {
+		t.Fatalf("write begin on txn2: %v", err)
+	}
+	if got := frameTags(readFrames(t, conn2, 2)); got != "CZ" {
+		t.Fatalf("txn2 begin frame tags = %q, want CZ", got)
+	}
+	if _, err := conn2.Write(queryFrame("insert into users (id, name, email) values (21, 'bob', 'b@example.com')")); err != nil {
+		t.Fatalf("write contended insert on txn2: %v", err)
+	}
+	contentionFrames := readFrames(t, conn2, 2)
+	if got := frameTags(contentionFrames); got != "EZ" || readyStatus(contentionFrames[1]) != byte(pgwire.TxFailedTransaction) {
+		t.Fatalf("contended insert frames = %q/%q, want EZ/E", got, readyStatus(contentionFrames[1]))
+	}
+	if _, err := conn2.Write(queryFrame("rollback")); err != nil {
+		t.Fatalf("write rollback on txn2: %v", err)
+	}
+	if got := frameTags(readFrames(t, conn2, 2)); got != "CZ" {
+		t.Fatalf("txn2 rollback frame tags = %q, want CZ", got)
+	}
+
+	if _, err := conn1.Write(queryFrame("commit")); err != nil {
+		t.Fatalf("write commit on txn1: %v", err)
+	}
+	if got := frameTags(readFrames(t, conn1, 2)); got != "CZ" {
+		t.Fatalf("txn1 commit frame tags = %q, want CZ", got)
+	}
+
+	checkConn := openPGConn(t, node2.state.PGAddr)
+	defer checkConn.Close()
+	if _, err := checkConn.Write(queryFrame("select id, name from users where id = 21")); err != nil {
+		t.Fatalf("write final select: %v", err)
+	}
+	checkFrames := readFrames(t, checkConn, 4)
+	if got := frameTags(checkFrames); got != "TDCZ" {
+		t.Fatalf("final contention check frames = %q, want TDCZ", got)
+	}
+	values, err := decodeDataRowFrame(checkFrames[1])
+	if err != nil {
+		t.Fatalf("decode final contention row: %v", err)
+	}
+	if len(values) != 2 || string(values[0]) != "21" || string(values[1]) != "alice" {
+		t.Fatalf("final row = %q/%q, want 21/alice", values[0], values[1])
+	}
+}
+
 func TestProcessNodeLoadsPersistedCustomCatalogAcrossRestart(t *testing.T) {
 	t.Parallel()
 
