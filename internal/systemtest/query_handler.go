@@ -81,7 +81,7 @@ func (h *runtimeQueryHandler) HandleSimpleQuery(ctx context.Context, query strin
 		result.CommandTag = fmt.Sprintf("SELECT %d", len(result.Rows))
 		return result, nil
 	case chronossql.InsertPlan:
-		if err := h.kv.Put(ctx, plan.Key, plan.Value); err != nil {
+		if err := h.kv.OnePhasePut(ctx, plan.Key, plan.Value); err != nil {
 			return pgwire.QueryResult{}, pgwire.Error{
 				Severity: "ERROR",
 				Code:     "XX000",

@@ -535,6 +535,9 @@ hardening, and a one-command seeded demo bootstrap.
 - [ ] 13.6 Wire the transaction coordinator into the live KV path
   including begin/heartbeat/commit/abort, lock acquisition, refresh/retry, and
   coordinator recovery in the normal request flow
+  - single-statement `INSERT` now routes through the transaction package's
+    one-phase commit path before writing to the live runtime; explicit session
+    transactions, retries, and recovery still remain
 - [ ] 13.7 Build the first real SQL executor slice
   that can run point lookups and inserts end-to-end through pgwire, the planner,
   KV routing, leases, transactions, and storage, returning real rows/results

@@ -3,6 +3,8 @@ package systemtest
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -11,6 +13,8 @@ import (
 	"github.com/VenkatGGG/ChronosDb/internal/hlc"
 	"github.com/VenkatGGG/ChronosDb/internal/meta"
 	chronosruntime "github.com/VenkatGGG/ChronosDb/internal/runtime"
+	"github.com/VenkatGGG/ChronosDb/internal/storage"
+	"github.com/VenkatGGG/ChronosDb/internal/txn"
 )
 
 type kvClient struct {
@@ -82,6 +86,10 @@ func (c *kvClient) GetLatest(ctx context.Context, key []byte) ([]byte, bool, err
 }
 
 func (c *kvClient) Put(ctx context.Context, key, value []byte) error {
+	return c.PutAt(ctx, key, hlc.Timestamp{WallTime: uint64(time.Now().UTC().UnixNano())}, value)
+}
+
+func (c *kvClient) PutAt(ctx context.Context, key []byte, ts hlc.Timestamp, value []byte) error {
 	desc, err := c.host.LookupRange(ctx, key)
 	if err != nil {
 		return err
@@ -90,7 +98,6 @@ func (c *kvClient) Put(ctx context.Context, key, value []byte) error {
 	if err != nil {
 		return err
 	}
-	ts := hlc.Timestamp{WallTime: uint64(time.Now().UTC().UnixNano())}
 	if targetNodeID == c.nodeID {
 		_, err := c.host.PutValueLocal(ctx, key, ts, value)
 		return err
@@ -100,6 +107,40 @@ func (c *kvClient) Put(ctx context.Context, key, value []byte) error {
 		Timestamp: ts,
 		Value:     value,
 	}, nil)
+}
+
+func (c *kvClient) OnePhasePut(ctx context.Context, key, value []byte) error {
+	desc, err := c.host.LookupRange(ctx, key)
+	if err != nil {
+		return err
+	}
+	now := hlc.Timestamp{WallTime: uint64(time.Now().UTC().UnixNano())}
+	record := txn.Record{
+		ID:       newTxnID(),
+		Status:   txn.StatusPending,
+		ReadTS:   now,
+		WriteTS:  now,
+		Priority: 1,
+	}
+	record, err = record.Anchor(desc.RangeID, now)
+	if err != nil {
+		return err
+	}
+	result, err := txn.OnePhaseCommit(txn.OnePhaseCommitRequest{
+		Txn: record,
+		Writes: []txn.PendingWrite{
+			{
+				Key:      append([]byte(nil), key...),
+				RangeID:  desc.RangeID,
+				Strength: storage.IntentStrengthExclusive,
+				Value:    append([]byte(nil), value...),
+			},
+		},
+	})
+	if err != nil {
+		return err
+	}
+	return c.PutAt(ctx, key, result.CommitTS, value)
 }
 
 func (c *kvClient) ScanRange(ctx context.Context, startKey, endKey []byte, startInclusive, endInclusive bool) ([]kvScanRow, error) {
@@ -176,6 +217,16 @@ func (c *kvClient) postJSON(ctx context.Context, nodeID uint64, path string, req
 		return nil
 	}
 	return json.NewDecoder(resp.Body).Decode(respBody)
+}
+
+func newTxnID() storage.TxnID {
+	var id storage.TxnID
+	if _, err := rand.Read(id[:]); err == nil {
+		return id
+	}
+	now := uint64(time.Now().UTC().UnixNano())
+	binary.BigEndian.PutUint64(id[:8], now)
+	return id
 }
 
 func leaseholderNodeIDForRange(desc meta.RangeDescriptor) (uint64, error) {
