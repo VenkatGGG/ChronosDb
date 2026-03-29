@@ -105,7 +105,8 @@ func defaultSystemTestCatalog() (*chronossql.Catalog, error) {
 		Columns: []chronossql.ColumnDescriptor{
 			{ID: 1, Name: "id", Type: chronossql.ColumnTypeInt},
 			{ID: 2, Name: "user_id", Type: chronossql.ColumnTypeInt},
-			{ID: 3, Name: "sales", Type: chronossql.ColumnTypeInt},
+			{ID: 3, Name: "region", Type: chronossql.ColumnTypeString},
+			{ID: 4, Name: "sales", Type: chronossql.ColumnTypeInt},
 		},
 		PrimaryKey: []string{"id"},
 		Stats: chronossql.TableStats{

@@ -543,10 +543,12 @@ hardening, and a one-command seeded demo bootstrap.
   KV routing, leases, transactions, and storage, returning real rows/results
   - point `SELECT`, simple range-scan `SELECT`, and `INSERT` now execute through
     the live runtime and return real rows/results; transaction wiring and
-    broader operator coverage remain
+    broader operator coverage still remains only around explicit transactions
 - [ ] 13.8 Extend SQL execution to distributed scans, aggregates, and joins
   by executing the physical flow operators built in `internal/sql/flow.go`
   across leaseholders and gateway merge stages
+  - aggregate and hash-join queries now execute over live distributed scan
+    results instead of stopping at flow planning
 - [ ] 13.9 Persist catalog and SQL descriptors in the cluster
   so the demo no longer depends on the hardcoded `users` and `orders` tables in
   the systemtest catalog bootstrap path

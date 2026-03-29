@@ -242,6 +242,166 @@ func TestProcessNodeExecutesRangeScanAcrossLeaseholders(t *testing.T) {
 	}
 }
 
+func TestProcessNodeExecutesAggregateAndJoinQueries(t *testing.T) {
+	t.Parallel()
+
+	rootDir := t.TempDir()
+	bootstrapPath := filepath.Join(rootDir, "bootstrap.json")
+	usersRange := meta.RangeDescriptor{
+		RangeID:    61,
+		Generation: 1,
+		StartKey:   storage.GlobalTablePrimaryPrefix(7),
+		EndKey:     storage.GlobalTablePrimaryPrefix(8),
+		Replicas: []meta.ReplicaDescriptor{
+			{ReplicaID: 31, NodeID: 1, Role: meta.ReplicaRoleVoter},
+			{ReplicaID: 32, NodeID: 2, Role: meta.ReplicaRoleVoter},
+			{ReplicaID: 33, NodeID: 3, Role: meta.ReplicaRoleVoter},
+		},
+		LeaseholderReplicaID: 31,
+	}
+	ordersRange := meta.RangeDescriptor{
+		RangeID:    62,
+		Generation: 1,
+		StartKey:   storage.GlobalTablePrimaryPrefix(9),
+		EndKey:     storage.GlobalTablePrimaryPrefix(10),
+		Replicas: []meta.ReplicaDescriptor{
+			{ReplicaID: 34, NodeID: 1, Role: meta.ReplicaRoleVoter},
+			{ReplicaID: 35, NodeID: 2, Role: meta.ReplicaRoleVoter},
+			{ReplicaID: 36, NodeID: 3, Role: meta.ReplicaRoleVoter},
+		},
+		LeaseholderReplicaID: 36,
+	}
+	manifest, err := chronosruntime.BuildBootstrapManifest("cluster-aggregate-join", []chronosruntime.BootstrapNode{
+		{NodeID: 1, StoreID: 31},
+		{NodeID: 2, StoreID: 32},
+		{NodeID: 3, StoreID: 33},
+	}, []meta.RangeDescriptor{usersRange, ordersRange})
+	if err != nil {
+		t.Fatalf("build bootstrap manifest: %v", err)
+	}
+	if err := chronosruntime.WriteBootstrapManifest(bootstrapPath, manifest); err != nil {
+		t.Fatalf("write bootstrap manifest: %v", err)
+	}
+
+	node1, cancel1, done1 := startProcessNodeForTest(t, ProcessNodeConfig{
+		NodeID:            1,
+		DataDir:           filepath.Join(rootDir, "node-1"),
+		BootstrapPath:     bootstrapPath,
+		PGListenAddr:      "127.0.0.1:0",
+		ObservabilityAddr: "127.0.0.1:0",
+		ControlAddr:       "127.0.0.1:0",
+	})
+	t.Cleanup(func() {
+		cancel1()
+		waitProcessNodeDone(t, done1, "node1")
+	})
+	node2, cancel2, done2 := startProcessNodeForTest(t, ProcessNodeConfig{
+		NodeID:            2,
+		DataDir:           filepath.Join(rootDir, "node-2"),
+		BootstrapPath:     bootstrapPath,
+		PGListenAddr:      "127.0.0.1:0",
+		ObservabilityAddr: "127.0.0.1:0",
+		ControlAddr:       "127.0.0.1:0",
+	})
+	t.Cleanup(func() {
+		cancel2()
+		waitProcessNodeDone(t, done2, "node2")
+	})
+	node3, cancel3, done3 := startProcessNodeForTest(t, ProcessNodeConfig{
+		NodeID:            3,
+		DataDir:           filepath.Join(rootDir, "node-3"),
+		BootstrapPath:     bootstrapPath,
+		PGListenAddr:      "127.0.0.1:0",
+		ObservabilityAddr: "127.0.0.1:0",
+		ControlAddr:       "127.0.0.1:0",
+	})
+	t.Cleanup(func() {
+		cancel3()
+		waitProcessNodeDone(t, done3, "node3")
+	})
+
+	if err := node1.host.Campaign(context.Background(), usersRange.RangeID); err != nil {
+		t.Fatalf("campaign users range leaseholder: %v", err)
+	}
+	if err := node3.host.Campaign(context.Background(), ordersRange.RangeID); err != nil {
+		t.Fatalf("campaign orders range leaseholder: %v", err)
+	}
+	waitForRangeLeader(t, node1.host, usersRange.RangeID, 31)
+	waitForRangeLeader(t, node3.host, ordersRange.RangeID, 36)
+
+	conn := openPGConn(t, node2.state.PGAddr)
+	defer conn.Close()
+	for _, query := range []string{
+		"insert into users (id, name, email) values (7, 'alice', 'a@example.com')",
+		"insert into users (id, name, email) values (8, 'bob', 'b@example.com')",
+		"insert into orders (id, user_id, region, sales) values (101, 7, 'us-east', 50)",
+		"insert into orders (id, user_id, region, sales) values (102, 7, 'us-east', 25)",
+		"insert into orders (id, user_id, region, sales) values (103, 8, 'us-west', 80)",
+	} {
+		if _, err := conn.Write(queryFrame(query)); err != nil {
+			t.Fatalf("write insert %q: %v", query, err)
+		}
+		if got := frameTags(readFrames(t, conn, 2)); got != "CZ" {
+			t.Fatalf("insert frame tags for %q = %q, want CZ", query, got)
+		}
+	}
+
+	aggregateConn := openPGConn(t, node2.state.PGAddr)
+	defer aggregateConn.Close()
+	if _, err := aggregateConn.Write(queryFrame("select region, sum(sales) from orders group by region")); err != nil {
+		t.Fatalf("write aggregate query: %v", err)
+	}
+	aggregateFrames := readFramesUntilReady(t, aggregateConn)
+	if got := frameTags(aggregateFrames); got != "TDDCZ" {
+		t.Fatalf("aggregate frame tags = %q, want TDDCZ", got)
+	}
+	aggregateRow1, err := decodeDataRowFrame(aggregateFrames[1])
+	if err != nil {
+		t.Fatalf("decode aggregate row 1: %v", err)
+	}
+	aggregateRow2, err := decodeDataRowFrame(aggregateFrames[2])
+	if err != nil {
+		t.Fatalf("decode aggregate row 2: %v", err)
+	}
+	if len(aggregateRow1) != 2 || string(aggregateRow1[0]) != "us-east" || string(aggregateRow1[1]) != "75" {
+		t.Fatalf("aggregate row 1 = %q/%q, want us-east/75", aggregateRow1[0], aggregateRow1[1])
+	}
+	if len(aggregateRow2) != 2 || string(aggregateRow2[0]) != "us-west" || string(aggregateRow2[1]) != "80" {
+		t.Fatalf("aggregate row 2 = %q/%q, want us-west/80", aggregateRow2[0], aggregateRow2[1])
+	}
+
+	joinConn := openPGConn(t, node2.state.PGAddr)
+	defer joinConn.Close()
+	if _, err := joinConn.Write(queryFrame("select u.name, o.sales from users u join orders o on u.id = o.user_id")); err != nil {
+		t.Fatalf("write join query: %v", err)
+	}
+	joinFrames := readFramesUntilReady(t, joinConn)
+	if got := frameTags(joinFrames); got != "TDDDCZ" {
+		t.Fatalf("join frame tags = %q, want TDDDCZ", got)
+	}
+	joinRow1, err := decodeDataRowFrame(joinFrames[1])
+	if err != nil {
+		t.Fatalf("decode join row 1: %v", err)
+	}
+	joinRow2, err := decodeDataRowFrame(joinFrames[2])
+	if err != nil {
+		t.Fatalf("decode join row 2: %v", err)
+	}
+	joinRow3, err := decodeDataRowFrame(joinFrames[3])
+	if err != nil {
+		t.Fatalf("decode join row 3: %v", err)
+	}
+	if len(joinRow1) != 2 || string(joinRow1[0]) != "alice" || string(joinRow1[1]) != "50" {
+		t.Fatalf("join row 1 = %q/%q, want alice/50", joinRow1[0], joinRow1[1])
+	}
+	if len(joinRow2) != 2 || string(joinRow2[0]) != "alice" || string(joinRow2[1]) != "25" {
+		t.Fatalf("join row 2 = %q/%q, want alice/25", joinRow2[0], joinRow2[1])
+	}
+	if len(joinRow3) != 2 || string(joinRow3[0]) != "bob" || string(joinRow3[1]) != "80" {
+		t.Fatalf("join row 3 = %q/%q, want bob/80", joinRow3[0], joinRow3[1])
+	}
+}
+
 func waitForRangeLeader(t *testing.T, host *chronosruntime.Host, rangeID, leaderReplicaID uint64) {
 	t.Helper()
 
