@@ -168,6 +168,22 @@ func (s *StateMachine) StageEntries(batch *storage.WriteBatch, entries []raftpb.
 				if cmd.Put.Timestamp.Compare(delta.SafeReadFrontier) > 0 {
 					delta.SafeReadFrontier = cmd.Put.Timestamp
 				}
+			case CommandTypePutIntent:
+				if err := batch.PutIntent(cmd.Intent.LogicalKey, cmd.Intent.Intent); err != nil {
+					return ApplyDelta{}, err
+				}
+			case CommandTypeDeleteIntent:
+				if err := batch.DeleteIntent(cmd.ClearIntent.LogicalKey); err != nil {
+					return ApplyDelta{}, err
+				}
+			case CommandTypeSetTxnRecord:
+				payload, err := cmd.TxnRecord.Record.MarshalBinary()
+				if err != nil {
+					return ApplyDelta{}, err
+				}
+				if err := batch.SetTxnRecord(cmd.TxnRecord.Record.ID, payload); err != nil {
+					return ApplyDelta{}, err
+				}
 			case CommandTypeSetLease:
 				if err := batch.SetRangeLease(s.rangeID, cmd.Lease.Record); err != nil {
 					return ApplyDelta{}, err

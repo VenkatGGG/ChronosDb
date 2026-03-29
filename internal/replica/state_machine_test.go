@@ -11,6 +11,7 @@ import (
 	"github.com/VenkatGGG/ChronosDb/internal/lease"
 	"github.com/VenkatGGG/ChronosDb/internal/meta"
 	"github.com/VenkatGGG/ChronosDb/internal/storage"
+	"github.com/VenkatGGG/ChronosDb/internal/txn"
 	"github.com/cockroachdb/pebble/vfs"
 	raftpb "go.etcd.io/raft/v3/raftpb"
 )
@@ -87,6 +88,98 @@ func TestStageEntriesAppliesWritesAndLease(t *testing.T) {
 	}
 	if !bytes.Equal(got, []byte("value")) {
 		t.Fatalf("value = %q, want %q", got, []byte("value"))
+	}
+}
+
+func TestStageEntriesAppliesIntentAndTxnRecord(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	engine, err := storage.Open(ctx, storage.Options{
+		Dir: "replica-stage-intent-txn-test",
+		FS:  vfs.NewMem(),
+	})
+	if err != nil {
+		t.Fatalf("open engine: %v", err)
+	}
+	defer engine.Close()
+	if err := engine.Bootstrap(ctx, storage.StoreIdent{ClusterID: "cluster-a", NodeID: 1, StoreID: 1}); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+
+	stateMachine, err := OpenStateMachine(1, 1, engine)
+	if err != nil {
+		t.Fatalf("open state machine: %v", err)
+	}
+	intent := storage.Intent{
+		TxnID:          storage.TxnID{1, 2, 3, 4},
+		Epoch:          1,
+		WriteTimestamp: hlc.Timestamp{WallTime: 120, Logical: 1},
+		Strength:       storage.IntentStrengthExclusive,
+		Value:          []byte("provisional"),
+	}
+	intentPayload, err := Command{
+		Version: 1,
+		Type:    CommandTypePutIntent,
+		Intent: &PutIntent{
+			LogicalKey: storage.GlobalTablePrimaryKey(7, []byte("alice")),
+			Intent:     intent,
+		},
+	}.Marshal()
+	if err != nil {
+		t.Fatalf("marshal put intent command: %v", err)
+	}
+	record := txn.Record{
+		ID:              storage.TxnID{1, 2, 3, 4},
+		Status:          txn.StatusPending,
+		ReadTS:          hlc.Timestamp{WallTime: 110, Logical: 0},
+		WriteTS:         hlc.Timestamp{WallTime: 120, Logical: 1},
+		AnchorRangeID:   1,
+		TouchedRanges:   []uint64{1},
+		LastHeartbeatTS: hlc.Timestamp{WallTime: 121, Logical: 0},
+	}
+	recordPayload, err := Command{
+		Version: 1,
+		Type:    CommandTypeSetTxnRecord,
+		TxnRecord: &SetTxnRecord{
+			Record: record,
+		},
+	}.Marshal()
+	if err != nil {
+		t.Fatalf("marshal txn record command: %v", err)
+	}
+
+	batch := engine.NewWriteBatch()
+	defer batch.Close()
+	delta, err := stateMachine.StageEntries(batch, []raftpb.Entry{
+		{Index: 2, Type: raftpb.EntryNormal, Data: intentPayload},
+		{Index: 3, Type: raftpb.EntryNormal, Data: recordPayload},
+	})
+	if err != nil {
+		t.Fatalf("stage entries: %v", err)
+	}
+	if err := batch.Commit(true); err != nil {
+		t.Fatalf("commit batch: %v", err)
+	}
+	stateMachine.CommitApply(delta)
+
+	gotIntent, err := engine.GetIntent(ctx, storage.GlobalTablePrimaryKey(7, []byte("alice")))
+	if err != nil {
+		t.Fatalf("get intent: %v", err)
+	}
+	if gotIntent.TxnID != intent.TxnID || !bytes.Equal(gotIntent.Value, intent.Value) {
+		t.Fatalf("intent = %+v, want %+v", gotIntent, intent)
+	}
+	recordValue, err := engine.GetRaw(ctx, storage.GlobalTxnRecordKey(record.ID))
+	if err != nil {
+		t.Fatalf("get txn record raw: %v", err)
+	}
+	var decoded txn.Record
+	if err := decoded.UnmarshalBinary(recordValue); err != nil {
+		t.Fatalf("decode txn record: %v", err)
+	}
+	if decoded.Status != record.Status || decoded.AnchorRangeID != record.AnchorRangeID {
+		t.Fatalf("txn record = %+v, want %+v", decoded, record)
 	}
 }
 

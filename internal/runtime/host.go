@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -14,6 +15,8 @@ import (
 	"github.com/VenkatGGG/ChronosDb/internal/multiraft"
 	"github.com/VenkatGGG/ChronosDb/internal/replica"
 	"github.com/VenkatGGG/ChronosDb/internal/storage"
+	"github.com/VenkatGGG/ChronosDb/internal/txn"
+	"github.com/cockroachdb/pebble"
 	"github.com/cockroachdb/pebble/vfs"
 	raftpb "go.etcd.io/raft/v3/raftpb"
 )
@@ -289,6 +292,151 @@ func (h *Host) PutValueLocal(ctx context.Context, key []byte, ts hlc.Timestamp, 
 		return meta.RangeDescriptor{}, err
 	}
 	return desc, nil
+}
+
+// PutIntentLocal proposes one provisional intent on a locally hosted range.
+func (h *Host) PutIntentLocal(ctx context.Context, key []byte, intent storage.Intent) (meta.RangeDescriptor, error) {
+	h.mu.Lock()
+	desc, err := h.catalog.Lookup(ctx, key)
+	if err != nil {
+		h.mu.Unlock()
+		return meta.RangeDescriptor{}, err
+	}
+	if !descriptorReplicaOnNode(desc, h.ident.NodeID) {
+		h.mu.Unlock()
+		return meta.RangeDescriptor{}, ErrRangeNotHosted
+	}
+	payload, err := replica.Command{
+		Version: 1,
+		Type:    replica.CommandTypePutIntent,
+		Intent: &replica.PutIntent{
+			LogicalKey: append([]byte(nil), key...),
+			Intent:     intent,
+		},
+	}.Marshal()
+	if err != nil {
+		h.mu.Unlock()
+		return meta.RangeDescriptor{}, err
+	}
+	if err := h.scheduler.Propose(desc.RangeID, payload); err != nil {
+		h.mu.Unlock()
+		return meta.RangeDescriptor{}, err
+	}
+	outbound, err := h.processReadyLocked()
+	if err != nil {
+		h.mu.Unlock()
+		return meta.RangeDescriptor{}, err
+	}
+	h.mu.Unlock()
+	if err := h.dispatchOutbound(ctx, outbound); err != nil {
+		return meta.RangeDescriptor{}, err
+	}
+	if err := h.waitForIntent(ctx, key, intent); err != nil {
+		return meta.RangeDescriptor{}, err
+	}
+	return desc, nil
+}
+
+// DeleteIntentLocal removes one provisional intent from a locally hosted range.
+func (h *Host) DeleteIntentLocal(ctx context.Context, key []byte) (meta.RangeDescriptor, error) {
+	h.mu.Lock()
+	desc, err := h.catalog.Lookup(ctx, key)
+	if err != nil {
+		h.mu.Unlock()
+		return meta.RangeDescriptor{}, err
+	}
+	if !descriptorReplicaOnNode(desc, h.ident.NodeID) {
+		h.mu.Unlock()
+		return meta.RangeDescriptor{}, ErrRangeNotHosted
+	}
+	payload, err := replica.Command{
+		Version: 1,
+		Type:    replica.CommandTypeDeleteIntent,
+		ClearIntent: &replica.DeleteIntent{
+			LogicalKey: append([]byte(nil), key...),
+		},
+	}.Marshal()
+	if err != nil {
+		h.mu.Unlock()
+		return meta.RangeDescriptor{}, err
+	}
+	if err := h.scheduler.Propose(desc.RangeID, payload); err != nil {
+		h.mu.Unlock()
+		return meta.RangeDescriptor{}, err
+	}
+	outbound, err := h.processReadyLocked()
+	if err != nil {
+		h.mu.Unlock()
+		return meta.RangeDescriptor{}, err
+	}
+	h.mu.Unlock()
+	if err := h.dispatchOutbound(ctx, outbound); err != nil {
+		return meta.RangeDescriptor{}, err
+	}
+	if err := h.waitForIntentGone(ctx, key); err != nil {
+		return meta.RangeDescriptor{}, err
+	}
+	return desc, nil
+}
+
+// PutTxnRecordLocal stores one durable transaction record on its system-span anchor range.
+func (h *Host) PutTxnRecordLocal(ctx context.Context, record txn.Record) (meta.RangeDescriptor, error) {
+	if err := record.Validate(); err != nil {
+		return meta.RangeDescriptor{}, err
+	}
+	key := storage.GlobalTxnRecordKey(record.ID)
+
+	h.mu.Lock()
+	desc, err := h.catalog.Lookup(ctx, key)
+	if err != nil {
+		h.mu.Unlock()
+		return meta.RangeDescriptor{}, err
+	}
+	if !descriptorReplicaOnNode(desc, h.ident.NodeID) {
+		h.mu.Unlock()
+		return meta.RangeDescriptor{}, ErrRangeNotHosted
+	}
+	payload, err := replica.Command{
+		Version: 1,
+		Type:    replica.CommandTypeSetTxnRecord,
+		TxnRecord: &replica.SetTxnRecord{
+			Record: record,
+		},
+	}.Marshal()
+	if err != nil {
+		h.mu.Unlock()
+		return meta.RangeDescriptor{}, err
+	}
+	if err := h.scheduler.Propose(desc.RangeID, payload); err != nil {
+		h.mu.Unlock()
+		return meta.RangeDescriptor{}, err
+	}
+	outbound, err := h.processReadyLocked()
+	if err != nil {
+		h.mu.Unlock()
+		return meta.RangeDescriptor{}, err
+	}
+	h.mu.Unlock()
+	if err := h.dispatchOutbound(ctx, outbound); err != nil {
+		return meta.RangeDescriptor{}, err
+	}
+	if err := h.waitForTxnRecord(ctx, record.ID, record); err != nil {
+		return meta.RangeDescriptor{}, err
+	}
+	return desc, nil
+}
+
+// GetTxnRecordLocal loads one durable transaction record from the local store.
+func (h *Host) GetTxnRecordLocal(ctx context.Context, txnID storage.TxnID) (txn.Record, error) {
+	payload, err := h.engine.GetRaw(ctx, storage.GlobalTxnRecordKey(txnID))
+	if err != nil {
+		return txn.Record{}, err
+	}
+	var record txn.Record
+	if err := record.UnmarshalBinary(payload); err != nil {
+		return txn.Record{}, err
+	}
+	return record, nil
 }
 
 // Campaign forces the local replica to begin an election for the specified range.
@@ -628,6 +776,100 @@ func (h *Host) waitForMVCCValue(ctx context.Context, key []byte, ts hlc.Timestam
 		case <-ticker.C:
 		}
 	}
+}
+
+func (h *Host) waitForIntent(ctx context.Context, key []byte, expected storage.Intent) error {
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		intent, err := h.engine.GetIntent(ctx, key)
+		switch {
+		case err == nil:
+			if intent.TxnID == expected.TxnID &&
+				intent.Epoch == expected.Epoch &&
+				intent.WriteTimestamp == expected.WriteTimestamp &&
+				intent.Strength == expected.Strength &&
+				bytes.Equal(intent.Value, expected.Value) {
+				return nil
+			}
+		case errors.Is(err, storage.ErrIntentNotFound):
+		default:
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
+func (h *Host) waitForIntentGone(ctx context.Context, key []byte) error {
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		_, err := h.engine.GetIntent(ctx, key)
+		switch {
+		case errors.Is(err, storage.ErrIntentNotFound):
+			return nil
+		case err != nil:
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
+func (h *Host) waitForTxnRecord(ctx context.Context, txnID storage.TxnID, expected txn.Record) error {
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		record, err := h.GetTxnRecordLocal(ctx, txnID)
+		switch {
+		case err == nil:
+			if recordsEqual(record, expected) {
+				return nil
+			}
+		default:
+			if errors.Is(err, pebble.ErrNotFound) {
+				// Wait for the replicated system key to appear.
+			} else {
+				return err
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
+func recordsEqual(left, right txn.Record) bool {
+	if left.ID != right.ID ||
+		left.Status != right.Status ||
+		left.ReadTS != right.ReadTS ||
+		left.WriteTS != right.WriteTS ||
+		left.MinCommitTS != right.MinCommitTS ||
+		left.Epoch != right.Epoch ||
+		left.Priority != right.Priority ||
+		left.AnchorRangeID != right.AnchorRangeID ||
+		left.LastHeartbeatTS != right.LastHeartbeatTS ||
+		left.DeadlineTS != right.DeadlineTS {
+		return false
+	}
+	if len(left.TouchedRanges) != len(right.TouchedRanges) {
+		return false
+	}
+	for i := range left.TouchedRanges {
+		if left.TouchedRanges[i] != right.TouchedRanges[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func readLeaseholderValue(ctx context.Context, replicaState *replica.StateMachine, key []byte, ts hlc.Timestamp) ([]byte, error) {

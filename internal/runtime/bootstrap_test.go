@@ -47,8 +47,11 @@ func TestBuildBootstrapManifestAndSeedHost(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build bootstrap manifest: %v", err)
 	}
-	if len(manifest.Meta1) != 1 || len(manifest.Meta2) != 2 {
-		t.Fatalf("manifest layout = %+v, want 1 meta1 and 2 meta2", manifest)
+	if len(manifest.Meta1) != 1 || len(manifest.Meta2) != 3 {
+		t.Fatalf("manifest layout = %+v, want 1 meta1 and 3 meta2", manifest)
+	}
+	if manifest.Meta2[0].StartKey == nil || string(manifest.Meta2[0].StartKey) != string(storage.GlobalSystemPrefix()) {
+		t.Fatalf("system range start = %q, want %q", manifest.Meta2[0].StartKey, storage.GlobalSystemPrefix())
 	}
 
 	dataDir := t.TempDir()
@@ -76,6 +79,13 @@ func TestBuildBootstrapManifestAndSeedHost(t *testing.T) {
 	if desc.RangeID != 10 {
 		t.Fatalf("meta2 user range = %d, want 10", desc.RangeID)
 	}
+	systemDesc, err := host.catalog.LookupMeta2(context.Background(), storage.GlobalTxnRecordKey(storage.TxnID{9, 9, 9}))
+	if err != nil {
+		t.Fatalf("lookup meta2 system range: %v", err)
+	}
+	if systemDesc.RangeID != manifest.Meta2[0].RangeID {
+		t.Fatalf("system range = %d, want %d", systemDesc.RangeID, manifest.Meta2[0].RangeID)
+	}
 	metaDesc, err := host.catalog.Lookup(context.Background(), storage.Meta2DescriptorKey([]byte("n")))
 	if err != nil {
 		t.Fatalf("lookup meta1 descriptor: %v", err)
@@ -87,8 +97,8 @@ func TestBuildBootstrapManifestAndSeedHost(t *testing.T) {
 	if err != nil {
 		t.Fatalf("hosted descriptors: %v", err)
 	}
-	if len(descs) != 3 {
-		t.Fatalf("hosted descriptors = %d, want 3 (meta1 + 2 local ranges)", len(descs))
+	if len(descs) != 4 {
+		t.Fatalf("hosted descriptors = %d, want 4 (meta1 + system + 2 local ranges)", len(descs))
 	}
 	leaseRecord, err := host.engine.LoadRangeLease(10)
 	if err != nil {

@@ -16,6 +16,9 @@ var (
 	prefixMVCCLocal  = []byte("/mvcc/local/")
 	prefixMeta1      = []byte("/mvcc/global/meta1/")
 	prefixMeta2      = []byte("/mvcc/global/meta2/")
+	prefixSystem     = []byte("/mvcc/global/system/")
+	prefixSystemTxn  = []byte("/mvcc/global/system/txn/")
+	prefixTable      = []byte("/mvcc/global/table/")
 
 	storeIdentKey   = []byte("/mvcc/local/store/ident")
 	storeVersionKey = []byte("/mvcc/local/store/version")
@@ -104,6 +107,21 @@ func Meta2Prefix() []byte {
 	return bytes.Clone(prefixMeta2)
 }
 
+// GlobalSystemPrefix returns the logical key prefix for replicated system records.
+func GlobalSystemPrefix() []byte {
+	return bytes.Clone(prefixSystem)
+}
+
+// GlobalSystemTxnPrefix returns the logical key prefix for transaction records.
+func GlobalSystemTxnPrefix() []byte {
+	return bytes.Clone(prefixSystemTxn)
+}
+
+// GlobalTablePrefix returns the logical key prefix shared by all user table/index data.
+func GlobalTablePrefix() []byte {
+	return bytes.Clone(prefixTable)
+}
+
 // Meta1DescriptorKey returns the meta1 key for the descriptor whose end key is endKey.
 func Meta1DescriptorKey(endKey []byte) []byte {
 	return metaKey(prefixMeta1, endKey)
@@ -134,6 +152,11 @@ func GlobalTablePrimaryPrefix(tableID uint64) []byte {
 // GlobalTablePrimaryKey returns the logical MVCC key for a table primary row.
 func GlobalTablePrimaryKey(tableID uint64, encodedPrimaryKey []byte) []byte {
 	return appendEscapedBytes(GlobalTablePrimaryPrefix(tableID), encodedPrimaryKey)
+}
+
+// GlobalTxnRecordKey returns the logical key for one durable transaction record.
+func GlobalTxnRecordKey(txnID TxnID) []byte {
+	return append(bytes.Clone(prefixSystemTxn), txnID[:]...)
 }
 
 // GlobalTableIndexKey returns the logical MVCC key for a table secondary index row.

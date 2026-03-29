@@ -8,6 +8,8 @@ import (
 	"github.com/VenkatGGG/ChronosDb/internal/hlc"
 	"github.com/VenkatGGG/ChronosDb/internal/lease"
 	"github.com/VenkatGGG/ChronosDb/internal/meta"
+	"github.com/VenkatGGG/ChronosDb/internal/storage"
+	"github.com/VenkatGGG/ChronosDb/internal/txn"
 )
 
 // CommandType identifies the replicated command payload carried in a log entry.
@@ -15,6 +17,9 @@ type CommandType string
 
 const (
 	CommandTypePutValue         CommandType = "put_value"
+	CommandTypePutIntent        CommandType = "put_intent"
+	CommandTypeDeleteIntent     CommandType = "delete_intent"
+	CommandTypeSetTxnRecord     CommandType = "set_txn_record"
 	CommandTypeSetLease         CommandType = "set_lease"
 	CommandTypeSetClosedTS      CommandType = "set_closed_timestamp"
 	CommandTypeUpdateDescriptor CommandType = "update_descriptor"
@@ -24,14 +29,17 @@ const (
 
 // Command is a versioned replica state-machine command.
 type Command struct {
-	Version    uint8             `json:"version"`
-	Type       CommandType       `json:"type"`
-	Put        *PutValue         `json:"put,omitempty"`
-	Lease      *SetLease         `json:"lease,omitempty"`
-	ClosedTS   *SetClosedTS      `json:"closed_timestamp,omitempty"`
-	Descriptor *UpdateDescriptor `json:"descriptor,omitempty"`
-	Split      *SplitRange       `json:"split,omitempty"`
-	Replica    *ChangeReplicas   `json:"replica,omitempty"`
+	Version     uint8             `json:"version"`
+	Type        CommandType       `json:"type"`
+	Put         *PutValue         `json:"put,omitempty"`
+	Intent      *PutIntent        `json:"intent,omitempty"`
+	ClearIntent *DeleteIntent     `json:"clear_intent,omitempty"`
+	TxnRecord   *SetTxnRecord     `json:"txn_record,omitempty"`
+	Lease       *SetLease         `json:"lease,omitempty"`
+	ClosedTS    *SetClosedTS      `json:"closed_timestamp,omitempty"`
+	Descriptor  *UpdateDescriptor `json:"descriptor,omitempty"`
+	Split       *SplitRange       `json:"split,omitempty"`
+	Replica     *ChangeReplicas   `json:"replica,omitempty"`
 }
 
 // PutValue writes one committed MVCC value.
@@ -39,6 +47,22 @@ type PutValue struct {
 	LogicalKey []byte        `json:"logical_key"`
 	Timestamp  hlc.Timestamp `json:"timestamp"`
 	Value      []byte        `json:"value"`
+}
+
+// PutIntent writes one provisional intent at the logical key's metadata record.
+type PutIntent struct {
+	LogicalKey []byte         `json:"logical_key"`
+	Intent     storage.Intent `json:"intent"`
+}
+
+// DeleteIntent removes the provisional intent at the logical key's metadata record.
+type DeleteIntent struct {
+	LogicalKey []byte `json:"logical_key"`
+}
+
+// SetTxnRecord stores one durable transaction record in the replicated system keyspace.
+type SetTxnRecord struct {
+	Record txn.Record `json:"record"`
 }
 
 // SetLease installs a new lease record.
@@ -114,7 +138,7 @@ func (c Command) Validate() error {
 	}
 	switch c.Type {
 	case CommandTypePutValue:
-		if c.Put == nil || c.Lease != nil || c.ClosedTS != nil || c.Descriptor != nil || c.Split != nil || c.Replica != nil {
+		if c.Put == nil || c.Intent != nil || c.ClearIntent != nil || c.TxnRecord != nil || c.Lease != nil || c.ClosedTS != nil || c.Descriptor != nil || c.Split != nil || c.Replica != nil {
 			return fmt.Errorf("command: put_value payload mismatch")
 		}
 		if len(c.Put.LogicalKey) == 0 {
@@ -123,29 +147,53 @@ func (c Command) Validate() error {
 		if c.Put.Timestamp.IsZero() {
 			return fmt.Errorf("command: put timestamp required")
 		}
+	case CommandTypePutIntent:
+		if c.Intent == nil || c.Put != nil || c.ClearIntent != nil || c.TxnRecord != nil || c.Lease != nil || c.ClosedTS != nil || c.Descriptor != nil || c.Split != nil || c.Replica != nil {
+			return fmt.Errorf("command: put_intent payload mismatch")
+		}
+		if len(c.Intent.LogicalKey) == 0 {
+			return fmt.Errorf("command: intent logical key required")
+		}
+		if err := c.Intent.Intent.Validate(); err != nil {
+			return err
+		}
+	case CommandTypeDeleteIntent:
+		if c.ClearIntent == nil || c.Put != nil || c.Intent != nil || c.TxnRecord != nil || c.Lease != nil || c.ClosedTS != nil || c.Descriptor != nil || c.Split != nil || c.Replica != nil {
+			return fmt.Errorf("command: delete_intent payload mismatch")
+		}
+		if len(c.ClearIntent.LogicalKey) == 0 {
+			return fmt.Errorf("command: clear intent logical key required")
+		}
+	case CommandTypeSetTxnRecord:
+		if c.TxnRecord == nil || c.Put != nil || c.Intent != nil || c.ClearIntent != nil || c.Lease != nil || c.ClosedTS != nil || c.Descriptor != nil || c.Split != nil || c.Replica != nil {
+			return fmt.Errorf("command: set_txn_record payload mismatch")
+		}
+		if err := c.TxnRecord.Record.Validate(); err != nil {
+			return err
+		}
 	case CommandTypeSetLease:
-		if c.Lease == nil || c.Put != nil || c.ClosedTS != nil || c.Descriptor != nil || c.Split != nil || c.Replica != nil {
+		if c.Lease == nil || c.Put != nil || c.Intent != nil || c.ClearIntent != nil || c.TxnRecord != nil || c.ClosedTS != nil || c.Descriptor != nil || c.Split != nil || c.Replica != nil {
 			return fmt.Errorf("command: set_lease payload mismatch")
 		}
 		if err := c.Lease.Record.Validate(); err != nil {
 			return err
 		}
 	case CommandTypeSetClosedTS:
-		if c.ClosedTS == nil || c.Put != nil || c.Lease != nil || c.Descriptor != nil || c.Split != nil || c.Replica != nil {
+		if c.ClosedTS == nil || c.Put != nil || c.Intent != nil || c.ClearIntent != nil || c.TxnRecord != nil || c.Lease != nil || c.Descriptor != nil || c.Split != nil || c.Replica != nil {
 			return fmt.Errorf("command: set_closed_timestamp payload mismatch")
 		}
 		if err := c.ClosedTS.Record.Validate(); err != nil {
 			return err
 		}
 	case CommandTypeUpdateDescriptor:
-		if c.Descriptor == nil || c.Put != nil || c.Lease != nil || c.ClosedTS != nil || c.Split != nil || c.Replica != nil {
+		if c.Descriptor == nil || c.Put != nil || c.Intent != nil || c.ClearIntent != nil || c.TxnRecord != nil || c.Lease != nil || c.ClosedTS != nil || c.Split != nil || c.Replica != nil {
 			return fmt.Errorf("command: update_descriptor payload mismatch")
 		}
 		if err := c.Descriptor.Descriptor.Validate(); err != nil {
 			return err
 		}
 	case CommandTypeSplitRange:
-		if c.Split == nil || c.Put != nil || c.Lease != nil || c.ClosedTS != nil || c.Descriptor != nil || c.Replica != nil {
+		if c.Split == nil || c.Put != nil || c.Intent != nil || c.ClearIntent != nil || c.TxnRecord != nil || c.Lease != nil || c.ClosedTS != nil || c.Descriptor != nil || c.Replica != nil {
 			return fmt.Errorf("command: split_range payload mismatch")
 		}
 		switch c.Split.MetaLevel {
@@ -163,7 +211,7 @@ func (c Command) Validate() error {
 			return fmt.Errorf("command: split_range must create a distinct right range")
 		}
 	case CommandTypeChangeReplicas:
-		if c.Replica == nil || c.Put != nil || c.Lease != nil || c.ClosedTS != nil || c.Descriptor != nil || c.Split != nil {
+		if c.Replica == nil || c.Put != nil || c.Intent != nil || c.ClearIntent != nil || c.TxnRecord != nil || c.Lease != nil || c.ClosedTS != nil || c.Descriptor != nil || c.Split != nil {
 			return fmt.Errorf("command: change_replicas payload mismatch")
 		}
 		switch c.Replica.MetaLevel {

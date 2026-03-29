@@ -162,6 +162,15 @@ func (e *Engine) PutIntent(ctx context.Context, logicalKey []byte, intent Intent
 	return e.PutRaw(ctx, key, value)
 }
 
+// DeleteIntent removes the provisional intent at the logical key's metadata key.
+func (e *Engine) DeleteIntent(_ context.Context, logicalKey []byte) error {
+	key, err := EncodeMVCCMetadataKey(logicalKey)
+	if err != nil {
+		return err
+	}
+	return e.db.Delete(key, pebble.Sync)
+}
+
 // GetIntent loads the provisional intent at a logical key.
 func (e *Engine) GetIntent(ctx context.Context, logicalKey []byte) (Intent, error) {
 	key, err := EncodeMVCCMetadataKey(logicalKey)

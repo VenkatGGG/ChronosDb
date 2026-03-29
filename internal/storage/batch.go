@@ -75,6 +75,20 @@ func (b *WriteBatch) PutIntent(logicalKey []byte, intent Intent) error {
 	return b.SetRaw(key, value)
 }
 
+// DeleteIntent removes the provisional intent at a logical key.
+func (b *WriteBatch) DeleteIntent(logicalKey []byte) error {
+	key, err := EncodeMVCCMetadataKey(logicalKey)
+	if err != nil {
+		return err
+	}
+	return b.DeleteRaw(key)
+}
+
+// SetTxnRecord stores the encoded transaction record under its global system key.
+func (b *WriteBatch) SetTxnRecord(txnID TxnID, payload []byte) error {
+	return b.SetRaw(GlobalTxnRecordKey(txnID), payload)
+}
+
 // SetRaftHardState appends a HardState update to the batch.
 func (b *WriteBatch) SetRaftHardState(rangeID uint64, st raftpb.HardState) error {
 	payload, err := st.Marshal()

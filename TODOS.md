@@ -528,8 +528,10 @@ hardening, and a one-command seeded demo bootstrap.
   for point lookup, range scan, put, intent write, intent resolution, and txn
   record operations against live replicas and the MVCC storage engine
   - point lookup, point put, and descriptor-aware range scan are now live
-    through runtime-hosted replicas and node control RPCs; intents and txn
-    record operations still remain
+    through runtime-hosted replicas and node control RPCs
+  - the replicated substrate for intent writes/deletes and durable txn record
+    storage now also exists, including a real system-span bootstrap range and
+    local runtime helpers for intent and txn record proposals
 - [ ] 13.6 Wire the transaction coordinator into the live KV path
   including begin/heartbeat/commit/abort, lock acquisition, refresh/retry, and
   coordinator recovery in the normal request flow

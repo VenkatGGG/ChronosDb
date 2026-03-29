@@ -156,13 +156,28 @@ func BuildBootstrapManifest(clusterID string, nodes []BootstrapNode, userRanges 
 		}
 	}
 
+	systemRangeID := maxRangeID + 1
+	meta1RangeID := maxRangeID + 2
+	systemRange := meta.RangeDescriptor{
+		RangeID:              systemRangeID,
+		Generation:           1,
+		StartKey:             storage.GlobalSystemPrefix(),
+		EndKey:               storage.GlobalTablePrefix(),
+		Replicas:             metaReplicas,
+		LeaseholderReplicaID: metaReplicas[0].ReplicaID,
+	}
+	meta2Ranges := append([]meta.RangeDescriptor{systemRange}, orderedRanges...)
+	slices.SortFunc(meta2Ranges, func(left, right meta.RangeDescriptor) int {
+		return bytes.Compare(left.StartKey, right.StartKey)
+	})
+
 	manifest := BootstrapManifest{
 		Version:   bootstrapManifestVersion,
 		ClusterID: clusterID,
 		Nodes:     orderedNodes,
 		Meta1: []meta.RangeDescriptor{
 			{
-				RangeID:              maxRangeID + 1,
+				RangeID:              meta1RangeID,
 				Generation:           1,
 				StartKey:             storage.Meta2Prefix(),
 				EndKey:               storage.PrefixEnd(storage.Meta2Prefix()),
@@ -170,7 +185,7 @@ func BuildBootstrapManifest(clusterID string, nodes []BootstrapNode, userRanges 
 				LeaseholderReplicaID: metaReplicas[0].ReplicaID,
 			},
 		},
-		Meta2: orderedRanges,
+		Meta2: meta2Ranges,
 	}
 	return manifest, manifest.Validate()
 }
