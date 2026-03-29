@@ -330,25 +330,11 @@ func (n *ProcessNode) shutdown() error {
 			errs = append(errs, err)
 		}
 	}
-	if obsServer != nil {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), time.Second)
-		if err := obsServer.Shutdown(shutdownCtx); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			errs = append(errs, err)
-		}
-		cancel()
+	if err := shutdownHTTPServer(obsServer, obsListen); err != nil {
+		errs = append(errs, err)
 	}
-	if obsListen != nil {
-		_ = obsListen.Close()
-	}
-	if ctrlServer != nil {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), time.Second)
-		if err := ctrlServer.Shutdown(shutdownCtx); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			errs = append(errs, err)
-		}
-		cancel()
-	}
-	if ctrlListen != nil {
-		_ = ctrlListen.Close()
+	if err := shutdownHTTPServer(ctrlServer, ctrlListen); err != nil {
+		errs = append(errs, err)
 	}
 	n.runWG.Wait()
 	if host != nil {
@@ -357,6 +343,27 @@ func (n *ProcessNode) shutdown() error {
 		}
 	}
 	return errors.Join(errs...)
+}
+
+func shutdownHTTPServer(server *http.Server, listener net.Listener) error {
+	if listener != nil {
+		_ = listener.Close()
+	}
+	if server == nil {
+		return nil
+	}
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	err := server.Shutdown(shutdownCtx)
+	cancel()
+	switch {
+	case err == nil, errors.Is(err, http.ErrServerClosed):
+		return nil
+	case errors.Is(err, context.DeadlineExceeded):
+		_ = server.Close()
+		return nil
+	default:
+		return err
+	}
 }
 
 func (n *ProcessNode) writeState() error {
@@ -373,6 +380,8 @@ func (n *ProcessNode) controlMux() http.Handler {
 	mux.HandleFunc("/control/partition", n.handlePartition)
 	mux.HandleFunc("/control/heal", n.handleHeal)
 	mux.HandleFunc("/control/raft/message", n.handleRaftMessage)
+	mux.HandleFunc("/control/range/prepare", n.handleRangePrepare)
+	mux.HandleFunc("/control/range/status", n.handleRangeStatus)
 	mux.HandleFunc("/control/kv/get", n.handleKVGet)
 	mux.HandleFunc("/control/kv/put", n.handleKVPut)
 	mux.HandleFunc("/control/kv/scan", n.handleKVScan)
@@ -491,18 +500,65 @@ func (n *ProcessNode) handleRaftMessage(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	inbound := make([]chronosruntime.InboundMessage, 0, len(req.Messages))
 	for _, message := range req.Messages {
 		decoded, err := unmarshalRaftMessage(message.Message)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		if err := n.host.Step(r.Context(), message.RangeID, decoded); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
+		inbound = append(inbound, chronosruntime.InboundMessage{
+			RangeID: message.RangeID,
+			Message: decoded,
+		})
+	}
+	if err := n.host.StepBatch(r.Context(), inbound); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (n *ProcessNode) handleRangePrepare(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req rangePrepareRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := n.host.InstallReplicaSnapshot(r.Context(), req.RangeID, req.ReplicaID, req.Snapshot); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (n *ProcessNode) handleRangeStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req rangeStatusRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	status, err := n.host.RangeStatus(req.RangeID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSONResponse(w, rangeStatusResponse{
+		Hosted:           status.Hosted,
+		LocalReplicaID:   status.LocalReplicaID,
+		LeaderReplicaID:  status.LeaderReplicaID,
+		AppliedIndex:     status.AppliedIndex,
+		Descriptor:       status.Descriptor,
+		DescriptorSource: status.DescriptorSource,
+	})
 }
 
 func (n *ProcessNode) handleKVGet(w http.ResponseWriter, r *http.Request) {

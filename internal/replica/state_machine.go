@@ -145,10 +145,22 @@ func (s *StateMachine) ReadExact(ctx context.Context, logicalKey []byte, ts hlc.
 
 // StageEntries validates and stages committed log entries into the provided batch.
 func (s *StateMachine) StageEntries(batch *storage.WriteBatch, entries []raftpb.Entry) (ApplyDelta, error) {
+	delta, _, err := s.stageEntries(batch, entries)
+	return delta, err
+}
+
+// StageEntriesWithConfChanges validates and stages committed log entries and returns
+// any applied configuration changes that must be handed back to RawNode.
+func (s *StateMachine) StageEntriesWithConfChanges(batch *storage.WriteBatch, entries []raftpb.Entry) (ApplyDelta, []raftpb.ConfChange, error) {
+	return s.stageEntries(batch, entries)
+}
+
+func (s *StateMachine) stageEntries(batch *storage.WriteBatch, entries []raftpb.Entry) (ApplyDelta, []raftpb.ConfChange, error) {
 	delta := ApplyDelta{
 		AppliedIndex:     s.appliedIndex,
 		SafeReadFrontier: s.safeReadFrontier,
 	}
+	confChanges := make([]raftpb.ConfChange, 0)
 	for _, entry := range entries {
 		delta.AppliedIndex = entry.Index
 		switch entry.Type {
@@ -158,35 +170,35 @@ func (s *StateMachine) StageEntries(batch *storage.WriteBatch, entries []raftpb.
 			}
 			cmd, err := UnmarshalCommand(entry.Data)
 			if err != nil {
-				return ApplyDelta{}, err
+				return ApplyDelta{}, nil, err
 			}
 			switch cmd.Type {
 			case CommandTypePutValue:
 				if err := batch.PutMVCCValue(cmd.Put.LogicalKey, cmd.Put.Timestamp, cmd.Put.Value); err != nil {
-					return ApplyDelta{}, err
+					return ApplyDelta{}, nil, err
 				}
 				if cmd.Put.Timestamp.Compare(delta.SafeReadFrontier) > 0 {
 					delta.SafeReadFrontier = cmd.Put.Timestamp
 				}
 			case CommandTypePutIntent:
 				if err := batch.PutIntent(cmd.Intent.LogicalKey, cmd.Intent.Intent); err != nil {
-					return ApplyDelta{}, err
+					return ApplyDelta{}, nil, err
 				}
 			case CommandTypeDeleteIntent:
 				if err := batch.DeleteIntent(cmd.ClearIntent.LogicalKey); err != nil {
-					return ApplyDelta{}, err
+					return ApplyDelta{}, nil, err
 				}
 			case CommandTypeSetTxnRecord:
 				payload, err := cmd.TxnRecord.Record.MarshalBinary()
 				if err != nil {
-					return ApplyDelta{}, err
+					return ApplyDelta{}, nil, err
 				}
 				if err := batch.SetTxnRecord(cmd.TxnRecord.Record.ID, payload); err != nil {
-					return ApplyDelta{}, err
+					return ApplyDelta{}, nil, err
 				}
 			case CommandTypeSetLease:
 				if err := batch.SetRangeLease(s.rangeID, cmd.Lease.Record); err != nil {
-					return ApplyDelta{}, err
+					return ApplyDelta{}, nil, err
 				}
 				delta.Lease = cmd.Lease.Record
 				delta.HasLease = true
@@ -200,10 +212,10 @@ func (s *StateMachine) StageEntries(batch *storage.WriteBatch, entries []raftpb.
 					currentClosedTS, hasCurrentClosedTS = delta.ClosedTimestamp, true
 				}
 				if err := validateClosedTimestampUpdate(s.rangeID, currentLease, currentClosedTS, hasCurrentClosedTS, cmd.ClosedTS.Record); err != nil {
-					return ApplyDelta{}, err
+					return ApplyDelta{}, nil, err
 				}
 				if err := batch.SetRangeClosedTimestamp(s.rangeID, cmd.ClosedTS.Record); err != nil {
-					return ApplyDelta{}, err
+					return ApplyDelta{}, nil, err
 				}
 				delta.ClosedTimestamp = cmd.ClosedTS.Record
 				delta.HasClosedTS = true
@@ -213,14 +225,14 @@ func (s *StateMachine) StageEntries(batch *storage.WriteBatch, entries []raftpb.
 					currentGeneration = delta.Descriptor.Generation
 				}
 				if cmd.Descriptor.ExpectedGeneration != currentGeneration {
-					return ApplyDelta{}, fmt.Errorf("%w: expected %d got %d", ErrDescriptorGenerationMismatch, cmd.Descriptor.ExpectedGeneration, currentGeneration)
+					return ApplyDelta{}, nil, fmt.Errorf("%w: expected %d got %d", ErrDescriptorGenerationMismatch, cmd.Descriptor.ExpectedGeneration, currentGeneration)
 				}
 				payload, err := cmd.Descriptor.Descriptor.MarshalBinary()
 				if err != nil {
-					return ApplyDelta{}, err
+					return ApplyDelta{}, nil, err
 				}
 				if err := batch.SetRaw(storage.RangeDescriptorKey(s.rangeID), payload); err != nil {
-					return ApplyDelta{}, err
+					return ApplyDelta{}, nil, err
 				}
 				delta.Descriptor = cmd.Descriptor.Descriptor
 				delta.HasDescriptor = true
@@ -230,30 +242,30 @@ func (s *StateMachine) StageEntries(batch *storage.WriteBatch, entries []raftpb.
 					currentDescriptor = delta.Descriptor
 				}
 				if cmd.Split.ExpectedGeneration != currentDescriptor.Generation {
-					return ApplyDelta{}, fmt.Errorf("%w: expected %d got %d", ErrDescriptorGenerationMismatch, cmd.Split.ExpectedGeneration, currentDescriptor.Generation)
+					return ApplyDelta{}, nil, fmt.Errorf("%w: expected %d got %d", ErrDescriptorGenerationMismatch, cmd.Split.ExpectedGeneration, currentDescriptor.Generation)
 				}
 				if err := validateSplitTrigger(currentDescriptor, cmd.Split.Left, cmd.Split.Right); err != nil {
-					return ApplyDelta{}, err
+					return ApplyDelta{}, nil, err
 				}
 				leftPayload, err := cmd.Split.Left.MarshalBinary()
 				if err != nil {
-					return ApplyDelta{}, err
+					return ApplyDelta{}, nil, err
 				}
 				if err := batch.SetRaw(storage.RangeDescriptorKey(cmd.Split.Left.RangeID), leftPayload); err != nil {
-					return ApplyDelta{}, err
+					return ApplyDelta{}, nil, err
 				}
 				rightPayload, err := cmd.Split.Right.MarshalBinary()
 				if err != nil {
-					return ApplyDelta{}, err
+					return ApplyDelta{}, nil, err
 				}
 				if err := batch.SetRaw(storage.RangeDescriptorKey(cmd.Split.Right.RangeID), rightPayload); err != nil {
-					return ApplyDelta{}, err
+					return ApplyDelta{}, nil, err
 				}
 				if err := batch.SetRangeAppliedIndex(cmd.Split.Right.RangeID, delta.AppliedIndex); err != nil {
-					return ApplyDelta{}, err
+					return ApplyDelta{}, nil, err
 				}
 				if err := stageSplitMeta(batch, cmd.Split.MetaLevel, currentDescriptor.EndKey, cmd.Split.Left, cmd.Split.Right); err != nil {
-					return ApplyDelta{}, err
+					return ApplyDelta{}, nil, err
 				}
 				delta.Descriptor = cmd.Split.Left
 				delta.HasDescriptor = true
@@ -263,39 +275,46 @@ func (s *StateMachine) StageEntries(batch *storage.WriteBatch, entries []raftpb.
 					currentDescriptor = delta.Descriptor
 				}
 				if cmd.Replica.ExpectedGeneration != currentDescriptor.Generation {
-					return ApplyDelta{}, fmt.Errorf("%w: expected %d got %d", ErrDescriptorGenerationMismatch, cmd.Replica.ExpectedGeneration, currentDescriptor.Generation)
+					return ApplyDelta{}, nil, fmt.Errorf("%w: expected %d got %d", ErrDescriptorGenerationMismatch, cmd.Replica.ExpectedGeneration, currentDescriptor.Generation)
 				}
 				nextDescriptor, err := applyReplicaChange(currentDescriptor, cmd.Replica.Change)
 				if err != nil {
-					return ApplyDelta{}, err
+					return ApplyDelta{}, nil, err
 				}
 				payload, err := nextDescriptor.MarshalBinary()
 				if err != nil {
-					return ApplyDelta{}, err
+					return ApplyDelta{}, nil, err
 				}
 				if err := batch.SetRaw(storage.RangeDescriptorKey(s.rangeID), payload); err != nil {
-					return ApplyDelta{}, err
+					return ApplyDelta{}, nil, err
 				}
 				if err := batch.SetRaw(descriptorKeyForLevel(cmd.Replica.MetaLevel, nextDescriptor.EndKey), payload); err != nil {
-					return ApplyDelta{}, err
+					return ApplyDelta{}, nil, err
 				}
 				delta.Descriptor = nextDescriptor
 				delta.HasDescriptor = true
 			default:
-				return ApplyDelta{}, fmt.Errorf("stage entry: unhandled command %q", cmd.Type)
+				return ApplyDelta{}, nil, fmt.Errorf("stage entry: unhandled command %q", cmd.Type)
 			}
 		case raftpb.EntryConfChange, raftpb.EntryConfChangeV2:
-			// Membership changes are handled in a later phase. The log still advances.
+			if entry.Type == raftpb.EntryConfChangeV2 {
+				return ApplyDelta{}, nil, fmt.Errorf("stage entry: unsupported conf change v2")
+			}
+			var cc raftpb.ConfChange
+			if err := cc.Unmarshal(entry.Data); err != nil {
+				return ApplyDelta{}, nil, fmt.Errorf("stage entry: decode conf change: %w", err)
+			}
+			confChanges = append(confChanges, cc)
 		default:
-			return ApplyDelta{}, fmt.Errorf("stage entry: unsupported entry type %v", entry.Type)
+			return ApplyDelta{}, nil, fmt.Errorf("stage entry: unsupported entry type %v", entry.Type)
 		}
 	}
 	if delta.AppliedIndex > s.appliedIndex {
 		if err := batch.SetRangeAppliedIndex(s.rangeID, delta.AppliedIndex); err != nil {
-			return ApplyDelta{}, err
+			return ApplyDelta{}, nil, err
 		}
 	}
-	return delta, nil
+	return delta, confChanges, nil
 }
 
 // CommitApply makes a staged apply delta visible in local in-memory state.

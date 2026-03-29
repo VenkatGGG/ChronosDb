@@ -63,21 +63,23 @@ type Config struct {
 
 // Host is the live runtime assembly behind one ChronosDB node process.
 type Host struct {
-	mu               sync.Mutex
-	engine           *storage.Engine
-	catalog          *meta.Catalog
-	scheduler        *multiraft.Scheduler
-	ident            storage.StoreIdent
-	transport        Transport
-	tickInterval     time.Duration
-	bootstrapped     bool
-	livenessEpoch    uint64
-	leaseTTL         time.Duration
-	closedTSLag      time.Duration
-	autoSplitRows    int
-	lastLeaseTick    time.Time
-	lastClosedTSTick time.Time
-	lastSplitTick    time.Time
+	mu                    sync.Mutex
+	engine                *storage.Engine
+	catalog               *meta.Catalog
+	scheduler             *multiraft.Scheduler
+	ident                 storage.StoreIdent
+	transport             Transport
+	tickInterval          time.Duration
+	bootstrapped          bool
+	livenessEpoch         uint64
+	leaseTTL              time.Duration
+	closedTSLag           time.Duration
+	autoSplitRows         int
+	pendingReplicaTargets map[uint64]map[uint64]uint64
+	preparedDescriptors   map[uint64]meta.RangeDescriptor
+	lastLeaseTick         time.Time
+	lastClosedTSTick      time.Time
+	lastSplitTick         time.Time
 }
 
 // KVRow is one live logical row returned from a local runtime scan.
@@ -140,17 +142,19 @@ func Open(ctx context.Context, cfg Config) (*Host, error) {
 	}
 
 	host := &Host{
-		engine:        engine,
-		catalog:       meta.NewCatalog(engine),
-		scheduler:     multiraft.NewScheduler(engine),
-		ident:         engine.Metadata().Ident,
-		transport:     cfg.Transport,
-		tickInterval:  cfg.TickInterval,
-		bootstrapped:  manifest != nil || len(cfg.SeedRanges) > 0,
-		livenessEpoch: 1,
-		leaseTTL:      cfg.LeaseTTL,
-		closedTSLag:   cfg.ClosedTSLag,
-		autoSplitRows: cfg.AutoSplitRows,
+		engine:                engine,
+		catalog:               meta.NewCatalog(engine),
+		scheduler:             multiraft.NewScheduler(engine),
+		ident:                 engine.Metadata().Ident,
+		transport:             cfg.Transport,
+		tickInterval:          cfg.TickInterval,
+		bootstrapped:          manifest != nil || len(cfg.SeedRanges) > 0,
+		livenessEpoch:         1,
+		leaseTTL:              cfg.LeaseTTL,
+		closedTSLag:           cfg.ClosedTSLag,
+		autoSplitRows:         cfg.AutoSplitRows,
+		pendingReplicaTargets: make(map[uint64]map[uint64]uint64),
+		preparedDescriptors:   make(map[uint64]meta.RangeDescriptor),
 	}
 	host.applyBackgroundDefaults()
 	if manifest != nil {
@@ -191,6 +195,9 @@ func (h *Host) HostedDescriptors() ([]meta.RangeDescriptor, error) {
 		var desc meta.RangeDescriptor
 		if err := desc.UnmarshalBinary(payload); err != nil {
 			return nil, err
+		}
+		if !descriptorReplicaOnNode(desc, h.ident.NodeID) {
+			continue
 		}
 		descs = append(descs, desc)
 	}
@@ -508,10 +515,36 @@ func (h *Host) Leader(rangeID uint64) (uint64, error) {
 
 // Step delivers one inbound Raft message and persists any resulting Ready state.
 func (h *Host) Step(ctx context.Context, rangeID uint64, msg raftpb.Message) error {
+	return h.StepBatch(ctx, []InboundMessage{{RangeID: rangeID, Message: msg}})
+}
+
+// InboundMessage couples one inbound transport message with its target range.
+type InboundMessage struct {
+	RangeID uint64
+	Message raftpb.Message
+}
+
+// StepBatch delivers a batch of inbound Raft messages and drains Ready once.
+func (h *Host) StepBatch(ctx context.Context, messages []InboundMessage) error {
 	h.mu.Lock()
-	if err := h.scheduler.Step(rangeID, msg); err != nil {
-		h.mu.Unlock()
-		return err
+	for _, inbound := range messages {
+		if err := h.scheduler.Step(inbound.RangeID, inbound.Message); err != nil {
+			if inbound.Message.To == 0 {
+				h.mu.Unlock()
+				return err
+			}
+			if ensureErr := h.scheduler.EnsureGroup(multiraft.GroupConfig{
+				RangeID:   inbound.RangeID,
+				ReplicaID: inbound.Message.To,
+			}); ensureErr != nil {
+				h.mu.Unlock()
+				return err
+			}
+			if retryErr := h.scheduler.Step(inbound.RangeID, inbound.Message); retryErr != nil {
+				h.mu.Unlock()
+				return retryErr
+			}
+		}
 	}
 	outbound, err := h.processReadyLocked()
 	h.mu.Unlock()
@@ -789,7 +822,11 @@ func (h *Host) resolveOutbound(messages []multiraft.MessageEnvelope) ([]Outbound
 		if err != nil {
 			return nil, err
 		}
-		targetNodeID, ok := nodeForReplica(replicaState.Descriptor(), envelope.Message.To)
+		desc, _ := h.descriptorForRangeLocked(envelope.RangeID, replicaState.Descriptor())
+		targetNodeID, ok := nodeForReplica(desc, envelope.Message.To)
+		if !ok {
+			targetNodeID, ok = h.pendingReplicaTargetLocked(envelope.RangeID, envelope.Message.To)
+		}
 		if !ok {
 			return nil, fmt.Errorf("runtime: range %d target replica %d not found in descriptor", envelope.RangeID, envelope.Message.To)
 		}
@@ -832,6 +869,15 @@ func (h *Host) dispatchOutbound(ctx context.Context, outbound []OutboundMessage)
 		return nil
 	}
 	return nil
+}
+
+func (h *Host) pendingReplicaTargetLocked(rangeID, replicaID uint64) (uint64, bool) {
+	targets := h.pendingReplicaTargets[rangeID]
+	if len(targets) == 0 {
+		return 0, false
+	}
+	nodeID, ok := targets[replicaID]
+	return nodeID, ok
 }
 
 func (h *Host) waitForMVCCValue(ctx context.Context, key []byte, ts hlc.Timestamp) error {

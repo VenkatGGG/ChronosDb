@@ -418,10 +418,90 @@ func TestProcessNodeEmitsRebalanceRecommendation(t *testing.T) {
 	waitForEventType(t, client, node1.state.ObservabilityURL+"/admin/events?limit=32", "rebalance_recommended")
 }
 
+func TestProcessNodeAppliesLiveRebalance(t *testing.T) {
+	t.Parallel()
+
+	rootDir := t.TempDir()
+	bootstrapPath := filepath.Join(rootDir, "bootstrap.json")
+	rangeOne := meta.RangeDescriptor{
+		RangeID:    61,
+		Generation: 1,
+		StartKey:   storage.GlobalTablePrimaryPrefix(7),
+		EndKey:     storage.GlobalTablePrimaryPrefix(8),
+		Replicas: []meta.ReplicaDescriptor{
+			{ReplicaID: 31, NodeID: 1, Role: meta.ReplicaRoleVoter},
+			{ReplicaID: 32, NodeID: 2, Role: meta.ReplicaRoleVoter},
+		},
+		LeaseholderReplicaID: 31,
+	}
+	rangeTwo := meta.RangeDescriptor{
+		RangeID:    62,
+		Generation: 1,
+		StartKey:   storage.GlobalTablePrimaryPrefix(9),
+		EndKey:     storage.GlobalTablePrimaryPrefix(10),
+		Replicas: []meta.ReplicaDescriptor{
+			{ReplicaID: 33, NodeID: 2, Role: meta.ReplicaRoleVoter},
+		},
+		LeaseholderReplicaID: 33,
+	}
+	manifest, err := chronosruntime.BuildBootstrapManifest("cluster-process-live-rebalance", []chronosruntime.BootstrapNode{
+		{NodeID: 1, StoreID: 31},
+		{NodeID: 2, StoreID: 32},
+		{NodeID: 3, StoreID: 33},
+	}, []meta.RangeDescriptor{rangeOne, rangeTwo})
+	if err != nil {
+		t.Fatalf("build bootstrap manifest: %v", err)
+	}
+	if err := chronosruntime.WriteBootstrapManifest(bootstrapPath, manifest); err != nil {
+		t.Fatalf("write bootstrap manifest: %v", err)
+	}
+
+	startCfg := func(nodeID uint64, storeID uint64) ProcessNodeConfig {
+		return ProcessNodeConfig{
+			NodeID:            nodeID,
+			StoreID:           storeID,
+			DataDir:           filepath.Join(rootDir, fmt.Sprintf("node-%d", nodeID)),
+			BootstrapPath:     bootstrapPath,
+			PGListenAddr:      "127.0.0.1:0",
+			ObservabilityAddr: "127.0.0.1:0",
+			ControlAddr:       "127.0.0.1:0",
+			HeartbeatInterval: 50 * time.Millisecond,
+			AllocatorInterval: 50 * time.Millisecond,
+		}
+	}
+
+	node1, cancel1, done1 := startProcessNodeForTest(t, startCfg(1, 31))
+	t.Cleanup(func() {
+		cancel1()
+		waitProcessNodeDone(t, done1, "live-rebalance-node1")
+	})
+	node2, cancel2, done2 := startProcessNodeForTest(t, startCfg(2, 32))
+	t.Cleanup(func() {
+		cancel2()
+		waitProcessNodeDone(t, done2, "live-rebalance-node2")
+	})
+	node3, cancel3, done3 := startProcessNodeForTest(t, startCfg(3, 33))
+	t.Cleanup(func() {
+		cancel3()
+		waitProcessNodeDone(t, done3, "live-rebalance-node3")
+	})
+
+	if err := node1.host.Campaign(context.Background(), rangeOne.RangeID); err != nil {
+		t.Fatalf("campaign rebalance range: %v", err)
+	}
+	waitForRangeLeader(t, node1.host, rangeOne.RangeID, 31)
+
+	client := &http.Client{Timeout: 2 * time.Second}
+	waitForEventType(t, client, node1.state.ObservabilityURL+"/admin/events?limit=64", "rebalance_applied")
+
+	waitForRangeReplicaRole(t, client, node3.state.ControlURL, rangeOne.RangeID, 33, meta.ReplicaRoleVoter)
+	waitForRangeReplicaAbsent(t, client, node2.state.ControlURL, rangeOne.RangeID, 32)
+}
+
 func waitForProcessNodeState(t *testing.T, path string) ProcessNodeState {
 	t.Helper()
 
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		state, err := ReadProcessNodeState(path)
 		if err == nil {
@@ -531,6 +611,83 @@ func waitForEventType(t *testing.T, client *http.Client, url, want string) {
 	var events []adminapi.ClusterEvent
 	getJSON(t, client, url, &events)
 	t.Fatalf("event %q not found in %+v", want, events)
+}
+
+func waitForRangeReplicaRole(t *testing.T, client *http.Client, controlURL string, rangeID, replicaID uint64, role meta.ReplicaRole) {
+	t.Helper()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		var status rangeStatusResponse
+		postJSONExpectJSON(t, client, controlURL+"/control/range/status", rangeStatusRequest{RangeID: rangeID}, &status)
+		for _, repl := range status.Descriptor.Replicas {
+			if repl.ReplicaID == replicaID && repl.Role == role {
+				return
+			}
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	var status rangeStatusResponse
+	postJSONExpectJSON(t, client, controlURL+"/control/range/status", rangeStatusRequest{RangeID: rangeID}, &status)
+	t.Fatalf("range %d replica %d role not %q: %+v", rangeID, replicaID, role, status)
+}
+
+func waitForRangeReplicaAbsent(t *testing.T, client *http.Client, controlURL string, rangeID, replicaID uint64) {
+	t.Helper()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		var status rangeStatusResponse
+		postJSONExpectJSON(t, client, controlURL+"/control/range/status", rangeStatusRequest{RangeID: rangeID}, &status)
+		found := false
+		for _, repl := range status.Descriptor.Replicas {
+			if repl.ReplicaID == replicaID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	var status rangeStatusResponse
+	postJSONExpectJSON(t, client, controlURL+"/control/range/status", rangeStatusRequest{RangeID: rangeID}, &status)
+	t.Fatalf("range %d still contains replica %d: %+v", rangeID, replicaID, status)
+}
+
+func postJSONExpectJSON(t *testing.T, client *http.Client, url string, in, out any) {
+	t.Helper()
+
+	var body io.Reader
+	if in != nil {
+		payload, err := json.Marshal(in)
+		if err != nil {
+			t.Fatalf("marshal request for %s: %v", url, err)
+		}
+		body = bytes.NewReader(payload)
+	}
+	req, err := http.NewRequest(http.MethodPost, url, body)
+	if err != nil {
+		t.Fatalf("new request %s: %v", url, err)
+	}
+	if in != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("request %s: %v", url, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		payload, _ := io.ReadAll(resp.Body)
+		t.Fatalf("request %s status = %d body=%s", url, resp.StatusCode, payload)
+	}
+	if out != nil {
+		if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
+			t.Fatalf("decode response from %s: %v", url, err)
+		}
+	}
 }
 
 func getJSON(t *testing.T, client *http.Client, url string, out any) {

@@ -12,6 +12,7 @@ import (
 	"github.com/VenkatGGG/ChronosDb/internal/replica"
 	"github.com/VenkatGGG/ChronosDb/internal/storage"
 	"github.com/cockroachdb/pebble/vfs"
+	raftpb "go.etcd.io/raft/v3/raftpb"
 )
 
 type testNode struct {
@@ -351,4 +352,67 @@ func TestSingleRangeReplicatesTransfersLeaseAndReadsSafely(t *testing.T) {
 			t.Fatalf("replica %d value = %q, want %q", nodeID, got, []byte("v2"))
 		}
 	}
+}
+
+func TestConfChangeAddsLearnerAndReplicates(t *testing.T) {
+	t.Parallel()
+
+	cluster := newTestCluster(t)
+
+	engine, err := storage.Open(context.Background(), storage.Options{
+		Dir: "node-4",
+		FS:  vfs.NewMem(),
+	})
+	if err != nil {
+		t.Fatalf("open learner engine: %v", err)
+	}
+	if err := engine.Bootstrap(context.Background(), storage.StoreIdent{
+		ClusterID: "cluster-a",
+		NodeID:    4,
+		StoreID:   4,
+	}); err != nil {
+		t.Fatalf("bootstrap learner engine: %v", err)
+	}
+	learner := NewScheduler(engine)
+	if err := learner.AddGroup(GroupConfig{
+		RangeID:       1,
+		ReplicaID:     4,
+		ElectionTick:  10,
+		HeartbeatTick: 1,
+	}); err != nil {
+		t.Fatalf("add learner group: %v", err)
+	}
+	cluster.nodes[4] = &testNode{
+		id:        4,
+		scheduler: learner,
+		clock:     hlc.NewManualClock(hlc.Timestamp{WallTime: 100, Logical: 0}),
+		liveness:  1,
+	}
+
+	cluster.campaign(t, 1)
+	if err := cluster.nodes[1].scheduler.ProposeConfChange(1, raftpb.ConfChange{
+		Type:   raftpb.ConfChangeAddLearnerNode,
+		NodeID: 4,
+	}); err != nil {
+		t.Fatalf("propose add learner: %v", err)
+	}
+	cluster.pumpUntil(t, 64, func(_ map[uint64]ProcessResult) bool {
+		repl, err := cluster.nodes[4].scheduler.Replica(1)
+		if err != nil {
+			t.Fatalf("lookup learner replica: %v", err)
+		}
+		return repl.AppliedIndex() > 0
+	})
+
+	valueKey := storage.GlobalTablePrimaryKey(7, []byte("learner"))
+	valueTS := hlc.Timestamp{WallTime: 150, Logical: 1}
+	cluster.propose(t, 1, replica.Command{
+		Version: 1,
+		Type:    replica.CommandTypePutValue,
+		Put: &replica.PutValue{
+			LogicalKey: valueKey,
+			Timestamp:  valueTS,
+			Value:      []byte("v1"),
+		},
+	})
 }

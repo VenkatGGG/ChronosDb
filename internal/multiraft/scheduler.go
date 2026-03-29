@@ -131,6 +131,14 @@ func (s *Scheduler) AddGroup(cfg GroupConfig) error {
 	return nil
 }
 
+// EnsureGroup makes sure a local RawNode exists for the range, creating it if needed.
+func (s *Scheduler) EnsureGroup(cfg GroupConfig) error {
+	if _, ok := s.groups[cfg.RangeID]; ok {
+		return nil
+	}
+	return s.AddGroup(cfg)
+}
+
 // Tick advances all hosted ranges by one logical Raft tick.
 func (s *Scheduler) Tick() {
 	for _, group := range s.groups {
@@ -154,6 +162,15 @@ func (s *Scheduler) Propose(rangeID uint64, data []byte) error {
 		return err
 	}
 	return group.raw.Propose(data)
+}
+
+// ProposeConfChange appends one membership change to the range's Raft log.
+func (s *Scheduler) ProposeConfChange(rangeID uint64, cc raftpb.ConfChange) error {
+	group, err := s.lookup(rangeID)
+	if err != nil {
+		return err
+	}
+	return group.raw.ProposeConfChange(cc)
 }
 
 // ReadIndex starts a linearizable read-index request on the range.
@@ -212,9 +229,10 @@ func (s *Scheduler) ProcessReady() (ProcessResult, error) {
 	defer batch.Close()
 
 	type advanceItem struct {
-		group *group
-		ready raft.Ready
-		delta replica.ApplyDelta
+		group       *group
+		ready       raft.Ready
+		delta       replica.ApplyDelta
+		confChanges []raftpb.ConfChange
 	}
 	var advanceItems []advanceItem
 	syncWrite := false
@@ -249,10 +267,13 @@ func (s *Scheduler) ProcessReady() (ProcessResult, error) {
 			}
 		}
 
-		var delta replica.ApplyDelta
-		var err error
+		var (
+			delta       replica.ApplyDelta
+			confChanges []raftpb.ConfChange
+			err         error
+		)
 		if len(ready.CommittedEntries) > 0 {
-			delta, err = group.replica.StageEntries(batch, ready.CommittedEntries)
+			delta, confChanges, err = group.replica.StageEntriesWithConfChanges(batch, ready.CommittedEntries)
 			if err != nil {
 				return ProcessResult{}, err
 			}
@@ -271,9 +292,10 @@ func (s *Scheduler) ProcessReady() (ProcessResult, error) {
 		}
 
 		advanceItems = append(advanceItems, advanceItem{
-			group: group,
-			ready: ready,
-			delta: delta,
+			group:       group,
+			ready:       ready,
+			delta:       delta,
+			confChanges: confChanges,
 		})
 	}
 
@@ -281,6 +303,9 @@ func (s *Scheduler) ProcessReady() (ProcessResult, error) {
 		return ProcessResult{}, err
 	}
 	for _, item := range advanceItems {
+		for _, cc := range item.confChanges {
+			item.group.raw.ApplyConfChange(cc)
+		}
 		item.group.replica.CommitApply(item.delta)
 		item.group.raw.Advance(item.ready)
 	}

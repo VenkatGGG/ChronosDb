@@ -505,10 +505,13 @@ Exit criteria:
 
 **Status:** In progress. The runtime-backed `chronos-node`, persistent
 bootstrap, live inter-node Raft transport, descriptor-backed hosting, point KV
-reads/writes, and the first real pgwire-backed point `INSERT`/`SELECT` path now
-exist. Remaining work is the broader KV/transaction surface, distributed SQL
-execution, persisted catalog descriptors, background services, recovery
-hardening, and a one-command seeded demo bootstrap.
+reads/writes, explicit transaction plumbing, persisted catalog descriptors, and
+the first real pgwire-backed point/range-scan `SELECT` plus `INSERT` path now
+exist. Live background maintenance now also runs inside `chronos-node`,
+including liveness heartbeats, allocator-driven rebalance recommendations, and
+learner snapshot catch-up for real replica movement. Remaining work is the
+broader autonomous recovery surface and closing the last unchecked Phase 13
+items to match what is already live in the runtime.
 
 ### [ ] Phase 13 Remaining Execution
 
@@ -563,9 +566,14 @@ hardening, and a one-command seeded demo bootstrap.
     by `chronos-node` on restart, and `chronos-demo` now seeds the built-in
     catalog explicitly through that persisted path instead of relying on
     implicit process-node defaults
-- [ ] 13.10 Promote background subsystem logic into live services
+- [x] 13.10 Promote background subsystem logic into live services
   for liveness heartbeats, lease maintenance, closed timestamp publication,
   split triggers, allocator decisions, learner snapshot catch-up, and rebalance
+  - `ProcessNode` now runs real background heartbeats against the live runtime,
+    publishes allocator-backed rebalance recommendations, captures learner
+    snapshots from live replicas, installs those snapshots on target nodes, and
+    drives add-learner/promote/remove membership changes through real Raft
+    config changes and descriptor updates
 - [x] 13.11 Implement restart and recovery wiring
   so a restarted node reopens its engine, reconstructs hosted groups, reloads
   descriptors and applied indexes, rejoins the cluster, and resumes serving

@@ -85,6 +85,26 @@ type kvLockReleaseRequest struct {
 	TxnID storage.TxnID `json:"txn_id"`
 }
 
+type rangeStatusRequest struct {
+	RangeID uint64 `json:"range_id"`
+}
+
+type rangePrepareRequest struct {
+	RangeID    uint64                         `json:"range_id"`
+	ReplicaID  uint64                         `json:"replica_id"`
+	Descriptor meta.RangeDescriptor           `json:"descriptor"`
+	Snapshot   chronosruntime.ReplicaSnapshot `json:"snapshot"`
+}
+
+type rangeStatusResponse struct {
+	Hosted           bool                 `json:"hosted"`
+	LocalReplicaID   uint64               `json:"local_replica_id,omitempty"`
+	LeaderReplicaID  uint64               `json:"leader_replica_id,omitempty"`
+	AppliedIndex     uint64               `json:"applied_index,omitempty"`
+	Descriptor       meta.RangeDescriptor `json:"descriptor,omitempty"`
+	DescriptorSource string               `json:"descriptor_source,omitempty"`
+}
+
 func newKVClient(nodeID uint64, rootDir string, host *chronosruntime.Host) *kvClient {
 	return &kvClient{
 		nodeID:  nodeID,
@@ -257,6 +277,40 @@ func (c *kvClient) DeleteIntent(ctx context.Context, key []byte) error {
 		return err
 	}
 	return c.postJSON(ctx, targetNodeID, "/control/kv/intent/delete", kvGetRequest{Key: key}, nil)
+}
+
+func (c *kvClient) RangeStatus(ctx context.Context, targetNodeID, rangeID uint64) (rangeStatusResponse, error) {
+	if targetNodeID == c.nodeID {
+		status, err := c.host.RangeStatus(rangeID)
+		if err != nil {
+			return rangeStatusResponse{}, err
+		}
+		return rangeStatusResponse{
+			Hosted:           status.Hosted,
+			LocalReplicaID:   status.LocalReplicaID,
+			LeaderReplicaID:  status.LeaderReplicaID,
+			AppliedIndex:     status.AppliedIndex,
+			Descriptor:       status.Descriptor,
+			DescriptorSource: status.DescriptorSource,
+		}, nil
+	}
+	var resp rangeStatusResponse
+	if err := c.postJSON(ctx, targetNodeID, "/control/range/status", rangeStatusRequest{RangeID: rangeID}, &resp); err != nil {
+		return rangeStatusResponse{}, err
+	}
+	return resp, nil
+}
+
+func (c *kvClient) PrepareReplica(ctx context.Context, targetNodeID, rangeID, replicaID uint64, desc meta.RangeDescriptor, snapshot chronosruntime.ReplicaSnapshot) error {
+	if targetNodeID == c.nodeID {
+		return c.host.InstallReplicaSnapshot(ctx, rangeID, replicaID, snapshot)
+	}
+	return c.postJSON(ctx, targetNodeID, "/control/range/prepare", rangePrepareRequest{
+		RangeID:    rangeID,
+		ReplicaID:  replicaID,
+		Descriptor: desc,
+		Snapshot:   snapshot,
+	}, nil)
 }
 
 func (c *kvClient) PutTxnRecord(ctx context.Context, record txn.Record) error {
