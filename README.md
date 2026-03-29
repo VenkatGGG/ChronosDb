@@ -10,6 +10,7 @@ Implementation is underway. The repository already contains:
 - the Phase 2 single-range replication and lease/read foundations
 - the full Phase 3 through Phase 8 distributed systems core, locality, and hardening work
 - the Phase 11 cluster console with live nodes, ranges, key lookup, events, and retained scenario browsing
+- the Phase 12 topology drilldowns and the seeded `chronos-demo` cluster launcher
 
 The repo still follows a plan-first discipline: protocol and scope changes
 should be written down before the corresponding code lands.
@@ -133,7 +134,31 @@ flowchart TD
 8. **Phase 7**: locality semantics and follower historical reads. Status: complete.
 9. **Phase 8**: hardening, simulation, and external chaos runner integration. Status: complete for current scope.
 10. **Phase 11**: cluster console and real-time operations UI. Status: complete.
-11. **Phase 12**: topology drilldowns and operational forensics. Status: in progress.
+11. **Phase 12**: topology drilldowns, operational forensics, and the seeded demo launcher. Status: complete.
+12. **Phase 13**: live runtime integration and end-to-end SQL execution. Status: in progress.
+
+## Quick Demo
+
+Build the binaries and UI:
+
+```bash
+go build -o bin/chronos-demo ./cmd/chronos-demo
+go build -o bin/chronos-node ./cmd/chronos-node
+go build -o bin/chronos-console ./cmd/chronos-console
+cd ui && npm install && npm run build && cd ..
+```
+
+Start the seeded 3-node cluster plus console:
+
+```bash
+./bin/chronos-demo -ui-dir ./ui/dist
+```
+
+Then open [http://127.0.0.1:8080](http://127.0.0.1:8080) and connect with:
+
+```bash
+psql "postgresql://chronos@127.0.0.1:26257/postgres?sslmode=disable"
+```
 
 ## Phase 8 Evidence
 

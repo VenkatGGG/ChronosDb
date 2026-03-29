@@ -167,6 +167,13 @@ func NewProcessNode(cfg ProcessNodeConfig) (*ProcessNode, error) {
 	return node, nil
 }
 
+// State returns the last published process-node addresses and timestamps.
+func (n *ProcessNode) State() ProcessNodeState {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	return n.state
+}
+
 // Run starts the node listeners and blocks until the context is canceled.
 func (n *ProcessNode) Run(ctx context.Context) error {
 	if err := os.MkdirAll(n.cfg.DataDir, 0o755); err != nil {

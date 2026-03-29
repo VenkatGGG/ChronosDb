@@ -553,15 +553,20 @@ hardening, and a one-command seeded demo bootstrap.
   so the demo no longer depends on the hardcoded `users` and `orders` tables in
   the systemtest catalog bootstrap path
   - SQL table descriptors are now persisted under the system span and reloaded
-    by `chronos-node` on restart; remaining work is to make the seeded demo
-    bootstrap use that path directly instead of implicit defaults
+    by `chronos-node` on restart, and `chronos-demo` now seeds the built-in
+    catalog explicitly through that persisted path instead of relying on
+    implicit process-node defaults
 - [ ] 13.10 Promote background subsystem logic into live services
   for liveness heartbeats, lease maintenance, closed timestamp publication,
   split triggers, allocator decisions, learner snapshot catch-up, and rebalance
 - [ ] 13.11 Implement restart and recovery wiring
   so a restarted node reopens its engine, reconstructs hosted groups, reloads
   descriptors and applied indexes, rejoins the cluster, and resumes serving
-- [ ] 13.12 Add a real seeded demo/bootstrap command
+- [x] 13.12 Add a real seeded demo/bootstrap command
   that starts a 3-node cluster with pre-seeded range descriptors, visible range
   placement in the console, and a repeatable `psql` smoke test for `INSERT` and
   `SELECT`
+  - `cmd/chronos-demo` now boots a 3-node process cluster, writes the
+    deterministic bootstrap manifest, starts the console UI/API, seeds visible
+    split ranges for `users` and `orders`, and runs a repeatable smoke sequence
+    through pgwire

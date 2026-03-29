@@ -122,3 +122,9 @@ func defaultSystemTestCatalog() (*chronossql.Catalog, error) {
 	}
 	return catalog, nil
 }
+
+// DefaultCatalog returns the built-in demo catalog used by the process-node and
+// local-controller runtimes.
+func DefaultCatalog() (*chronossql.Catalog, error) {
+	return defaultSystemTestCatalog()
+}
