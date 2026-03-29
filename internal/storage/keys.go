@@ -19,6 +19,7 @@ var (
 	prefixSystem          = []byte("/mvcc/global/system/")
 	prefixSystemDesc      = []byte("/mvcc/global/system/desc/")
 	prefixSystemDescTable = []byte("/mvcc/global/system/desc/table/")
+	prefixSystemLiveness  = []byte("/mvcc/global/system/liveness/")
 	prefixSystemTxn       = []byte("/mvcc/global/system/txn/")
 	prefixTable           = []byte("/mvcc/global/table/")
 
@@ -119,6 +120,11 @@ func GlobalSystemTxnPrefix() []byte {
 	return bytes.Clone(prefixSystemTxn)
 }
 
+// GlobalSystemLivenessPrefix returns the logical key prefix for node liveness records.
+func GlobalSystemLivenessPrefix() []byte {
+	return bytes.Clone(prefixSystemLiveness)
+}
+
 // GlobalSystemDescriptorPrefix returns the logical key prefix for system descriptors.
 func GlobalSystemDescriptorPrefix() []byte {
 	return bytes.Clone(prefixSystemDesc)
@@ -169,6 +175,11 @@ func GlobalTablePrimaryKey(tableID uint64, encodedPrimaryKey []byte) []byte {
 // GlobalTxnRecordKey returns the logical key for one durable transaction record.
 func GlobalTxnRecordKey(txnID TxnID) []byte {
 	return append(bytes.Clone(prefixSystemTxn), txnID[:]...)
+}
+
+// GlobalNodeLivenessKey returns the logical key for one node-liveness record.
+func GlobalNodeLivenessKey(nodeID uint64) []byte {
+	return append(bytes.Clone(prefixSystemLiveness), encodeUint64(nodeID)...)
 }
 
 // DecodeGlobalTxnRecordKey extracts the transaction id from one logical txn

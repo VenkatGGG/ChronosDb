@@ -244,6 +244,85 @@ func TestHostSeedsAndLoadsSQLCatalog(t *testing.T) {
 	}
 }
 
+func TestHostBackgroundServicesPublishClosedTimestampsAndSplitRanges(t *testing.T) {
+	t.Parallel()
+
+	manifest, err := BuildBootstrapManifest("cluster-runtime-background", []BootstrapNode{
+		{NodeID: 1, StoreID: 1},
+	}, []meta.RangeDescriptor{
+		{
+			RangeID:    11,
+			Generation: 1,
+			StartKey:   storage.GlobalTablePrimaryPrefix(7),
+			EndKey:     storage.GlobalTablePrimaryPrefix(8),
+			Replicas: []meta.ReplicaDescriptor{
+				{ReplicaID: 1, NodeID: 1, Role: meta.ReplicaRoleVoter},
+			},
+			LeaseholderReplicaID: 1,
+		},
+	})
+	if err != nil {
+		t.Fatalf("build bootstrap manifest: %v", err)
+	}
+
+	host, err := Open(context.Background(), Config{
+		NodeID:            1,
+		StoreID:           1,
+		ClusterID:         manifest.ClusterID,
+		DataDir:           t.TempDir(),
+		BootstrapManifest: &manifest,
+		LeaseTTL:          300 * time.Millisecond,
+		ClosedTSLag:       time.Millisecond,
+		AutoSplitRows:     2,
+	})
+	if err != nil {
+		t.Fatalf("open host: %v", err)
+	}
+	defer host.Close()
+
+	runCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- host.Run(runCtx)
+	}()
+	defer func() {
+		cancel()
+		select {
+		case err := <-done:
+			if err != nil && err != context.Canceled {
+				t.Fatalf("run host: %v", err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out stopping host")
+		}
+	}()
+
+	waitForLeader(t, host, 11, 1)
+	waitForFiniteLease(t, host, 11)
+
+	for _, id := range []byte{7, 8, 70} {
+		key := storage.GlobalTablePrimaryKey(7, []byte{id})
+		if _, err := host.PutValueLocal(context.Background(), key, hlc.Timestamp{WallTime: uint64(id) + 100}, []byte{byte('a' + id%26)}); err != nil {
+			t.Fatalf("put value %d: %v", id, err)
+		}
+	}
+
+	waitForClosedTimestamp(t, host, 11)
+	waitForHostedRangeCount(t, host, 4)
+
+	lookup, err := host.LookupRange(context.Background(), storage.GlobalTablePrimaryKey(7, []byte{70}))
+	if err != nil {
+		t.Fatalf("lookup split range: %v", err)
+	}
+	if lookup.RangeID == 11 {
+		t.Fatalf("lookup range id = %d, want right-hand split range", lookup.RangeID)
+	}
+	if _, err := host.scheduler.Replica(lookup.RangeID); err != nil {
+		t.Fatalf("split range %d not loaded into scheduler: %v", lookup.RangeID, err)
+	}
+}
+
 func waitForLeader(t *testing.T, host *Host, rangeID, replicaID uint64) {
 	t.Helper()
 
@@ -257,4 +336,53 @@ func waitForLeader(t *testing.T, host *Host, rangeID, replicaID uint64) {
 	}
 	leader, _ := host.Leader(rangeID)
 	t.Fatalf("range %d leader = %d, want %d", rangeID, leader, replicaID)
+}
+
+func waitForFiniteLease(t *testing.T, host *Host, rangeID uint64) {
+	t.Helper()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		replicaState, err := host.scheduler.Replica(rangeID)
+		if err == nil {
+			record := replicaState.Lease()
+			if record.Sequence > 0 && record.ExpirationTS.WallTime > record.StartTS.WallTime &&
+				record.ExpirationTS.WallTime-record.StartTS.WallTime <= uint64(2*time.Second) {
+				return
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	replicaState, _ := host.scheduler.Replica(rangeID)
+	t.Fatalf("range %d lease did not converge to a finite runtime lease: %+v", rangeID, replicaState.Lease())
+}
+
+func waitForClosedTimestamp(t *testing.T, host *Host, rangeID uint64) {
+	t.Helper()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		record, err := host.engine.GetClosedTimestamp(context.Background(), rangeID)
+		if err == nil && !record.ClosedTS.IsZero() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	record, err := host.engine.GetClosedTimestamp(context.Background(), rangeID)
+	t.Fatalf("range %d closed timestamp did not publish: record=%+v err=%v", rangeID, record, err)
+}
+
+func waitForHostedRangeCount(t *testing.T, host *Host, want int) {
+	t.Helper()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		descs, err := host.HostedDescriptors()
+		if err == nil && len(descs) == want {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	descs, _ := host.HostedDescriptors()
+	t.Fatalf("hosted range count = %d, want %d (%+v)", len(descs), want, descs)
 }

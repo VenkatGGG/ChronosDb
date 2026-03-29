@@ -13,6 +13,8 @@ import (
 
 	"github.com/VenkatGGG/ChronosDb/internal/adminapi"
 	"github.com/VenkatGGG/ChronosDb/internal/meta"
+	chronosruntime "github.com/VenkatGGG/ChronosDb/internal/runtime"
+	"github.com/VenkatGGG/ChronosDb/internal/storage"
 )
 
 func TestProcessNodeAdminEndpoints(t *testing.T) {
@@ -269,6 +271,81 @@ func TestProcessNodeRaftTransportElectsAcrossProcesses(t *testing.T) {
 	t.Fatalf("leaders after transport election = node1:%d node2:%d, want both 11", leader1, leader2)
 }
 
+func TestProcessNodePublishesPersistedNodeLiveness(t *testing.T) {
+	t.Parallel()
+
+	rootDir := t.TempDir()
+	bootstrapPath := filepath.Join(rootDir, "bootstrap.json")
+	manifest, err := chronosruntime.BuildBootstrapManifest("cluster-process-liveness", []chronosruntime.BootstrapNode{
+		{NodeID: 1, StoreID: 11},
+	}, []meta.RangeDescriptor{
+		{
+			RangeID:    41,
+			Generation: 1,
+			StartKey:   storage.GlobalTablePrimaryPrefix(7),
+			EndKey:     storage.GlobalTablePrimaryPrefix(8),
+			Replicas: []meta.ReplicaDescriptor{
+				{ReplicaID: 11, NodeID: 1, Role: meta.ReplicaRoleVoter},
+			},
+			LeaseholderReplicaID: 11,
+		},
+	})
+	if err != nil {
+		t.Fatalf("build bootstrap manifest: %v", err)
+	}
+	if err := chronosruntime.WriteBootstrapManifest(bootstrapPath, manifest); err != nil {
+		t.Fatalf("write bootstrap manifest: %v", err)
+	}
+
+	cfg := ProcessNodeConfig{
+		NodeID:            1,
+		DataDir:           filepath.Join(rootDir, "node-1"),
+		BootstrapPath:     bootstrapPath,
+		PGListenAddr:      "127.0.0.1:0",
+		ObservabilityAddr: "127.0.0.1:0",
+		ControlAddr:       "127.0.0.1:0",
+		HeartbeatInterval: 50 * time.Millisecond,
+	}
+	client := &http.Client{Timeout: 2 * time.Second}
+	node1, cancel1, done1 := startProcessNodeForTest(t, cfg)
+	firstState := waitForProcessNodeState(t, filepath.Join(cfg.DataDir, "state.json"))
+	var firstView adminapi.NodeView
+	waitForNodeLivenessEpoch(t, client, firstState.ObservabilityURL+"/admin/node", 1)
+	getJSON(t, client, firstState.ObservabilityURL+"/admin/node", &firstView)
+	if firstView.LivenessEpoch != 1 {
+		t.Fatalf("first liveness epoch = %d, want 1", firstView.LivenessEpoch)
+	}
+	if firstView.LivenessUpdatedAt.IsZero() {
+		t.Fatal("first liveness updated_at is zero")
+	}
+	cancel1()
+	waitProcessNodeDone(t, done1, "liveness-initial")
+	if node1.host.LivenessEpoch() != 1 {
+		t.Fatalf("initial host liveness epoch = %d, want 1", node1.host.LivenessEpoch())
+	}
+
+	restarted := ProcessNodeConfig{
+		NodeID:            1,
+		DataDir:           filepath.Join(rootDir, "node-1"),
+		BootstrapPath:     bootstrapPath,
+		PGListenAddr:      "127.0.0.1:0",
+		ObservabilityAddr: "127.0.0.1:0",
+		ControlAddr:       "127.0.0.1:0",
+		HeartbeatInterval: 50 * time.Millisecond,
+	}
+	node, cancel, done := startProcessNodeForTest(t, restarted)
+	t.Cleanup(func() {
+		cancel()
+		waitProcessNodeDone(t, done, "liveness-restart")
+	})
+	state := waitForProcessNodeState(t, filepath.Join(restarted.DataDir, "state.json"))
+
+	waitForNodeLivenessEpoch(t, client, state.ObservabilityURL+"/admin/node", 2)
+	if node.host.LivenessEpoch() != 2 {
+		t.Fatalf("host liveness epoch = %d, want 2", node.host.LivenessEpoch())
+	}
+}
+
 func waitForProcessNodeState(t *testing.T, path string) ProcessNodeState {
 	t.Helper()
 
@@ -346,6 +423,23 @@ func waitProcessNodeDone(t *testing.T, done chan error, label string) {
 	case <-time.After(2 * time.Second):
 		t.Fatalf("timed out waiting for %s shutdown", label)
 	}
+}
+
+func waitForNodeLivenessEpoch(t *testing.T, client *http.Client, url string, want uint64) {
+	t.Helper()
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		var view adminapi.NodeView
+		getJSON(t, client, url, &view)
+		if view.LivenessEpoch == want && !view.LivenessUpdatedAt.IsZero() {
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	var view adminapi.NodeView
+	getJSON(t, client, url, &view)
+	t.Fatalf("node liveness epoch = %d, want %d", view.LivenessEpoch, want)
 }
 
 func getJSON(t *testing.T, client *http.Client, url string, out any) {

@@ -36,6 +36,10 @@ type ProcessNodeConfig struct {
 	Catalog           *chronossql.Catalog
 	Ranges            []meta.RangeDescriptor
 	EventBufferSize   int
+	HeartbeatInterval time.Duration
+	LeaseTTL          time.Duration
+	ClosedTSLag       time.Duration
+	AutoSplitRows     int
 }
 
 // ProcessNodeState is the externally readable address/state manifest for one launched node.
@@ -49,23 +53,27 @@ type ProcessNodeState struct {
 
 // ProcessNode is a single-node process runtime for the external chaos runner.
 type ProcessNode struct {
-	mu         sync.RWMutex
-	cfg        ProcessNodeConfig
-	metrics    *observability.Metrics
-	handler    *faultInjectingHandler
-	pgListener net.Listener
-	obsServer  *http.Server
-	obsListen  net.Listener
-	ctrlServer *http.Server
-	ctrlListen net.Listener
-	lastError  string
-	partitions map[uint64]struct{}
-	events     []adminapi.ClusterEvent
-	state      ProcessNodeState
-	logPath    string
-	statePath  string
-	host       *chronosruntime.Host
-	locks      *txn.LockTable
+	mu          sync.RWMutex
+	runWG       sync.WaitGroup
+	cfg         ProcessNodeConfig
+	metrics     *observability.Metrics
+	handler     *faultInjectingHandler
+	pgListener  net.Listener
+	obsServer   *http.Server
+	obsListen   net.Listener
+	ctrlServer  *http.Server
+	ctrlListen  net.Listener
+	lastError   string
+	partitions  map[uint64]struct{}
+	events      []adminapi.ClusterEvent
+	state       ProcessNodeState
+	logPath     string
+	statePath   string
+	host        *chronosruntime.Host
+	locks       *txn.LockTable
+	kv          *kvClient
+	liveness    meta.NodeLiveness
+	hasLiveness bool
 }
 
 const defaultProcessNodeEventBufferSize = 256
@@ -119,6 +127,9 @@ func NewProcessNode(cfg ProcessNodeConfig) (*ProcessNode, error) {
 		DataDir:       filepath.Join(cfg.DataDir, "store"),
 		SeedRanges:    cfg.Ranges,
 		BootstrapPath: cfg.BootstrapPath,
+		LeaseTTL:      cfg.LeaseTTL,
+		ClosedTSLag:   cfg.ClosedTSLag,
+		AutoSplitRows: cfg.AutoSplitRows,
 		Transport:     newProcessNodeTransport(cfg.NodeID, filepath.Dir(cfg.DataDir)),
 	})
 	if err != nil {
@@ -156,10 +167,11 @@ func NewProcessNode(cfg ProcessNodeConfig) (*ProcessNode, error) {
 		host:       host,
 		locks:      txn.NewLockTable(),
 	}
+	node.kv = newKVClient(cfg.NodeID, filepath.Dir(cfg.DataDir), host)
 	planner := chronossql.NewPlanner(chronossql.NewParser(), cfg.Catalog)
 	flowPlanner := chronossql.NewFlowPlanner()
 	node.handler = &faultInjectingHandler{
-		delegate: newRuntimeQueryHandler(planner, flowPlanner, newKVClient(cfg.NodeID, filepath.Dir(cfg.DataDir), host)),
+		delegate: newRuntimeQueryHandler(planner, flowPlanner, node.kv),
 		record: func(message string) {
 			_ = node.recordEvent(adminapi.ClusterEvent{
 				Type:     "node_activity",
@@ -232,10 +244,27 @@ func (n *ProcessNode) Run(ctx context.Context) error {
 		return err
 	}
 
-	go n.servePG(ctx)
-	go n.serveObservability(ctx)
-	go n.serveControl(ctx)
-	go n.serveRuntime(ctx)
+	n.runWG.Add(5)
+	go func() {
+		defer n.runWG.Done()
+		n.servePG(ctx)
+	}()
+	go func() {
+		defer n.runWG.Done()
+		n.serveObservability(ctx)
+	}()
+	go func() {
+		defer n.runWG.Done()
+		n.serveControl(ctx)
+	}()
+	go func() {
+		defer n.runWG.Done()
+		n.serveRuntime(ctx)
+	}()
+	go func() {
+		defer n.runWG.Done()
+		n.serveBackground(ctx)
+	}()
 
 	<-ctx.Done()
 	return n.shutdown()
@@ -318,6 +347,7 @@ func (n *ProcessNode) shutdown() error {
 	if ctrlListen != nil {
 		_ = ctrlListen.Close()
 	}
+	n.runWG.Wait()
 	if host != nil {
 		if err := host.Close(); err != nil {
 			errs = append(errs, err)
@@ -785,6 +815,7 @@ func (n *ProcessNode) nodeView() (adminapi.NodeView, error) {
 	status, notes := n.statusLocked()
 	state := n.state
 	partitions := sortedNodeSet(n.partitions)
+	liveness := n.liveness
 	n.mu.RUnlock()
 
 	descs, err := n.host.HostedDescriptors()
@@ -798,16 +829,18 @@ func (n *ProcessNode) nodeView() (adminapi.NodeView, error) {
 		}
 	}
 	return adminapi.NodeView{
-		NodeID:           state.NodeID,
-		PGAddr:           state.PGAddr,
-		ObservabilityURL: state.ObservabilityURL,
-		ControlURL:       state.ControlURL,
-		Status:           status,
-		StartedAt:        state.StartedAt,
-		PartitionedFrom:  partitions,
-		Notes:            notes,
-		ReplicaCount:     len(descs),
-		LeaseCount:       leaseCount,
+		NodeID:            state.NodeID,
+		PGAddr:            state.PGAddr,
+		ObservabilityURL:  state.ObservabilityURL,
+		ControlURL:        state.ControlURL,
+		Status:            status,
+		StartedAt:         state.StartedAt,
+		LivenessEpoch:     liveness.Epoch,
+		LivenessUpdatedAt: hlcToTime(liveness.UpdatedAt),
+		PartitionedFrom:   partitions,
+		Notes:             notes,
+		ReplicaCount:      len(descs),
+		LeaseCount:        leaseCount,
 	}, nil
 }
 

@@ -54,20 +54,30 @@ type Config struct {
 	BootstrapPath     string
 	BootstrapManifest *BootstrapManifest
 	TickInterval      time.Duration
+	LeaseTTL          time.Duration
+	ClosedTSLag       time.Duration
+	AutoSplitRows     int
 	Transport         Transport
 	FS                vfs.FS
 }
 
 // Host is the live runtime assembly behind one ChronosDB node process.
 type Host struct {
-	mu           sync.Mutex
-	engine       *storage.Engine
-	catalog      *meta.Catalog
-	scheduler    *multiraft.Scheduler
-	ident        storage.StoreIdent
-	transport    Transport
-	tickInterval time.Duration
-	bootstrapped bool
+	mu               sync.Mutex
+	engine           *storage.Engine
+	catalog          *meta.Catalog
+	scheduler        *multiraft.Scheduler
+	ident            storage.StoreIdent
+	transport        Transport
+	tickInterval     time.Duration
+	bootstrapped     bool
+	livenessEpoch    uint64
+	leaseTTL         time.Duration
+	closedTSLag      time.Duration
+	autoSplitRows    int
+	lastLeaseTick    time.Time
+	lastClosedTSTick time.Time
+	lastSplitTick    time.Time
 }
 
 // KVRow is one live logical row returned from a local runtime scan.
@@ -130,14 +140,19 @@ func Open(ctx context.Context, cfg Config) (*Host, error) {
 	}
 
 	host := &Host{
-		engine:       engine,
-		catalog:      meta.NewCatalog(engine),
-		scheduler:    multiraft.NewScheduler(engine),
-		ident:        engine.Metadata().Ident,
-		transport:    cfg.Transport,
-		tickInterval: cfg.TickInterval,
-		bootstrapped: manifest != nil || len(cfg.SeedRanges) > 0,
+		engine:        engine,
+		catalog:       meta.NewCatalog(engine),
+		scheduler:     multiraft.NewScheduler(engine),
+		ident:         engine.Metadata().Ident,
+		transport:     cfg.Transport,
+		tickInterval:  cfg.TickInterval,
+		bootstrapped:  manifest != nil || len(cfg.SeedRanges) > 0,
+		livenessEpoch: 1,
+		leaseTTL:      cfg.LeaseTTL,
+		closedTSLag:   cfg.ClosedTSLag,
+		autoSplitRows: cfg.AutoSplitRows,
 	}
+	host.applyBackgroundDefaults()
 	if manifest != nil {
 		if err := host.seedBootstrapManifest(ctx, *manifest); err != nil {
 			_ = engine.Close()
@@ -540,6 +555,12 @@ func (h *Host) Run(ctx context.Context) error {
 				h.mu.Unlock()
 				return err
 			}
+			backgroundOutbound, err := h.runBackgroundTickLocked(ctx, time.Now().UTC())
+			if err != nil {
+				h.mu.Unlock()
+				return err
+			}
+			outbound = append(outbound, backgroundOutbound...)
 			h.mu.Unlock()
 			if err := h.dispatchOutbound(ctx, outbound); err != nil {
 				return err

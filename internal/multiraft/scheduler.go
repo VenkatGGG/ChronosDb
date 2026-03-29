@@ -88,11 +88,19 @@ func (s *Scheduler) AddGroup(cfg GroupConfig) error {
 	if err := restoreConfState(mem, appliedIndex, cfg.Peers); err != nil {
 		return err
 	}
+	rawApplied := appliedIndex
+	lastIndex, err := mem.LastIndex()
+	if err != nil {
+		return err
+	}
+	if lastIndex == 0 || rawApplied > lastIndex {
+		rawApplied = 0
+	}
 
 	rawNode, err := raft.NewRawNode(&raft.Config{
 		ID:                       cfg.ReplicaID,
 		Storage:                  mem,
-		Applied:                  appliedIndex,
+		Applied:                  rawApplied,
 		ElectionTick:             electionTick,
 		HeartbeatTick:            heartbeatTick,
 		MaxSizePerMsg:            1 << 20,
@@ -307,6 +315,13 @@ func restoreConfState(mem *raft.MemoryStorage, appliedIndex uint64, peers []uint
 		return nil
 	}
 	if appliedIndex == 0 {
+		return nil
+	}
+	lastIndex, err := mem.LastIndex()
+	if err != nil {
+		return err
+	}
+	if lastIndex == 0 || appliedIndex > lastIndex {
 		return nil
 	}
 	_, err = mem.CreateSnapshot(appliedIndex, &raftpb.ConfState{

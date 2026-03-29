@@ -37,16 +37,18 @@ type RangeView struct {
 
 // NodeView is the node/operator view exposed to the UI.
 type NodeView struct {
-	NodeID           uint64    `json:"node_id"`
-	PGAddr           string    `json:"pg_addr,omitempty"`
-	ObservabilityURL string    `json:"observability_url,omitempty"`
-	ControlURL       string    `json:"control_url,omitempty"`
-	Status           string    `json:"status"`
-	StartedAt        time.Time `json:"started_at,omitempty"`
-	PartitionedFrom  []uint64  `json:"partitioned_from,omitempty"`
-	Notes            []string  `json:"notes,omitempty"`
-	ReplicaCount     int       `json:"replica_count"`
-	LeaseCount       int       `json:"lease_count"`
+	NodeID            uint64    `json:"node_id"`
+	PGAddr            string    `json:"pg_addr,omitempty"`
+	ObservabilityURL  string    `json:"observability_url,omitempty"`
+	ControlURL        string    `json:"control_url,omitempty"`
+	Status            string    `json:"status"`
+	StartedAt         time.Time `json:"started_at,omitempty"`
+	LivenessEpoch     uint64    `json:"liveness_epoch,omitempty"`
+	LivenessUpdatedAt time.Time `json:"liveness_updated_at,omitempty"`
+	PartitionedFrom   []uint64  `json:"partitioned_from,omitempty"`
+	Notes             []string  `json:"notes,omitempty"`
+	ReplicaCount      int       `json:"replica_count"`
+	LeaseCount        int       `json:"lease_count"`
 }
 
 // ClusterEvent is one UI-visible real-time event.
