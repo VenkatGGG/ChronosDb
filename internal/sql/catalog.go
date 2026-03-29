@@ -1,7 +1,9 @@
 package sql
 
 import (
+	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/VenkatGGG/ChronosDb/internal/placement"
@@ -70,6 +72,33 @@ func (c *Catalog) ResolveTable(name string) (TableDescriptor, error) {
 		return TableDescriptor{}, fmt.Errorf("sql catalog: unknown table %q", name)
 	}
 	return desc, nil
+}
+
+// Tables returns the catalog contents in deterministic table-id order.
+func (c *Catalog) Tables() []TableDescriptor {
+	if c == nil || len(c.tables) == 0 {
+		return nil
+	}
+	seen := make(map[uint64]struct{}, len(c.tables))
+	out := make([]TableDescriptor, 0, len(c.tables))
+	for _, desc := range c.tables {
+		if _, ok := seen[desc.ID]; ok {
+			continue
+		}
+		seen[desc.ID] = struct{}{}
+		out = append(out, desc)
+	}
+	slices.SortFunc(out, func(left, right TableDescriptor) int {
+		switch {
+		case left.ID < right.ID:
+			return -1
+		case left.ID > right.ID:
+			return 1
+		default:
+			return strings.Compare(canonicalName(left.Name), canonicalName(right.Name))
+		}
+	})
+	return out
 }
 
 // Validate checks the table descriptor for obvious corruption.
@@ -160,6 +189,22 @@ func (t TableDescriptor) CompiledPlacement() (placement.CompiledPolicy, bool, er
 		return placement.CompiledPolicy{}, false, fmt.Errorf("table descriptor: invalid placement policy: %w", err)
 	}
 	return compiled, true, nil
+}
+
+// MarshalBinary encodes the table descriptor into a stable persisted form.
+func (t TableDescriptor) MarshalBinary() ([]byte, error) {
+	if err := t.Validate(); err != nil {
+		return nil, err
+	}
+	return json.Marshal(t)
+}
+
+// UnmarshalBinary decodes the table descriptor from MarshalBinary.
+func (t *TableDescriptor) UnmarshalBinary(data []byte) error {
+	if err := json.Unmarshal(data, t); err != nil {
+		return fmt.Errorf("table descriptor: decode: %w", err)
+	}
+	return t.Validate()
 }
 
 func canonicalName(name string) string {

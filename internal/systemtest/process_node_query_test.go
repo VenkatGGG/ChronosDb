@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/binary"
 	"net"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/VenkatGGG/ChronosDb/internal/meta"
 	chronosruntime "github.com/VenkatGGG/ChronosDb/internal/runtime"
+	chronossql "github.com/VenkatGGG/ChronosDb/internal/sql"
 	"github.com/VenkatGGG/ChronosDb/internal/storage"
 )
 
@@ -399,6 +401,106 @@ func TestProcessNodeExecutesAggregateAndJoinQueries(t *testing.T) {
 	}
 	if len(joinRow3) != 2 || string(joinRow3[0]) != "bob" || string(joinRow3[1]) != "80" {
 		t.Fatalf("join row 3 = %q/%q, want bob/80", joinRow3[0], joinRow3[1])
+	}
+}
+
+func TestProcessNodeLoadsPersistedCustomCatalogAcrossRestart(t *testing.T) {
+	t.Parallel()
+
+	rootDir := t.TempDir()
+	bootstrapPath := filepath.Join(rootDir, "bootstrap.json")
+	widgetsRange := meta.RangeDescriptor{
+		RangeID:    71,
+		Generation: 1,
+		StartKey:   storage.GlobalTablePrimaryPrefix(42),
+		EndKey:     storage.GlobalTablePrimaryPrefix(43),
+		Replicas: []meta.ReplicaDescriptor{
+			{ReplicaID: 41, NodeID: 1, Role: meta.ReplicaRoleVoter},
+		},
+		LeaseholderReplicaID: 41,
+	}
+	manifest, err := chronosruntime.BuildBootstrapManifest("cluster-custom-catalog", []chronosruntime.BootstrapNode{
+		{NodeID: 1, StoreID: 41},
+	}, []meta.RangeDescriptor{widgetsRange})
+	if err != nil {
+		t.Fatalf("build bootstrap manifest: %v", err)
+	}
+	if err := chronosruntime.WriteBootstrapManifest(bootstrapPath, manifest); err != nil {
+		t.Fatalf("write bootstrap manifest: %v", err)
+	}
+
+	customCatalog := chronossql.NewCatalog()
+	if err := customCatalog.AddTable(chronossql.TableDescriptor{
+		ID:   42,
+		Name: "widgets",
+		Columns: []chronossql.ColumnDescriptor{
+			{ID: 1, Name: "id", Type: chronossql.ColumnTypeInt},
+			{ID: 2, Name: "name", Type: chronossql.ColumnTypeString},
+		},
+		PrimaryKey: []string{"id"},
+	}); err != nil {
+		t.Fatalf("add widgets table: %v", err)
+	}
+
+	dataDir := filepath.Join(rootDir, "node-1")
+	node, cancel, done := startProcessNodeForTest(t, ProcessNodeConfig{
+		NodeID:            1,
+		DataDir:           dataDir,
+		BootstrapPath:     bootstrapPath,
+		PGListenAddr:      "127.0.0.1:0",
+		ObservabilityAddr: "127.0.0.1:0",
+		ControlAddr:       "127.0.0.1:0",
+		Catalog:           customCatalog,
+	})
+	if err := node.host.Campaign(context.Background(), widgetsRange.RangeID); err != nil {
+		t.Fatalf("campaign widgets range: %v", err)
+	}
+	waitForRangeLeader(t, node.host, widgetsRange.RangeID, 41)
+
+	conn := openPGConn(t, node.state.PGAddr)
+	if _, err := conn.Write(queryFrame("insert into widgets (id, name) values (1, 'gizmo')")); err != nil {
+		t.Fatalf("write widgets insert: %v", err)
+	}
+	if got := frameTags(readFrames(t, conn, 2)); got != "CZ" {
+		t.Fatalf("widgets insert frame tags = %q, want CZ", got)
+	}
+	conn.Close()
+	cancel()
+	waitProcessNodeDone(t, done, "custom-catalog-node-1")
+
+	if err := os.Remove(filepath.Join(dataDir, "state.json")); err != nil && !os.IsNotExist(err) {
+		t.Fatalf("remove state file: %v", err)
+	}
+
+	restarted, cancelRestart, doneRestart := startProcessNodeForTest(t, ProcessNodeConfig{
+		NodeID:            1,
+		DataDir:           dataDir,
+		BootstrapPath:     bootstrapPath,
+		PGListenAddr:      "127.0.0.1:0",
+		ObservabilityAddr: "127.0.0.1:0",
+		ControlAddr:       "127.0.0.1:0",
+	})
+	t.Cleanup(func() {
+		cancelRestart()
+		waitProcessNodeDone(t, doneRestart, "restarted-custom-catalog-node-1")
+	})
+	waitForRangeLeader(t, restarted.host, widgetsRange.RangeID, 41)
+
+	selectConn := openPGConn(t, restarted.state.PGAddr)
+	defer selectConn.Close()
+	if _, err := selectConn.Write(queryFrame("select id, name from widgets where id = 1")); err != nil {
+		t.Fatalf("write widgets select: %v", err)
+	}
+	frames := readFrames(t, selectConn, 4)
+	if got := frameTags(frames); got != "TDCZ" {
+		t.Fatalf("widgets select frame tags = %q, want TDCZ", got)
+	}
+	values, err := decodeDataRowFrame(frames[1])
+	if err != nil {
+		t.Fatalf("decode widgets data row: %v", err)
+	}
+	if len(values) != 2 || string(values[0]) != "1" || string(values[1]) != "gizmo" {
+		t.Fatalf("widgets values = %q/%q, want 1/gizmo", values[0], values[1])
 	}
 }
 

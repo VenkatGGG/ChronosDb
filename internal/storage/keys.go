@@ -9,16 +9,18 @@ import (
 )
 
 var (
-	prefixRaft       = []byte("/raft/")
-	prefixRaftRange  = []byte("/raft/range/")
-	prefixMVCC       = []byte("/mvcc/")
-	prefixMVCCGlobal = []byte("/mvcc/global/")
-	prefixMVCCLocal  = []byte("/mvcc/local/")
-	prefixMeta1      = []byte("/mvcc/global/meta1/")
-	prefixMeta2      = []byte("/mvcc/global/meta2/")
-	prefixSystem     = []byte("/mvcc/global/system/")
-	prefixSystemTxn  = []byte("/mvcc/global/system/txn/")
-	prefixTable      = []byte("/mvcc/global/table/")
+	prefixRaft            = []byte("/raft/")
+	prefixRaftRange       = []byte("/raft/range/")
+	prefixMVCC            = []byte("/mvcc/")
+	prefixMVCCGlobal      = []byte("/mvcc/global/")
+	prefixMVCCLocal       = []byte("/mvcc/local/")
+	prefixMeta1           = []byte("/mvcc/global/meta1/")
+	prefixMeta2           = []byte("/mvcc/global/meta2/")
+	prefixSystem          = []byte("/mvcc/global/system/")
+	prefixSystemDesc      = []byte("/mvcc/global/system/desc/")
+	prefixSystemDescTable = []byte("/mvcc/global/system/desc/table/")
+	prefixSystemTxn       = []byte("/mvcc/global/system/txn/")
+	prefixTable           = []byte("/mvcc/global/table/")
 
 	storeIdentKey   = []byte("/mvcc/local/store/ident")
 	storeVersionKey = []byte("/mvcc/local/store/version")
@@ -117,6 +119,16 @@ func GlobalSystemTxnPrefix() []byte {
 	return bytes.Clone(prefixSystemTxn)
 }
 
+// GlobalSystemDescriptorPrefix returns the logical key prefix for system descriptors.
+func GlobalSystemDescriptorPrefix() []byte {
+	return bytes.Clone(prefixSystemDesc)
+}
+
+// GlobalSystemTableDescriptorPrefix returns the logical key prefix for SQL table descriptors.
+func GlobalSystemTableDescriptorPrefix() []byte {
+	return bytes.Clone(prefixSystemDescTable)
+}
+
 // GlobalTablePrefix returns the logical key prefix shared by all user table/index data.
 func GlobalTablePrefix() []byte {
 	return bytes.Clone(prefixTable)
@@ -157,6 +169,11 @@ func GlobalTablePrimaryKey(tableID uint64, encodedPrimaryKey []byte) []byte {
 // GlobalTxnRecordKey returns the logical key for one durable transaction record.
 func GlobalTxnRecordKey(txnID TxnID) []byte {
 	return append(bytes.Clone(prefixSystemTxn), txnID[:]...)
+}
+
+// GlobalTableDescriptorKey returns the logical key for one SQL table descriptor.
+func GlobalTableDescriptorKey(tableID uint64) []byte {
+	return append(bytes.Clone(prefixSystemDescTable), encodeUint64(tableID)...)
 }
 
 // GlobalTableIndexKey returns the logical MVCC key for a table secondary index row.

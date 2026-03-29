@@ -93,11 +93,7 @@ func NewProcessNode(cfg ProcessNodeConfig) (*ProcessNode, error) {
 		cfg.ControlAddr = "127.0.0.1:0"
 	}
 	if cfg.Catalog == nil {
-		var err error
-		cfg.Catalog, err = defaultSystemTestCatalog()
-		if err != nil {
-			return nil, err
-		}
+		cfg.Catalog = nil
 	}
 	if cfg.EventBufferSize <= 0 {
 		cfg.EventBufferSize = defaultProcessNodeEventBufferSize
@@ -124,6 +120,28 @@ func NewProcessNode(cfg ProcessNodeConfig) (*ProcessNode, error) {
 	})
 	if err != nil {
 		return nil, err
+	}
+	if cfg.Catalog == nil {
+		defaultCatalog, err := defaultSystemTestCatalog()
+		if err != nil {
+			return nil, err
+		}
+		if err := host.SeedSQLCatalog(context.Background(), defaultCatalog); err != nil {
+			return nil, err
+		}
+		cfg.Catalog, err = host.LoadSQLCatalog(context.Background())
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		if err := host.SeedSQLCatalog(context.Background(), cfg.Catalog); err != nil {
+			return nil, err
+		}
+		loadedCatalog, err := host.LoadSQLCatalog(context.Background())
+		if err != nil {
+			return nil, err
+		}
+		cfg.Catalog = loadedCatalog
 	}
 	node := &ProcessNode{
 		cfg:        cfg,

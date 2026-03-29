@@ -552,6 +552,9 @@ hardening, and a one-command seeded demo bootstrap.
 - [ ] 13.9 Persist catalog and SQL descriptors in the cluster
   so the demo no longer depends on the hardcoded `users` and `orders` tables in
   the systemtest catalog bootstrap path
+  - SQL table descriptors are now persisted under the system span and reloaded
+    by `chronos-node` on restart; remaining work is to make the seeded demo
+    bootstrap use that path directly instead of implicit defaults
 - [ ] 13.10 Promote background subsystem logic into live services
   for liveness heartbeats, lease maintenance, closed timestamp publication,
   split triggers, allocator decisions, learner snapshot catch-up, and rebalance

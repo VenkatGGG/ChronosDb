@@ -14,6 +14,7 @@ import (
 	"github.com/VenkatGGG/ChronosDb/internal/meta"
 	"github.com/VenkatGGG/ChronosDb/internal/multiraft"
 	"github.com/VenkatGGG/ChronosDb/internal/replica"
+	chronossql "github.com/VenkatGGG/ChronosDb/internal/sql"
 	"github.com/VenkatGGG/ChronosDb/internal/storage"
 	"github.com/VenkatGGG/ChronosDb/internal/txn"
 	"github.com/cockroachdb/pebble"
@@ -437,6 +438,51 @@ func (h *Host) GetTxnRecordLocal(ctx context.Context, txnID storage.TxnID) (txn.
 		return txn.Record{}, err
 	}
 	return record, nil
+}
+
+// LoadSQLCatalog loads persisted SQL table descriptors from the system span.
+func (h *Host) LoadSQLCatalog(ctx context.Context) (*chronossql.Catalog, error) {
+	rows, err := h.engine.ScanLatestMVCCRange(ctx, storage.GlobalSystemTableDescriptorPrefix(), storage.PrefixEnd(storage.GlobalSystemTableDescriptorPrefix()), true, false)
+	if err != nil {
+		return nil, err
+	}
+	catalog := chronossql.NewCatalog()
+	for _, row := range rows {
+		var table chronossql.TableDescriptor
+		if err := table.UnmarshalBinary(row.Value); err != nil {
+			return nil, err
+		}
+		if err := catalog.AddTable(table); err != nil {
+			return nil, err
+		}
+	}
+	return catalog, nil
+}
+
+// SeedSQLCatalog persists the provided SQL descriptors if the system descriptor span is empty.
+func (h *Host) SeedSQLCatalog(ctx context.Context, catalog *chronossql.Catalog) error {
+	if catalog == nil {
+		return nil
+	}
+	rows, err := h.engine.ScanLatestMVCCRange(ctx, storage.GlobalSystemTableDescriptorPrefix(), storage.PrefixEnd(storage.GlobalSystemTableDescriptorPrefix()), true, false)
+	if err != nil {
+		return err
+	}
+	if len(rows) > 0 {
+		return nil
+	}
+	batch := h.engine.NewWriteBatch()
+	defer batch.Close()
+	for _, table := range catalog.Tables() {
+		payload, err := table.MarshalBinary()
+		if err != nil {
+			return err
+		}
+		if err := batch.PutMVCCValue(storage.GlobalTableDescriptorKey(table.ID), hlc.Timestamp{WallTime: 1}, payload); err != nil {
+			return err
+		}
+	}
+	return batch.Commit(true)
 }
 
 // Campaign forces the local replica to begin an election for the specified range.

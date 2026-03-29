@@ -85,6 +85,9 @@ func (s *Scheduler) AddGroup(cfg GroupConfig) error {
 	if err != nil {
 		return err
 	}
+	if err := restoreConfState(mem, appliedIndex, cfg.Peers); err != nil {
+		return err
+	}
 
 	rawNode, err := raft.NewRawNode(&raft.Config{
 		ID:                       cfg.ReplicaID,
@@ -290,4 +293,24 @@ func isFreshRange(mem *raft.MemoryStorage) bool {
 		return false
 	}
 	return lastIndex == 0
+}
+
+func restoreConfState(mem *raft.MemoryStorage, appliedIndex uint64, peers []uint64) error {
+	if len(peers) == 0 {
+		return nil
+	}
+	_, confState, err := mem.InitialState()
+	if err != nil {
+		return err
+	}
+	if len(confState.Voters) > 0 || len(confState.Learners) > 0 {
+		return nil
+	}
+	if appliedIndex == 0 {
+		return nil
+	}
+	_, err = mem.CreateSnapshot(appliedIndex, &raftpb.ConfState{
+		Voters: append([]uint64(nil), peers...),
+	}, nil)
+	return err
 }

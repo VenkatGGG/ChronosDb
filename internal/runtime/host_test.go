@@ -7,6 +7,7 @@ import (
 
 	"github.com/VenkatGGG/ChronosDb/internal/hlc"
 	"github.com/VenkatGGG/ChronosDb/internal/meta"
+	chronossql "github.com/VenkatGGG/ChronosDb/internal/sql"
 	"github.com/VenkatGGG/ChronosDb/internal/storage"
 	"github.com/VenkatGGG/ChronosDb/internal/txn"
 )
@@ -183,6 +184,63 @@ func TestHostReplicatesTxnRecordsAndIntents(t *testing.T) {
 	}
 	if _, err := host.engine.GetIntent(context.Background(), key); err != storage.ErrIntentNotFound {
 		t.Fatalf("post-delete intent err = %v, want %v", err, storage.ErrIntentNotFound)
+	}
+}
+
+func TestHostSeedsAndLoadsSQLCatalog(t *testing.T) {
+	t.Parallel()
+
+	manifest, err := BuildBootstrapManifest("cluster-runtime-catalog", []BootstrapNode{
+		{NodeID: 1, StoreID: 1},
+	}, []meta.RangeDescriptor{
+		{
+			RangeID:    11,
+			Generation: 1,
+			StartKey:   storage.GlobalTablePrimaryPrefix(42),
+			EndKey:     storage.GlobalTablePrimaryPrefix(43),
+			Replicas: []meta.ReplicaDescriptor{
+				{ReplicaID: 1, NodeID: 1, Role: meta.ReplicaRoleVoter},
+			},
+			LeaseholderReplicaID: 1,
+		},
+	})
+	if err != nil {
+		t.Fatalf("build bootstrap manifest: %v", err)
+	}
+
+	host, err := Open(context.Background(), Config{
+		NodeID:            1,
+		StoreID:           1,
+		ClusterID:         manifest.ClusterID,
+		DataDir:           t.TempDir(),
+		BootstrapManifest: &manifest,
+	})
+	if err != nil {
+		t.Fatalf("open host: %v", err)
+	}
+	defer host.Close()
+
+	catalog := chronossql.NewCatalog()
+	if err := catalog.AddTable(chronossql.TableDescriptor{
+		ID:   42,
+		Name: "widgets",
+		Columns: []chronossql.ColumnDescriptor{
+			{ID: 1, Name: "id", Type: chronossql.ColumnTypeInt},
+			{ID: 2, Name: "name", Type: chronossql.ColumnTypeString},
+		},
+		PrimaryKey: []string{"id"},
+	}); err != nil {
+		t.Fatalf("add widgets table: %v", err)
+	}
+	if err := host.SeedSQLCatalog(context.Background(), catalog); err != nil {
+		t.Fatalf("seed sql catalog: %v", err)
+	}
+	loaded, err := host.LoadSQLCatalog(context.Background())
+	if err != nil {
+		t.Fatalf("load sql catalog: %v", err)
+	}
+	if _, err := loaded.ResolveTable("widgets"); err != nil {
+		t.Fatalf("resolve persisted widgets table: %v", err)
 	}
 }
 
