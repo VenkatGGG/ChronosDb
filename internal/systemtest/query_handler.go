@@ -88,6 +88,8 @@ func (h *runtimeQueryHandler) HandleSimpleQuery(ctx context.Context, session *pg
 		result, execErr = h.executeInsert(ctx, session, result, plan)
 	case chronossql.DeletePlan:
 		result, execErr = h.executeDelete(ctx, session, result, plan)
+	case chronossql.UpdatePlan:
+		result, execErr = h.executeUpdate(ctx, session, result, plan)
 	case chronossql.AggregatePlan:
 		result, execErr = h.executeAggregateQuery(ctx, session, result, plan)
 	case chronossql.HashJoinPlan:
@@ -334,6 +336,57 @@ func (h *runtimeQueryHandler) executeDelete(ctx context.Context, session *pgwire
 		}
 	}
 	result.CommandTag = fmt.Sprintf("DELETE %d", len(targets))
+	return result, nil
+}
+
+func (h *runtimeQueryHandler) executeUpdate(ctx context.Context, session *pgwire.Session, result pgwire.QueryResult, plan chronossql.UpdatePlan) (pgwire.QueryResult, error) {
+	targets, err := h.scanRowSet(ctx, session, plan.Input)
+	if err != nil {
+		return pgwire.QueryResult{}, err
+	}
+	if len(targets) == 0 {
+		result.CommandTag = "UPDATE 0"
+		return result, nil
+	}
+
+	if session == nil || session.TxStatus() != pgwire.TxInTransaction {
+		state := newTxnState(txnNow())
+		for _, target := range targets {
+			updatedPayload, err := rewriteUpdatedRow(plan.Table, target.row, plan.Assignments)
+			if err != nil {
+				_ = h.abortTxnState(ctx, state)
+				return pgwire.QueryResult{}, err
+			}
+			if err := h.stageWrite(ctx, state, target.key, updatedPayload, false); err != nil {
+				_ = h.abortTxnState(ctx, state)
+				return pgwire.QueryResult{}, err
+			}
+		}
+		if err := h.commitTxnState(ctx, state); err != nil {
+			return pgwire.QueryResult{}, err
+		}
+		result.CommandTag = fmt.Sprintf("UPDATE %d", len(targets))
+		return result, nil
+	}
+
+	state, ok := h.lookupSessionState(session)
+	if !ok {
+		return pgwire.QueryResult{}, pgwire.Error{
+			Severity: "ERROR",
+			Code:     "08006",
+			Message:  "transaction state is not available",
+		}
+	}
+	for _, target := range targets {
+		updatedPayload, err := rewriteUpdatedRow(plan.Table, target.row, plan.Assignments)
+		if err != nil {
+			return pgwire.QueryResult{}, err
+		}
+		if err := h.stageWrite(ctx, state, target.key, updatedPayload, false); err != nil {
+			return pgwire.QueryResult{}, err
+		}
+	}
+	result.CommandTag = fmt.Sprintf("UPDATE %d", len(targets))
 	return result, nil
 }
 
@@ -906,6 +959,29 @@ func clonePendingWrite(write pendingTxnWrite) pendingTxnWrite {
 		tombstone: write.tombstone,
 		rangeID:   write.rangeID,
 	}
+}
+
+func rewriteUpdatedRow(table chronossql.TableDescriptor, base map[string]chronossql.Value, assignments []chronossql.UpdateAssignment) ([]byte, error) {
+	row := make(map[string]chronossql.Value, len(base)+len(assignments))
+	for name, value := range base {
+		row[name] = cloneSQLValue(value)
+	}
+	for _, assignment := range assignments {
+		row[strings.ToLower(strings.TrimSpace(assignment.Column.Name))] = cloneSQLValue(assignment.Value)
+	}
+	payload, err := chronossql.EncodeRowValue(table, row)
+	if err != nil {
+		return nil, wrapExecutionError("encode updated row", err)
+	}
+	return payload, nil
+}
+
+func cloneSQLValue(value chronossql.Value) chronossql.Value {
+	cloned := value
+	if value.Type == chronossql.ColumnTypeBytes && value.Bytes != nil {
+		cloned.Bytes = append([]byte(nil), value.Bytes...)
+	}
+	return cloned
 }
 
 func (s *sessionTxnState) snapshot() (txn.Record, []pendingTxnWrite) {

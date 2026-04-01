@@ -35,6 +35,11 @@ func DecodeRowValue(table TableDescriptor, payload []byte) (map[string]Value, er
 	return row, nil
 }
 
+// EncodeRowValue encodes one typed SQL row into the stored row payload format.
+func EncodeRowValue(table TableDescriptor, row map[string]Value) ([]byte, error) {
+	return encodeRowValue(table, row)
+}
+
 // ProjectRowText projects a typed row onto a wire/text result set.
 func ProjectRowText(projection []ColumnDescriptor, row map[string]Value) ([][]byte, error) {
 	out := make([][]byte, 0, len(projection))

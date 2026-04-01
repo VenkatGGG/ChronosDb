@@ -50,6 +50,8 @@ func (p *Planner) Optimize(query string) (OptimizedPlan, error) {
 		return p.optimizeInsert(typed)
 	case *vsqlparser.Delete:
 		return p.optimizeDelete(typed)
+	case *vsqlparser.Update:
+		return p.optimizeUpdate(typed)
 	default:
 		return OptimizedPlan{}, fmt.Errorf("sql planner: unsupported statement type %T", stmt)
 	}
@@ -116,6 +118,20 @@ type DeletePlan struct {
 	Singleton bool
 }
 
+// UpdateAssignment binds one SET target onto one typed literal value.
+type UpdateAssignment struct {
+	Column ColumnDescriptor
+	Value  Value
+}
+
+// UpdatePlan maps one SQL update onto a scan plus row rewrites.
+type UpdatePlan struct {
+	Table       TableDescriptor
+	Input       RangeScanPlan
+	Assignments []UpdateAssignment
+	Singleton   bool
+}
+
 // AggregatePlan maps a scan onto distributed grouping/aggregation stages.
 type AggregatePlan struct {
 	Input      RangeScanPlan
@@ -150,6 +166,7 @@ func (PointLookupPlan) isPlan() {}
 func (RangeScanPlan) isPlan()   {}
 func (InsertPlan) isPlan()      {}
 func (DeletePlan) isPlan()      {}
+func (UpdatePlan) isPlan()      {}
 func (AggregatePlan) isPlan()   {}
 func (HashJoinPlan) isPlan()    {}
 
@@ -318,6 +335,40 @@ func (p *Planner) optimizeDelete(stmt *vsqlparser.Delete) (OptimizedPlan, error)
 		Table:     table,
 		Input:     scanPlan,
 		Singleton: singleton,
+	})})
+}
+
+func (p *Planner) optimizeUpdate(stmt *vsqlparser.Update) (OptimizedPlan, error) {
+	if stmt.With != nil || stmt.Ignore || len(stmt.OrderBy) > 0 || stmt.Limit != nil {
+		return OptimizedPlan{}, fmt.Errorf("sql planner: unsupported UPDATE shape")
+	}
+	table, err := p.resolveSingleTable(stmt.TableExprs)
+	if err != nil {
+		return OptimizedPlan{}, err
+	}
+	assignments, err := bindUpdateAssignments(table, stmt.Exprs)
+	if err != nil {
+		return OptimizedPlan{}, err
+	}
+	predicate, err := bindPrimaryKeyPredicate(table, stmt.Where)
+	if err != nil {
+		return OptimizedPlan{}, err
+	}
+	switch {
+	case predicate.equality != nil:
+	case predicate.lower != nil && predicate.upper != nil:
+	default:
+		return OptimizedPlan{}, fmt.Errorf("sql planner: UPDATE requires a primary-key point predicate or bounded primary-key range")
+	}
+	scanPlan, singleton, err := buildRangeScanPlan(table, table.Columns, predicate)
+	if err != nil {
+		return OptimizedPlan{}, err
+	}
+	return p.optimizer.Choose([]PlanCandidate{makeUpdateCandidate(p.optimizer, table, predicate, singleton, UpdatePlan{
+		Table:       table,
+		Input:       scanPlan,
+		Assignments: assignments,
+		Singleton:   singleton,
 	})})
 }
 
@@ -875,6 +926,52 @@ func bindInsertRow(table TableDescriptor, columns vsqlparser.Columns, tuple vsql
 		return nil, fmt.Errorf("sql planner: primary key column %q is required", pkColumn.Name)
 	}
 	return row, nil
+}
+
+func bindUpdateAssignments(table TableDescriptor, exprs vsqlparser.UpdateExprs) ([]UpdateAssignment, error) {
+	if len(exprs) == 0 {
+		return nil, fmt.Errorf("sql planner: UPDATE requires at least one SET clause")
+	}
+	pkColumn, err := table.PrimaryKeyColumn()
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[string]struct{}, len(exprs))
+	assignments := make([]UpdateAssignment, 0, len(exprs))
+	for _, expr := range exprs {
+		if expr == nil || expr.Name == nil {
+			return nil, fmt.Errorf("sql planner: malformed UPDATE expression")
+		}
+		qualifier := strings.TrimSpace(expr.Name.Qualifier.Name.String())
+		if qualifier != "" && canonicalName(qualifier) != canonicalName(table.Name) {
+			return nil, fmt.Errorf("sql planner: unknown UPDATE qualifier %q", qualifier)
+		}
+		column, ok := table.ColumnByName(expr.Name.Name.String())
+		if !ok {
+			return nil, fmt.Errorf("sql planner: unknown UPDATE column %q", expr.Name.Name.String())
+		}
+		if canonicalName(column.Name) == canonicalName(pkColumn.Name) {
+			return nil, fmt.Errorf("sql planner: updating primary key column %q is unsupported", pkColumn.Name)
+		}
+		name := canonicalName(column.Name)
+		if _, exists := seen[name]; exists {
+			return nil, fmt.Errorf("sql planner: duplicate UPDATE assignment for column %q", column.Name)
+		}
+		seen[name] = struct{}{}
+		literal, ok := expr.Expr.(*vsqlparser.Literal)
+		if !ok {
+			return nil, fmt.Errorf("sql planner: only literal UPDATE values are supported")
+		}
+		value, err := bindLiteral(column.Type, literal)
+		if err != nil {
+			return nil, err
+		}
+		assignments = append(assignments, UpdateAssignment{
+			Column: column,
+			Value:  value,
+		})
+	}
+	return assignments, nil
 }
 
 func encodeInsert(table TableDescriptor, row map[string]Value) ([]byte, []byte, error) {

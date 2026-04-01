@@ -660,10 +660,22 @@ Design constraints:
     row counts, and cross-node absence after commit
   - `DELETE RETURNING` stays deferred to `14.5` so all DML `RETURNING`
     semantics land through the shared projection/materialization path
-- [ ] 14.3 Add `UPDATE` planning and execution
+- [x] 14.3 Add `UPDATE` planning and execution
   for primary-key-targeted updates, including `SET` clause binding, row
-  read/merge/rewrite behavior, transactional locking, write-intent updates, and
-  `RETURNING` support
+  read/merge/rewrite behavior, transactional locking, and write-intent updates
+  through the live runtime
+  - planner, optimizer, flow planning, and pgwire metadata now treat `UPDATE`
+    as a first-class statement type with point-update and bounded-range-update
+    shapes over primary-key predicates
+  - the live executor now performs committed-row read/merge/rewrite behavior
+    for both implicit and explicit transactions, stages updated row payloads as
+    intents, and commits multi-range updates through the durable txn-record
+    path instead of bypassing transaction machinery
+  - unit and end-to-end pgwire tests now cover point updates, bounded
+    multi-range updates, explicit-transaction update visibility, command-tag
+    row counts, and cross-node reads of committed updated rows
+  - `UPDATE RETURNING` stays deferred to `14.5` so all DML `RETURNING`
+    semantics land through the shared projection/materialization path
 - [ ] 14.4 Add primary-key `UPSERT`
   as a first-class plan and executor path that atomically inserts-or-overwrites
   the primary row under transaction control without yet depending on secondary

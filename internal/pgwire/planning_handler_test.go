@@ -65,6 +65,22 @@ func TestPlanningHandlerDescribeDelete(t *testing.T) {
 	}
 }
 
+func TestPlanningHandlerDescribeUpdate(t *testing.T) {
+	t.Parallel()
+
+	handler := newPlanningHandler(t)
+	result, err := handler.HandleSimpleQuery(context.Background(), NewSession(handler), "update users set name = 'ally' where id = 7")
+	if err != nil {
+		t.Fatalf("handle query: %v", err)
+	}
+	if result.CommandTag != "UPDATE 0" {
+		t.Fatalf("command tag = %q, want UPDATE 0", result.CommandTag)
+	}
+	if len(result.Fields) != 0 {
+		t.Fatalf("update should not expose row-description fields")
+	}
+}
+
 func TestPlanningHandlerDescribeAggregate(t *testing.T) {
 	t.Parallel()
 

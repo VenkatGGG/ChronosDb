@@ -18,6 +18,7 @@ const (
 	OperatorKVScan     OperatorKind = "kv_scan"
 	OperatorKVInsert   OperatorKind = "kv_insert"
 	OperatorKVDelete   OperatorKind = "kv_delete"
+	OperatorKVUpdate   OperatorKind = "kv_update"
 	OperatorMerge      OperatorKind = "merge"
 	OperatorHashJoin   OperatorKind = "hash_join"
 	OperatorAggregate  OperatorKind = "aggregate"
@@ -123,6 +124,8 @@ func (p *FlowPlanner) Build(plan Plan) (FlowPlan, error) {
 		return p.buildInsert(typed), nil
 	case DeletePlan:
 		return p.buildDelete(typed), nil
+	case UpdatePlan:
+		return p.buildUpdate(typed), nil
 	case AggregatePlan:
 		return p.buildAggregate(typed), nil
 	case HashJoinPlan:
@@ -251,6 +254,38 @@ func (p *FlowPlanner) buildDelete(plan DeletePlan) FlowPlan {
 			Processors: []ProcessorSpec{
 				{
 					Kind:  OperatorKVDelete,
+					Table: &plan.Table,
+					Spans: []KeySpan{
+						{
+							StartKey:       append([]byte(nil), plan.Input.StartKey...),
+							EndKey:         append([]byte(nil), plan.Input.EndKey...),
+							StartInclusive: plan.Input.StartInclusive,
+							EndInclusive:   plan.Input.EndInclusive,
+						},
+					},
+				},
+			},
+		},
+	}, nil)
+}
+
+func (p *FlowPlanner) buildUpdate(plan UpdatePlan) FlowPlan {
+	distribution := DistributionByRange
+	preferred := scanPreferredRegions(plan.Table)
+	if plan.Singleton {
+		distribution = DistributionLeaseholderOnly
+		preferred = leasePreferredRegions(plan.Table)
+	}
+	return assembleFlowPlan(1, []FlowStage{
+		{
+			ID:               1,
+			Name:             "update_rewrite",
+			Distribution:     distribution,
+			PreferredRegions: preferred,
+			HomeRegion:       homeRegion(plan.Table),
+			Processors: []ProcessorSpec{
+				{
+					Kind:  OperatorKVUpdate,
 					Table: &plan.Table,
 					Spans: []KeySpan{
 						{

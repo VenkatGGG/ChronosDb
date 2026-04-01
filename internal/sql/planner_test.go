@@ -121,6 +121,49 @@ func TestPlannerBoundedRangeDelete(t *testing.T) {
 	}
 }
 
+func TestPlannerPointUpdate(t *testing.T) {
+	t.Parallel()
+
+	planner := testPlanner(t)
+	plan, err := planner.Plan("update users set name = 'ally', email = 'ally@example.com' where id = 7")
+	if err != nil {
+		t.Fatalf("plan update: %v", err)
+	}
+	updatePlan, ok := plan.(UpdatePlan)
+	if !ok {
+		t.Fatalf("plan type = %T, want UpdatePlan", plan)
+	}
+	if !updatePlan.Singleton {
+		t.Fatalf("update singleton = false, want true")
+	}
+	if len(updatePlan.Assignments) != 2 {
+		t.Fatalf("assignment count = %d, want 2", len(updatePlan.Assignments))
+	}
+	if !bytes.Equal(updatePlan.Input.StartKey, storage.GlobalTablePrimaryKey(7, encodedIntKey(7))) {
+		t.Fatalf("update start key = %q, want point key", updatePlan.Input.StartKey)
+	}
+}
+
+func TestPlannerBoundedRangeUpdate(t *testing.T) {
+	t.Parallel()
+
+	planner := testPlanner(t)
+	plan, err := planner.Plan("update users set email = 'group@example.com' where id >= 10 and id < 20")
+	if err != nil {
+		t.Fatalf("plan update: %v", err)
+	}
+	updatePlan, ok := plan.(UpdatePlan)
+	if !ok {
+		t.Fatalf("plan type = %T, want UpdatePlan", plan)
+	}
+	if updatePlan.Singleton {
+		t.Fatalf("update singleton = true, want false")
+	}
+	if len(updatePlan.Assignments) != 1 || updatePlan.Assignments[0].Column.Name != "email" {
+		t.Fatalf("assignments = %+v, want one email assignment", updatePlan.Assignments)
+	}
+}
+
 func TestPlannerAggregateSelect(t *testing.T) {
 	t.Parallel()
 
@@ -224,6 +267,9 @@ func TestPlannerRejectsNonPrimaryKeyPredicate(t *testing.T) {
 	if _, err := planner.Plan("delete from users where name = 'alice'"); err == nil {
 		t.Fatalf("expected planner error for non-primary-key delete predicate")
 	}
+	if _, err := planner.Plan("update users set email = 'alice@example.com' where name = 'alice'"); err == nil {
+		t.Fatalf("expected planner error for non-primary-key update predicate")
+	}
 }
 
 func TestPlannerRejectsUnboundedDelete(t *testing.T) {
@@ -235,6 +281,21 @@ func TestPlannerRejectsUnboundedDelete(t *testing.T) {
 	}
 	if _, err := planner.Plan("delete from users where id >= 10"); err == nil {
 		t.Fatalf("expected planner error for half-bounded delete")
+	}
+}
+
+func TestPlannerRejectsUnsupportedUpdate(t *testing.T) {
+	t.Parallel()
+
+	planner := testPlanner(t)
+	if _, err := planner.Plan("update users set id = 8 where id = 7"); err == nil {
+		t.Fatalf("expected planner error for primary-key update")
+	}
+	if _, err := planner.Plan("update users set name = name where id = 7"); err == nil {
+		t.Fatalf("expected planner error for non-literal update value")
+	}
+	if _, err := planner.Plan("update users set name = 'ally'"); err == nil {
+		t.Fatalf("expected planner error for unbounded update")
 	}
 }
 
@@ -317,6 +378,25 @@ func TestPlannerOptimizePointDeleteUsesPointCandidate(t *testing.T) {
 	}
 	if _, ok := optimized.Selected.Plan.(DeletePlan); !ok {
 		t.Fatalf("selected plan type = %T, want DeletePlan", optimized.Selected.Plan)
+	}
+}
+
+func TestPlannerOptimizePointUpdateUsesPointCandidate(t *testing.T) {
+	t.Parallel()
+
+	planner := testPlanner(t)
+	optimized, err := planner.Optimize("update users set name = 'ally' where id = 7")
+	if err != nil {
+		t.Fatalf("optimize update: %v", err)
+	}
+	if len(optimized.Candidates) != 1 {
+		t.Fatalf("candidate count = %d, want 1", len(optimized.Candidates))
+	}
+	if optimized.Selected.Name != "point_update" {
+		t.Fatalf("selected candidate = %q, want point_update", optimized.Selected.Name)
+	}
+	if _, ok := optimized.Selected.Plan.(UpdatePlan); !ok {
+		t.Fatalf("selected plan type = %T, want UpdatePlan", optimized.Selected.Plan)
 	}
 }
 
