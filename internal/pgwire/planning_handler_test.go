@@ -65,6 +65,38 @@ func TestPlanningHandlerDescribeUpsert(t *testing.T) {
 	}
 }
 
+func TestPlanningHandlerDescribeInsertReturning(t *testing.T) {
+	t.Parallel()
+
+	handler := newPlanningHandler(t)
+	result, err := handler.HandleSimpleQuery(context.Background(), NewSession(handler), "insert into users (id, name, email) values (1, 'alice', 'a@example.com') returning id, name")
+	if err != nil {
+		t.Fatalf("handle query: %v", err)
+	}
+	if result.CommandTag != "INSERT 0 1" {
+		t.Fatalf("command tag = %q, want INSERT 0 1", result.CommandTag)
+	}
+	if len(result.Fields) != 2 || result.Fields[0].Name != "id" || result.Fields[1].Name != "name" {
+		t.Fatalf("returning fields = %+v, want [id name]", result.Fields)
+	}
+}
+
+func TestPlanningHandlerDescribeUpdateReturning(t *testing.T) {
+	t.Parallel()
+
+	handler := newPlanningHandler(t)
+	result, err := handler.HandleSimpleQuery(context.Background(), NewSession(handler), "update users set name = 'ally' where id = 7 returning id, name")
+	if err != nil {
+		t.Fatalf("handle query: %v", err)
+	}
+	if result.CommandTag != "UPDATE 0" {
+		t.Fatalf("command tag = %q, want UPDATE 0", result.CommandTag)
+	}
+	if len(result.Fields) != 2 || result.Fields[0].Name != "id" || result.Fields[1].Name != "name" {
+		t.Fatalf("returning fields = %+v, want [id name]", result.Fields)
+	}
+}
+
 func TestPlanningHandlerDescribeDelete(t *testing.T) {
 	t.Parallel()
 

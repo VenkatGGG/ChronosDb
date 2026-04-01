@@ -279,11 +279,11 @@ func (h *runtimeQueryHandler) executeRangeScan(ctx context.Context, session *pgw
 }
 
 func (h *runtimeQueryHandler) executeInsert(ctx context.Context, session *pgwire.Session, result pgwire.QueryResult, plan chronossql.InsertPlan) (pgwire.QueryResult, error) {
-	return h.executeInsertLike(ctx, session, result, plan.Table, plan.Key, plan.Value, false)
+	return h.executeInsertLike(ctx, session, result, plan.Table, plan.Key, plan.Value, plan.Returning, false)
 }
 
 func (h *runtimeQueryHandler) executeUpsert(ctx context.Context, session *pgwire.Session, result pgwire.QueryResult, plan chronossql.UpsertPlan) (pgwire.QueryResult, error) {
-	return h.executeInsertLike(ctx, session, result, plan.Table, plan.Key, plan.Value, true)
+	return h.executeInsertLike(ctx, session, result, plan.Table, plan.Key, plan.Value, plan.Returning, true)
 }
 
 func (h *runtimeQueryHandler) executeDelete(ctx context.Context, session *pgwire.Session, result pgwire.QueryResult, plan chronossql.DeletePlan) (pgwire.QueryResult, error) {
@@ -294,6 +294,16 @@ func (h *runtimeQueryHandler) executeDelete(ctx context.Context, session *pgwire
 	if len(targets) == 0 {
 		result.CommandTag = "DELETE 0"
 		return result, nil
+	}
+	if len(plan.Returning) > 0 {
+		result.Rows = make([][][]byte, 0, len(targets))
+		for _, target := range targets {
+			projected, err := chronossql.ProjectRowText(plan.Returning, target.row)
+			if err != nil {
+				return pgwire.QueryResult{}, wrapExecutionError("project delete returning row", err)
+			}
+			result.Rows = append(result.Rows, projected)
+		}
 	}
 
 	if session == nil || session.TxStatus() != pgwire.TxInTransaction {
@@ -337,14 +347,23 @@ func (h *runtimeQueryHandler) executeUpdate(ctx context.Context, session *pgwire
 		result.CommandTag = "UPDATE 0"
 		return result, nil
 	}
+	returningRows := make([][][]byte, 0, len(targets))
 
 	if session == nil || session.TxStatus() != pgwire.TxInTransaction {
 		state := newTxnState(txnNow())
 		for _, target := range targets {
-			updatedPayload, err := rewriteUpdatedRow(plan.Table, target.row, plan.Assignments)
+			updatedRow, updatedPayload, err := rewriteUpdatedRow(plan.Table, target.row, plan.Assignments)
 			if err != nil {
 				_ = h.abortTxnState(ctx, state)
 				return pgwire.QueryResult{}, err
+			}
+			if len(plan.Returning) > 0 {
+				projected, err := chronossql.ProjectRowText(plan.Returning, updatedRow)
+				if err != nil {
+					_ = h.abortTxnState(ctx, state)
+					return pgwire.QueryResult{}, wrapExecutionError("project update returning row", err)
+				}
+				returningRows = append(returningRows, projected)
 			}
 			if err := h.stageWrite(ctx, state, target.key, updatedPayload, false); err != nil {
 				_ = h.abortTxnState(ctx, state)
@@ -354,6 +373,7 @@ func (h *runtimeQueryHandler) executeUpdate(ctx context.Context, session *pgwire
 		if err := h.commitTxnState(ctx, state); err != nil {
 			return pgwire.QueryResult{}, err
 		}
+		result.Rows = returningRows
 		result.CommandTag = fmt.Sprintf("UPDATE %d", len(targets))
 		return result, nil
 	}
@@ -367,19 +387,27 @@ func (h *runtimeQueryHandler) executeUpdate(ctx context.Context, session *pgwire
 		}
 	}
 	for _, target := range targets {
-		updatedPayload, err := rewriteUpdatedRow(plan.Table, target.row, plan.Assignments)
+		updatedRow, updatedPayload, err := rewriteUpdatedRow(plan.Table, target.row, plan.Assignments)
 		if err != nil {
 			return pgwire.QueryResult{}, err
+		}
+		if len(plan.Returning) > 0 {
+			projected, err := chronossql.ProjectRowText(plan.Returning, updatedRow)
+			if err != nil {
+				return pgwire.QueryResult{}, wrapExecutionError("project update returning row", err)
+			}
+			returningRows = append(returningRows, projected)
 		}
 		if err := h.stageWrite(ctx, state, target.key, updatedPayload, false); err != nil {
 			return pgwire.QueryResult{}, err
 		}
 	}
+	result.Rows = returningRows
 	result.CommandTag = fmt.Sprintf("UPDATE %d", len(targets))
 	return result, nil
 }
 
-func (h *runtimeQueryHandler) executeInsertLike(ctx context.Context, session *pgwire.Session, result pgwire.QueryResult, table chronossql.TableDescriptor, key, value []byte, allowOverwrite bool) (pgwire.QueryResult, error) {
+func (h *runtimeQueryHandler) executeInsertLike(ctx context.Context, session *pgwire.Session, result pgwire.QueryResult, table chronossql.TableDescriptor, key, value []byte, returning []chronossql.ColumnDescriptor, allowOverwrite bool) (pgwire.QueryResult, error) {
 	if !allowOverwrite {
 		allowed, err := h.insertAllowed(ctx, session, table, key)
 		if err != nil {
@@ -388,6 +416,17 @@ func (h *runtimeQueryHandler) executeInsertLike(ctx context.Context, session *pg
 		if !allowed {
 			return pgwire.QueryResult{}, duplicateKeyError(table)
 		}
+	}
+	if len(returning) > 0 {
+		row, err := chronossql.DecodeRowValue(table, value)
+		if err != nil {
+			return pgwire.QueryResult{}, wrapExecutionError("decode returning row", err)
+		}
+		projected, err := chronossql.ProjectRowText(returning, row)
+		if err != nil {
+			return pgwire.QueryResult{}, wrapExecutionError("project returning row", err)
+		}
+		result.Rows = [][][]byte{projected}
 	}
 	if session == nil || session.TxStatus() != pgwire.TxInTransaction {
 		state := newTxnState(txnNow())
@@ -985,7 +1024,7 @@ func clonePendingWrite(write pendingTxnWrite) pendingTxnWrite {
 	}
 }
 
-func rewriteUpdatedRow(table chronossql.TableDescriptor, base map[string]chronossql.Value, assignments []chronossql.UpdateAssignment) ([]byte, error) {
+func rewriteUpdatedRow(table chronossql.TableDescriptor, base map[string]chronossql.Value, assignments []chronossql.UpdateAssignment) (map[string]chronossql.Value, []byte, error) {
 	row := make(map[string]chronossql.Value, len(base)+len(assignments))
 	for name, value := range base {
 		row[name] = cloneSQLValue(value)
@@ -995,9 +1034,9 @@ func rewriteUpdatedRow(table chronossql.TableDescriptor, base map[string]chronos
 	}
 	payload, err := chronossql.EncodeRowValue(table, row)
 	if err != nil {
-		return nil, wrapExecutionError("encode updated row", err)
+		return nil, nil, wrapExecutionError("encode updated row", err)
 	}
-	return payload, nil
+	return row, payload, nil
 }
 
 func cloneSQLValue(value chronossql.Value) chronossql.Value {

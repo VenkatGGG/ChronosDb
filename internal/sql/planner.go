@@ -39,8 +39,11 @@ func (p *Planner) Plan(query string) (Plan, error) {
 
 // Optimize parses, binds, and cost-ranks one SQL statement.
 func (p *Planner) Optimize(query string) (OptimizedPlan, error) {
-	query, upsert := normalizeUpsertQuery(query)
-	stmt, err := p.parser.Parse(query)
+	features, err := extractQueryFeatures(query)
+	if err != nil {
+		return OptimizedPlan{}, err
+	}
+	stmt, err := p.parser.Parse(features.BaseQuery)
 	if err != nil {
 		return OptimizedPlan{}, err
 	}
@@ -48,14 +51,14 @@ func (p *Planner) Optimize(query string) (OptimizedPlan, error) {
 	case *vsqlparser.Select:
 		return p.optimizeSelect(typed)
 	case *vsqlparser.Insert:
-		if upsert {
-			return p.optimizeUpsert(typed)
+		if features.Upsert {
+			return p.optimizeUpsert(typed, features.ReturningClause)
 		}
-		return p.optimizeInsert(typed)
+		return p.optimizeInsert(typed, features.ReturningClause)
 	case *vsqlparser.Delete:
-		return p.optimizeDelete(typed)
+		return p.optimizeDelete(typed, features.ReturningClause)
 	case *vsqlparser.Update:
-		return p.optimizeUpdate(typed)
+		return p.optimizeUpdate(typed, features.ReturningClause)
 	default:
 		return OptimizedPlan{}, fmt.Errorf("sql planner: unsupported statement type %T", stmt)
 	}
@@ -110,23 +113,26 @@ type RangeScanPlan struct {
 
 // InsertPlan maps one SQL insert to one KV put.
 type InsertPlan struct {
-	Table TableDescriptor
-	Key   []byte
-	Value []byte
+	Table     TableDescriptor
+	Key       []byte
+	Value     []byte
+	Returning []ColumnDescriptor
 }
 
 // UpsertPlan maps one SQL upsert to one KV put that may overwrite an existing
 // primary-key row atomically under transaction control.
 type UpsertPlan struct {
-	Table TableDescriptor
-	Key   []byte
-	Value []byte
+	Table     TableDescriptor
+	Key       []byte
+	Value     []byte
+	Returning []ColumnDescriptor
 }
 
 // DeletePlan maps one SQL delete onto one KV span of tombstone writes.
 type DeletePlan struct {
 	Table     TableDescriptor
 	Input     RangeScanPlan
+	Returning []ColumnDescriptor
 	Singleton bool
 }
 
@@ -141,6 +147,7 @@ type UpdatePlan struct {
 	Table       TableDescriptor
 	Input       RangeScanPlan
 	Assignments []UpdateAssignment
+	Returning   []ColumnDescriptor
 	Singleton   bool
 }
 
@@ -200,6 +207,12 @@ type Value struct {
 	Int64  int64
 	String string
 	Bytes  []byte
+}
+
+type queryFeatures struct {
+	BaseQuery       string
+	Upsert          bool
+	ReturningClause string
 }
 
 func (p *Planner) optimizeSelect(stmt *vsqlparser.Select) (OptimizedPlan, error) {
@@ -287,7 +300,7 @@ func (p *Planner) optimizeAggregateSelect(stmt *vsqlparser.Select) (OptimizedPla
 	return p.optimizer.Choose(candidates)
 }
 
-func (p *Planner) optimizeInsert(stmt *vsqlparser.Insert) (OptimizedPlan, error) {
+func (p *Planner) optimizeInsert(stmt *vsqlparser.Insert, returningClause string) (OptimizedPlan, error) {
 	if stmt.Ignore || len(stmt.OnDup) > 0 || stmt.Rows == nil {
 		return OptimizedPlan{}, fmt.Errorf("sql planner: unsupported INSERT shape")
 	}
@@ -314,15 +327,20 @@ func (p *Planner) optimizeInsert(stmt *vsqlparser.Insert) (OptimizedPlan, error)
 	if err != nil {
 		return OptimizedPlan{}, err
 	}
+	returning, err := bindReturningProjection(table, returningClause)
+	if err != nil {
+		return OptimizedPlan{}, err
+	}
 	plan := InsertPlan{
-		Table: table,
-		Key:   key,
-		Value: value,
+		Table:     table,
+		Key:       key,
+		Value:     value,
+		Returning: returning,
 	}
 	return p.optimizer.Choose([]PlanCandidate{makeInsertCandidate(p.optimizer, table, plan)})
 }
 
-func (p *Planner) optimizeUpsert(stmt *vsqlparser.Insert) (OptimizedPlan, error) {
+func (p *Planner) optimizeUpsert(stmt *vsqlparser.Insert, returningClause string) (OptimizedPlan, error) {
 	if stmt.Ignore || len(stmt.OnDup) > 0 || stmt.Rows == nil {
 		return OptimizedPlan{}, fmt.Errorf("sql planner: unsupported UPSERT shape")
 	}
@@ -349,15 +367,20 @@ func (p *Planner) optimizeUpsert(stmt *vsqlparser.Insert) (OptimizedPlan, error)
 	if err != nil {
 		return OptimizedPlan{}, err
 	}
+	returning, err := bindReturningProjection(table, returningClause)
+	if err != nil {
+		return OptimizedPlan{}, err
+	}
 	plan := UpsertPlan{
-		Table: table,
-		Key:   key,
-		Value: value,
+		Table:     table,
+		Key:       key,
+		Value:     value,
+		Returning: returning,
 	}
 	return p.optimizer.Choose([]PlanCandidate{makeUpsertCandidate(p.optimizer, table, plan)})
 }
 
-func (p *Planner) optimizeDelete(stmt *vsqlparser.Delete) (OptimizedPlan, error) {
+func (p *Planner) optimizeDelete(stmt *vsqlparser.Delete, returningClause string) (OptimizedPlan, error) {
 	if stmt.With != nil || stmt.Ignore || len(stmt.Targets) > 0 || len(stmt.Partitions) > 0 || len(stmt.OrderBy) > 0 || stmt.Limit != nil {
 		return OptimizedPlan{}, fmt.Errorf("sql planner: unsupported DELETE shape")
 	}
@@ -379,14 +402,19 @@ func (p *Planner) optimizeDelete(stmt *vsqlparser.Delete) (OptimizedPlan, error)
 	if err != nil {
 		return OptimizedPlan{}, err
 	}
+	returning, err := bindReturningProjection(table, returningClause)
+	if err != nil {
+		return OptimizedPlan{}, err
+	}
 	return p.optimizer.Choose([]PlanCandidate{makeDeleteCandidate(p.optimizer, table, predicate, singleton, DeletePlan{
 		Table:     table,
 		Input:     scanPlan,
+		Returning: returning,
 		Singleton: singleton,
 	})})
 }
 
-func (p *Planner) optimizeUpdate(stmt *vsqlparser.Update) (OptimizedPlan, error) {
+func (p *Planner) optimizeUpdate(stmt *vsqlparser.Update, returningClause string) (OptimizedPlan, error) {
 	if stmt.With != nil || stmt.Ignore || len(stmt.OrderBy) > 0 || stmt.Limit != nil {
 		return OptimizedPlan{}, fmt.Errorf("sql planner: unsupported UPDATE shape")
 	}
@@ -412,10 +440,15 @@ func (p *Planner) optimizeUpdate(stmt *vsqlparser.Update) (OptimizedPlan, error)
 	if err != nil {
 		return OptimizedPlan{}, err
 	}
+	returning, err := bindReturningProjection(table, returningClause)
+	if err != nil {
+		return OptimizedPlan{}, err
+	}
 	return p.optimizer.Choose([]PlanCandidate{makeUpdateCandidate(p.optimizer, table, predicate, singleton, UpdatePlan{
 		Table:       table,
 		Input:       scanPlan,
 		Assignments: assignments,
+		Returning:   returning,
 		Singleton:   singleton,
 	})})
 }
@@ -1022,6 +1055,33 @@ func bindUpdateAssignments(table TableDescriptor, exprs vsqlparser.UpdateExprs) 
 	return assignments, nil
 }
 
+func bindReturningProjection(table TableDescriptor, clause string) ([]ColumnDescriptor, error) {
+	clause = strings.TrimSpace(clause)
+	if clause == "" {
+		return nil, nil
+	}
+	if clause == "*" {
+		return append([]ColumnDescriptor(nil), table.Columns...), nil
+	}
+	parts := strings.Split(clause, ",")
+	projection := make([]ColumnDescriptor, 0, len(parts))
+	for _, part := range parts {
+		name := strings.TrimSpace(part)
+		if name == "" {
+			return nil, fmt.Errorf("sql planner: malformed RETURNING clause")
+		}
+		if idx := strings.LastIndex(name, "."); idx >= 0 {
+			name = strings.TrimSpace(name[idx+1:])
+		}
+		column, ok := table.ColumnByName(name)
+		if !ok {
+			return nil, fmt.Errorf("sql planner: unknown RETURNING column %q", name)
+		}
+		projection = append(projection, column)
+	}
+	return projection, nil
+}
+
 func encodeInsert(table TableDescriptor, row map[string]Value) ([]byte, []byte, error) {
 	pkColumn, err := table.PrimaryKeyColumn()
 	if err != nil {
@@ -1119,6 +1179,16 @@ func encodeRowValue(table TableDescriptor, row map[string]Value) ([]byte, error)
 	return json.Marshal(payload)
 }
 
+func extractQueryFeatures(query string) (queryFeatures, error) {
+	baseQuery, returningClause := splitReturningClause(query)
+	baseQuery, upsert := normalizeUpsertQuery(baseQuery)
+	return queryFeatures{
+		BaseQuery:       baseQuery,
+		Upsert:          upsert,
+		ReturningClause: returningClause,
+	}, nil
+}
+
 func normalizeUpsertQuery(query string) (string, bool) {
 	trimmed := strings.TrimLeft(query, " \t\r\n")
 	if !strings.HasPrefix(strings.ToLower(trimmed), "upsert ") {
@@ -1126,4 +1196,67 @@ func normalizeUpsertQuery(query string) (string, bool) {
 	}
 	leading := len(query) - len(trimmed)
 	return query[:leading] + "insert" + trimmed[len("upsert"):], true
+}
+
+func splitReturningClause(query string) (string, string) {
+	trimmed := strings.TrimSpace(query)
+	withoutSemicolon := strings.TrimSuffix(trimmed, ";")
+	lower := strings.ToLower(strings.TrimSpace(withoutSemicolon))
+	if !(strings.HasPrefix(lower, "insert ") || strings.HasPrefix(lower, "update ") || strings.HasPrefix(lower, "delete ") || strings.HasPrefix(lower, "upsert ")) {
+		return query, ""
+	}
+	idx := findKeywordOutsideQuotes(withoutSemicolon, "returning")
+	if idx < 0 {
+		return query, ""
+	}
+	base := strings.TrimSpace(withoutSemicolon[:idx])
+	returning := strings.TrimSpace(withoutSemicolon[idx+len("returning"):])
+	return base, returning
+}
+
+func findKeywordOutsideQuotes(input, keyword string) int {
+	lower := strings.ToLower(input)
+	target := strings.ToLower(keyword)
+	inSingle := false
+	inDouble := false
+	for i := 0; i <= len(lower)-len(target); i++ {
+		switch lower[i] {
+		case '\'':
+			if !inDouble {
+				if inSingle && i+1 < len(lower) && lower[i+1] == '\'' {
+					i++
+					continue
+				}
+				inSingle = !inSingle
+			}
+			continue
+		case '"':
+			if !inSingle {
+				inDouble = !inDouble
+			}
+			continue
+		}
+		if inSingle || inDouble {
+			continue
+		}
+		if !strings.HasPrefix(lower[i:], target) {
+			continue
+		}
+		beforeOK := i == 0 || isQueryDelimiter(lower[i-1])
+		afterIdx := i + len(target)
+		afterOK := afterIdx == len(lower) || isQueryDelimiter(lower[afterIdx])
+		if beforeOK && afterOK {
+			return i
+		}
+	}
+	return -1
+}
+
+func isQueryDelimiter(b byte) bool {
+	switch b {
+	case ' ', '\t', '\n', '\r', '(', ')', ',':
+		return true
+	default:
+		return false
+	}
 }

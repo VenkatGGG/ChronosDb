@@ -215,6 +215,7 @@ func (p *FlowPlanner) buildRangeScan(plan RangeScanPlan) FlowPlan {
 }
 
 func (p *FlowPlanner) buildInsert(plan InsertPlan) FlowPlan {
+	resultSchema := schemaFromColumns(plan.Returning)
 	return assembleFlowPlan(1, []FlowStage{
 		{
 			ID:               1,
@@ -236,11 +237,13 @@ func (p *FlowPlanner) buildInsert(plan InsertPlan) FlowPlan {
 					},
 				},
 			},
+			ResultSchema: resultSchema,
 		},
-	}, nil)
+	}, resultSchema)
 }
 
 func (p *FlowPlanner) buildUpsert(plan UpsertPlan) FlowPlan {
+	resultSchema := schemaFromColumns(plan.Returning)
 	return assembleFlowPlan(1, []FlowStage{
 		{
 			ID:               1,
@@ -262,8 +265,9 @@ func (p *FlowPlanner) buildUpsert(plan UpsertPlan) FlowPlan {
 					},
 				},
 			},
+			ResultSchema: resultSchema,
 		},
-	}, nil)
+	}, resultSchema)
 }
 
 func (p *FlowPlanner) buildDelete(plan DeletePlan) FlowPlan {
@@ -273,6 +277,7 @@ func (p *FlowPlanner) buildDelete(plan DeletePlan) FlowPlan {
 		distribution = DistributionLeaseholderOnly
 		preferred = leasePreferredRegions(plan.Table)
 	}
+	resultSchema := schemaFromColumns(plan.Returning)
 	return assembleFlowPlan(1, []FlowStage{
 		{
 			ID:               1,
@@ -294,8 +299,9 @@ func (p *FlowPlanner) buildDelete(plan DeletePlan) FlowPlan {
 					},
 				},
 			},
+			ResultSchema: resultSchema,
 		},
-	}, nil)
+	}, resultSchema)
 }
 
 func (p *FlowPlanner) buildUpdate(plan UpdatePlan) FlowPlan {
@@ -305,6 +311,7 @@ func (p *FlowPlanner) buildUpdate(plan UpdatePlan) FlowPlan {
 		distribution = DistributionLeaseholderOnly
 		preferred = leasePreferredRegions(plan.Table)
 	}
+	resultSchema := schemaFromColumns(plan.Returning)
 	return assembleFlowPlan(1, []FlowStage{
 		{
 			ID:               1,
@@ -326,8 +333,9 @@ func (p *FlowPlanner) buildUpdate(plan UpdatePlan) FlowPlan {
 					},
 				},
 			},
+			ResultSchema: resultSchema,
 		},
-	}, nil)
+	}, resultSchema)
 }
 
 func (p *FlowPlanner) buildAggregate(plan AggregatePlan) FlowPlan {

@@ -688,9 +688,18 @@ Design constraints:
     duplicate committed primary keys instead of silently overwriting them
   - unit and end-to-end pgwire tests now cover upsert planning, duplicate-key
     insert rejection, command tags, and cross-node reads of the overwritten row
-- [ ] 14.5 Add DML `RETURNING`
+- [x] 14.5 Add DML `RETURNING`
   across `INSERT`, `UPDATE`, `DELETE`, and primary-key `UPSERT`, including
   projection binding and result-row materialization through pgwire
+  - planner, flow planning, and pgwire description now bind simple column-list
+    and `*` `RETURNING` projections for all four DML statement types through
+    one shared projection path
+  - the live executor now materializes inserted, updated, deleted, and upserted
+    rows back through pgwire row frames for both implicit and explicit
+    transactions instead of returning command tags alone
+  - unit and end-to-end pgwire tests now cover `INSERT RETURNING`, `UPDATE
+    RETURNING`, `DELETE RETURNING`, and `UPSERT RETURNING`, including returned
+    column order and final visibility after delete
 - [ ] 14.6 Add prepared statements and extended pgwire execution
   by implementing parse/bind/execute, typed parameters, statement/portal state,
   and the DML executor hooks required by real client libraries and ORMs
@@ -725,7 +734,7 @@ Execution milestones:
   Complete `14.1` and `14.2` together so `DELETE` ships only after tombstones,
   delete intents, scans, and recovery semantics are all correct under restart
   and lease movement.
-- [ ] Milestone B: Core mutable-row DML
+- [x] Milestone B: Core mutable-row DML
   Complete `14.3`, `14.4`, and `14.5` together so `UPDATE`, primary-key
   `UPSERT`, and `RETURNING` all share one row-rewrite path instead of growing
   three partially overlapping executors.

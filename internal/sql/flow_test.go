@@ -132,6 +132,42 @@ func TestFlowPlannerBuildUpsert(t *testing.T) {
 	}
 }
 
+func TestFlowPlannerBuildDeleteReturning(t *testing.T) {
+	t.Parallel()
+
+	planner := testPlanner(t)
+	plan, err := planner.Plan("delete from users where id = 7 returning id, name")
+	if err != nil {
+		t.Fatalf("plan query: %v", err)
+	}
+
+	flow, err := NewFlowPlanner().Build(plan)
+	if err != nil {
+		t.Fatalf("build flow: %v", err)
+	}
+	if len(flow.ResultSchema) != 2 || flow.ResultSchema[0].Name != "id" || flow.ResultSchema[1].Name != "name" {
+		t.Fatalf("delete returning schema = %+v, want [id name]", flow.ResultSchema)
+	}
+}
+
+func TestFlowPlannerBuildUpdateReturning(t *testing.T) {
+	t.Parallel()
+
+	planner := testPlanner(t)
+	plan, err := planner.Plan("update users set name = 'ally' where id = 7 returning id, name")
+	if err != nil {
+		t.Fatalf("plan query: %v", err)
+	}
+
+	flow, err := NewFlowPlanner().Build(plan)
+	if err != nil {
+		t.Fatalf("build flow: %v", err)
+	}
+	if len(flow.ResultSchema) != 2 || flow.ResultSchema[0].Name != "id" || flow.ResultSchema[1].Name != "name" {
+		t.Fatalf("update returning schema = %+v, want [id name]", flow.ResultSchema)
+	}
+}
+
 func TestFlowPlannerBuildDelete(t *testing.T) {
 	t.Parallel()
 

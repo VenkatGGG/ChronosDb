@@ -96,6 +96,57 @@ func TestPlannerUpsertMapsToKV(t *testing.T) {
 	}
 }
 
+func TestPlannerInsertReturningProjection(t *testing.T) {
+	t.Parallel()
+
+	planner := testPlanner(t)
+	plan, err := planner.Plan("insert into users (id, name, email) values (1, 'alice', 'a@example.com') returning id, name")
+	if err != nil {
+		t.Fatalf("plan insert returning: %v", err)
+	}
+	insert, ok := plan.(InsertPlan)
+	if !ok {
+		t.Fatalf("plan type = %T, want InsertPlan", plan)
+	}
+	if len(insert.Returning) != 2 || insert.Returning[0].Name != "id" || insert.Returning[1].Name != "name" {
+		t.Fatalf("returning = %+v, want [id name]", insert.Returning)
+	}
+}
+
+func TestPlannerDeleteReturningProjection(t *testing.T) {
+	t.Parallel()
+
+	planner := testPlanner(t)
+	plan, err := planner.Plan("delete from users where id = 7 returning *")
+	if err != nil {
+		t.Fatalf("plan delete returning: %v", err)
+	}
+	deletePlan, ok := plan.(DeletePlan)
+	if !ok {
+		t.Fatalf("plan type = %T, want DeletePlan", plan)
+	}
+	if len(deletePlan.Returning) != 3 {
+		t.Fatalf("returning count = %d, want 3", len(deletePlan.Returning))
+	}
+}
+
+func TestPlannerUpdateReturningProjection(t *testing.T) {
+	t.Parallel()
+
+	planner := testPlanner(t)
+	plan, err := planner.Plan("update users set name = 'ally' where id = 7 returning id, email")
+	if err != nil {
+		t.Fatalf("plan update returning: %v", err)
+	}
+	updatePlan, ok := plan.(UpdatePlan)
+	if !ok {
+		t.Fatalf("plan type = %T, want UpdatePlan", plan)
+	}
+	if len(updatePlan.Returning) != 2 || updatePlan.Returning[0].Name != "id" || updatePlan.Returning[1].Name != "email" {
+		t.Fatalf("returning = %+v, want [id email]", updatePlan.Returning)
+	}
+}
+
 func TestPlannerPointDelete(t *testing.T) {
 	t.Parallel()
 
