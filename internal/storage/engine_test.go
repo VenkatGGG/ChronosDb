@@ -247,6 +247,44 @@ func TestGetLatestMVCCValueReturnsNewestVersion(t *testing.T) {
 	}
 }
 
+func TestGetLatestMVCCValueSuppressesTombstones(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	engine, err := Open(ctx, Options{
+		Dir: "latest-mvcc-tombstone",
+		FS:  vfs.NewMem(),
+	})
+	if err != nil {
+		t.Fatalf("open engine: %v", err)
+	}
+	defer engine.Close()
+	if err := engine.Bootstrap(ctx, StoreIdent{ClusterID: "cluster-a", NodeID: 1, StoreID: 1}); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+
+	logicalKey := GlobalTablePrimaryKey(7, []byte("alice"))
+	ts1 := hlc.Timestamp{WallTime: 100, Logical: 1}
+	ts2 := hlc.Timestamp{WallTime: 200, Logical: 1}
+	if err := engine.PutMVCCValue(ctx, logicalKey, ts1, []byte("v1")); err != nil {
+		t.Fatalf("put live value: %v", err)
+	}
+	if err := engine.PutMVCCTombstone(ctx, logicalKey, ts2); err != nil {
+		t.Fatalf("put tombstone: %v", err)
+	}
+
+	_, _, found, err := engine.GetLatestMVCCValue(ctx, logicalKey)
+	if err != nil {
+		t.Fatalf("get latest mvcc tombstone: %v", err)
+	}
+	if found {
+		t.Fatal("latest mvcc value found = true, want tombstone-hidden row")
+	}
+	if _, err := engine.GetMVCCValue(ctx, logicalKey, ts2); err != ErrMVCCValueDeleted {
+		t.Fatalf("get exact tombstone err = %v, want %v", err, ErrMVCCValueDeleted)
+	}
+}
+
 func TestScanLatestMVCCRangeReturnsNewestPerLogicalKey(t *testing.T) {
 	t.Parallel()
 
@@ -291,5 +329,80 @@ func TestScanLatestMVCCRangeReturnsNewestPerLogicalKey(t *testing.T) {
 	}
 	if !bytes.Equal(versions[1].LogicalKey, keyB) || !bytes.Equal(versions[1].Value, []byte("b1")) {
 		t.Fatalf("second version = %+v, want keyB/b1", versions[1])
+	}
+}
+
+func TestScanLatestMVCCRangeSuppressesTombstones(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	engine, err := Open(ctx, Options{
+		Dir: "scan-latest-mvcc-tombstone",
+		FS:  vfs.NewMem(),
+	})
+	if err != nil {
+		t.Fatalf("open engine: %v", err)
+	}
+	defer engine.Close()
+	if err := engine.Bootstrap(ctx, StoreIdent{ClusterID: "cluster-a", NodeID: 1, StoreID: 1}); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+
+	keyA := GlobalTablePrimaryKey(7, []byte("alice"))
+	keyB := GlobalTablePrimaryKey(7, []byte("bob"))
+	if err := engine.PutMVCCValue(ctx, keyA, hlc.Timestamp{WallTime: 100, Logical: 1}, []byte("a1")); err != nil {
+		t.Fatalf("put keyA live: %v", err)
+	}
+	if err := engine.PutMVCCTombstone(ctx, keyA, hlc.Timestamp{WallTime: 200, Logical: 1}); err != nil {
+		t.Fatalf("put keyA tombstone: %v", err)
+	}
+	if err := engine.PutMVCCValue(ctx, keyB, hlc.Timestamp{WallTime: 150, Logical: 1}, []byte("b1")); err != nil {
+		t.Fatalf("put keyB live: %v", err)
+	}
+
+	versions, err := engine.ScanLatestMVCCRange(ctx, GlobalTablePrimaryPrefix(7), GlobalTablePrimaryPrefix(8), true, false)
+	if err != nil {
+		t.Fatalf("scan latest mvcc range: %v", err)
+	}
+	if len(versions) != 1 {
+		t.Fatalf("latest version count = %d, want 1 visible row", len(versions))
+	}
+	if !bytes.Equal(versions[0].LogicalKey, keyB) || !bytes.Equal(versions[0].Value, []byte("b1")) {
+		t.Fatalf("visible version = %+v, want keyB/b1", versions[0])
+	}
+}
+
+func TestGetLatestMVCCValueDecodesLegacyPayloads(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	engine, err := Open(ctx, Options{
+		Dir: "latest-mvcc-legacy",
+		FS:  vfs.NewMem(),
+	})
+	if err != nil {
+		t.Fatalf("open engine: %v", err)
+	}
+	defer engine.Close()
+	if err := engine.Bootstrap(ctx, StoreIdent{ClusterID: "cluster-a", NodeID: 1, StoreID: 1}); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+
+	logicalKey := GlobalTablePrimaryKey(7, []byte("alice"))
+	ts := hlc.Timestamp{WallTime: 100, Logical: 1}
+	encoded, err := EncodeMVCCVersionKey(logicalKey, ts)
+	if err != nil {
+		t.Fatalf("encode legacy key: %v", err)
+	}
+	if err := engine.PutRaw(ctx, encoded, []byte("legacy")); err != nil {
+		t.Fatalf("put legacy raw value: %v", err)
+	}
+
+	value, gotTS, found, err := engine.GetLatestMVCCValue(ctx, logicalKey)
+	if err != nil {
+		t.Fatalf("get latest legacy mvcc value: %v", err)
+	}
+	if !found || gotTS != ts || !bytes.Equal(value, []byte("legacy")) {
+		t.Fatalf("legacy latest = value %q ts %+v found %v, want legacy/%+v/true", value, gotTS, found, ts)
 	}
 }

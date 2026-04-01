@@ -46,6 +46,7 @@ type Command struct {
 type PutValue struct {
 	LogicalKey []byte        `json:"logical_key"`
 	Timestamp  hlc.Timestamp `json:"timestamp"`
+	Tombstone  bool          `json:"tombstone,omitempty"`
 	Value      []byte        `json:"value"`
 }
 
@@ -146,6 +147,9 @@ func (c Command) Validate() error {
 		}
 		if c.Put.Timestamp.IsZero() {
 			return fmt.Errorf("command: put timestamp required")
+		}
+		if c.Put.Tombstone && len(c.Put.Value) > 0 {
+			return fmt.Errorf("command: tombstone writes must not carry a value payload")
 		}
 	case CommandTypePutIntent:
 		if c.Intent == nil || c.Put != nil || c.ClearIntent != nil || c.TxnRecord != nil || c.Lease != nil || c.ClosedTS != nil || c.Descriptor != nil || c.Split != nil || c.Replica != nil {

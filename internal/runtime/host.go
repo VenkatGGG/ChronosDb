@@ -313,6 +313,46 @@ func (h *Host) PutValueLocal(ctx context.Context, key []byte, ts hlc.Timestamp, 
 	return desc, nil
 }
 
+// DeleteValueLocal proposes one committed MVCC tombstone on a locally hosted range.
+func (h *Host) DeleteValueLocal(ctx context.Context, key []byte, ts hlc.Timestamp) (meta.RangeDescriptor, error) {
+	h.mu.Lock()
+	desc, err := h.catalog.Lookup(ctx, key)
+	if err != nil {
+		h.mu.Unlock()
+		return meta.RangeDescriptor{}, err
+	}
+	if !descriptorReplicaOnNode(desc, h.ident.NodeID) {
+		h.mu.Unlock()
+		return meta.RangeDescriptor{}, ErrRangeNotHosted
+	}
+	payload, err := replica.Command{
+		Version: 1,
+		Type:    replica.CommandTypePutValue,
+		Put: &replica.PutValue{
+			LogicalKey: append([]byte(nil), key...),
+			Timestamp:  ts,
+			Tombstone:  true,
+		},
+	}.Marshal()
+	if err != nil {
+		h.mu.Unlock()
+		return meta.RangeDescriptor{}, err
+	}
+	outbound, err := h.proposeWithLeaseholderRetryLocked(ctx, desc, payload)
+	if err != nil {
+		h.mu.Unlock()
+		return meta.RangeDescriptor{}, err
+	}
+	h.mu.Unlock()
+	if err := h.dispatchOutbound(ctx, outbound); err != nil {
+		return meta.RangeDescriptor{}, err
+	}
+	if err := h.waitForMVCCTombstone(ctx, key, ts); err != nil {
+		return meta.RangeDescriptor{}, err
+	}
+	return desc, nil
+}
+
 // PutIntentLocal proposes one provisional intent on a locally hosted range.
 func (h *Host) PutIntentLocal(ctx context.Context, key []byte, intent storage.Intent) (meta.RangeDescriptor, error) {
 	h.mu.Lock()
@@ -949,6 +989,26 @@ func (h *Host) waitForMVCCValue(ctx context.Context, key []byte, ts hlc.Timestam
 	}
 }
 
+func (h *Host) waitForMVCCTombstone(ctx context.Context, key []byte, ts hlc.Timestamp) error {
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		_, err := h.engine.GetMVCCValue(ctx, key, ts)
+		switch {
+		case errors.Is(err, storage.ErrMVCCValueDeleted):
+			return nil
+		case errors.Is(err, storage.ErrMVCCValueNotFound):
+		case err != nil:
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
 func (h *Host) waitForIntent(ctx context.Context, key []byte, expected storage.Intent) error {
 	ticker := time.NewTicker(10 * time.Millisecond)
 	defer ticker.Stop()
@@ -960,6 +1020,7 @@ func (h *Host) waitForIntent(ctx context.Context, key []byte, expected storage.I
 				intent.Epoch == expected.Epoch &&
 				intent.WriteTimestamp == expected.WriteTimestamp &&
 				intent.Strength == expected.Strength &&
+				intent.Tombstone == expected.Tombstone &&
 				bytes.Equal(intent.Value, expected.Value) {
 				return nil
 			}

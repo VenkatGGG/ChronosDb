@@ -133,7 +133,24 @@ func (e *Engine) PutMVCCValue(ctx context.Context, logicalKey []byte, ts hlc.Tim
 	if err != nil {
 		return err
 	}
-	return e.PutRaw(ctx, encoded, value)
+	payload, err := MVCCValue{Value: append([]byte(nil), value...)}.MarshalBinary()
+	if err != nil {
+		return err
+	}
+	return e.PutRaw(ctx, encoded, payload)
+}
+
+// PutMVCCTombstone writes one committed MVCC tombstone version.
+func (e *Engine) PutMVCCTombstone(ctx context.Context, logicalKey []byte, ts hlc.Timestamp) error {
+	encoded, err := EncodeMVCCVersionKey(logicalKey, ts)
+	if err != nil {
+		return err
+	}
+	payload, err := MVCCValue{Tombstone: true}.MarshalBinary()
+	if err != nil {
+		return err
+	}
+	return e.PutRaw(ctx, encoded, payload)
 }
 
 // GetMVCCValue returns one committed MVCC version by exact timestamp.
@@ -146,7 +163,17 @@ func (e *Engine) GetMVCCValue(ctx context.Context, logicalKey []byte, ts hlc.Tim
 	if errors.Is(err, pebble.ErrNotFound) {
 		return nil, ErrMVCCValueNotFound
 	}
-	return value, err
+	if err != nil {
+		return nil, err
+	}
+	decoded, err := UnmarshalMVCCValue(value)
+	if err != nil {
+		return nil, err
+	}
+	if decoded.Tombstone {
+		return nil, ErrMVCCValueDeleted
+	}
+	return decoded.Value, nil
 }
 
 // PutIntent writes the provisional intent at the logical key's metadata key.
@@ -295,7 +322,17 @@ func (s *Snapshot) GetMVCCValue(ctx context.Context, logicalKey []byte, ts hlc.T
 	if errors.Is(err, pebble.ErrNotFound) {
 		return nil, ErrMVCCValueNotFound
 	}
-	return value, err
+	if err != nil {
+		return nil, err
+	}
+	decoded, err := UnmarshalMVCCValue(value)
+	if err != nil {
+		return nil, err
+	}
+	if decoded.Tombstone {
+		return nil, ErrMVCCValueDeleted
+	}
+	return decoded.Value, nil
 }
 
 // GetIntent returns the intent visible to the snapshot.

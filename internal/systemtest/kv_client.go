@@ -39,6 +39,11 @@ type kvPutRequest struct {
 	Value     []byte        `json:"value"`
 }
 
+type kvDeleteRequest struct {
+	Key       []byte        `json:"key"`
+	Timestamp hlc.Timestamp `json:"timestamp"`
+}
+
 type kvScanRequest struct {
 	StartKey       []byte `json:"start_key"`
 	EndKey         []byte `json:"end_key"`
@@ -173,6 +178,25 @@ func (c *kvClient) PutAt(ctx context.Context, key []byte, ts hlc.Timestamp, valu
 		Key:       key,
 		Timestamp: ts,
 		Value:     value,
+	}, nil)
+}
+
+func (c *kvClient) DeleteAt(ctx context.Context, key []byte, ts hlc.Timestamp) error {
+	desc, err := c.host.LookupRange(ctx, key)
+	if err != nil {
+		return err
+	}
+	targetNodeID, err := leaseholderNodeIDForRange(desc)
+	if err != nil {
+		return err
+	}
+	if targetNodeID == c.nodeID {
+		_, err := c.host.DeleteValueLocal(ctx, key, ts)
+		return err
+	}
+	return c.postJSON(ctx, targetNodeID, "/control/kv/delete", kvDeleteRequest{
+		Key:       key,
+		Timestamp: ts,
 	}, nil)
 }
 
@@ -467,8 +491,14 @@ func (c *kvClient) ResolveTxnRecord(ctx context.Context, record txn.Record) erro
 			found = false
 		}
 		if found && action.Kind == txn.ResolveActionCommit {
-			if err := c.PutAt(ctx, action.Ref.Key, record.WriteTS, intent.Value); err != nil {
-				return err
+			if intent.Tombstone {
+				if err := c.DeleteAt(ctx, action.Ref.Key, record.WriteTS); err != nil {
+					return err
+				}
+			} else {
+				if err := c.PutAt(ctx, action.Ref.Key, record.WriteTS, intent.Value); err != nil {
+					return err
+				}
 			}
 		}
 		if found {

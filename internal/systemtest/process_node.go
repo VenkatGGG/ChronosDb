@@ -372,7 +372,11 @@ func (n *ProcessNode) writeState() error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(n.statePath, append(payload, '\n'), 0o644)
+	tmpPath := n.statePath + ".tmp"
+	if err := os.WriteFile(tmpPath, append(payload, '\n'), 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmpPath, n.statePath)
 }
 
 func (n *ProcessNode) controlMux() http.Handler {
@@ -385,6 +389,7 @@ func (n *ProcessNode) controlMux() http.Handler {
 	mux.HandleFunc("/control/range/status", n.handleRangeStatus)
 	mux.HandleFunc("/control/kv/get", n.handleKVGet)
 	mux.HandleFunc("/control/kv/put", n.handleKVPut)
+	mux.HandleFunc("/control/kv/delete", n.handleKVDelete)
 	mux.HandleFunc("/control/kv/scan", n.handleKVScan)
 	mux.HandleFunc("/control/kv/intent/put", n.handleKVIntentPut)
 	mux.HandleFunc("/control/kv/intent/get", n.handleKVIntentGet)
@@ -596,6 +601,23 @@ func (n *ProcessNode) handleKVPut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if _, err := n.host.PutValueLocal(r.Context(), req.Key, req.Timestamp, req.Value); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (n *ProcessNode) handleKVDelete(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req kvDeleteRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if _, err := n.host.DeleteValueLocal(r.Context(), req.Key, req.Timestamp); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}

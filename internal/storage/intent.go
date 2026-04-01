@@ -25,6 +25,7 @@ type Intent struct {
 	Epoch          uint32
 	WriteTimestamp hlc.Timestamp
 	Strength       IntentStrength
+	Tombstone      bool
 	Value          []byte
 }
 
@@ -36,6 +37,9 @@ func (i Intent) Validate() error {
 	if i.Strength == IntentStrengthUnknown {
 		return fmt.Errorf("intent: strength must be set")
 	}
+	if i.Tombstone && len(i.Value) > 0 {
+		return fmt.Errorf("intent: tombstone must not carry a value payload")
+	}
 	return nil
 }
 
@@ -45,13 +49,18 @@ func (i Intent) MarshalBinary() ([]byte, error) {
 		return nil, err
 	}
 
-	buf := make([]byte, 0, 1+len(i.TxnID)+4+1+hlc.EncodedSize+binary.MaxVarintLen64+len(i.Value))
-	buf = append(buf, 1)
+	buf := make([]byte, 0, 1+len(i.TxnID)+4+1+1+hlc.EncodedSize+binary.MaxVarintLen64+len(i.Value))
+	buf = append(buf, 2)
 	buf = append(buf, i.TxnID[:]...)
 	var fixed [4]byte
 	binary.BigEndian.PutUint32(fixed[:], i.Epoch)
 	buf = append(buf, fixed[:]...)
 	buf = append(buf, byte(i.Strength))
+	if i.Tombstone {
+		buf = append(buf, 1)
+	} else {
+		buf = append(buf, 0)
+	}
 	buf = i.WriteTimestamp.AppendAscending(buf)
 	buf = binary.AppendUvarint(buf, uint64(len(i.Value)))
 	buf = append(buf, i.Value...)
@@ -63,11 +72,16 @@ func (i *Intent) UnmarshalBinary(data []byte) error {
 	if len(data) == 0 {
 		return fmt.Errorf("decode intent: empty payload")
 	}
-	if data[0] != 1 {
-		return fmt.Errorf("decode intent: unknown version %d", data[0])
+	version := data[0]
+	if version != 1 && version != 2 {
+		return fmt.Errorf("decode intent: unknown version %d", version)
 	}
 	data = data[1:]
-	if len(data) < len(i.TxnID)+4+1+hlc.EncodedSize {
+	minSize := len(i.TxnID) + 4 + 1 + hlc.EncodedSize
+	if version == 2 {
+		minSize++
+	}
+	if len(data) < minSize {
 		return fmt.Errorf("decode intent: truncated payload")
 	}
 
@@ -77,6 +91,18 @@ func (i *Intent) UnmarshalBinary(data []byte) error {
 	data = data[4:]
 	i.Strength = IntentStrength(data[0])
 	data = data[1:]
+	i.Tombstone = false
+	if version == 2 {
+		switch data[0] {
+		case 0:
+			i.Tombstone = false
+		case 1:
+			i.Tombstone = true
+		default:
+			return fmt.Errorf("decode intent: invalid tombstone marker %d", data[0])
+		}
+		data = data[1:]
+	}
 
 	ts, rest, err := hlc.DecodeAscending(data)
 	if err != nil {

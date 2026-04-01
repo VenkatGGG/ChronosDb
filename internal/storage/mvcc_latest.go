@@ -34,5 +34,12 @@ func (e *Engine) GetLatestMVCCValue(_ context.Context, logicalKey []byte) ([]byt
 	if err != nil {
 		return nil, hlc.Timestamp{}, false, err
 	}
-	return bytes.Clone(iter.Value()), decoded.Timestamp, true, iter.Error()
+	value, err := UnmarshalMVCCValue(iter.Value())
+	if err != nil {
+		return nil, hlc.Timestamp{}, false, err
+	}
+	if value.Tombstone {
+		return nil, decoded.Timestamp, false, iter.Error()
+	}
+	return bytes.Clone(value.Value), decoded.Timestamp, true, iter.Error()
 }

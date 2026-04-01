@@ -59,7 +59,24 @@ func (b *WriteBatch) PutMVCCValue(logicalKey []byte, ts hlc.Timestamp, value []b
 	if err != nil {
 		return err
 	}
-	return b.SetRaw(encoded, value)
+	payload, err := MVCCValue{Value: append([]byte(nil), value...)}.MarshalBinary()
+	if err != nil {
+		return err
+	}
+	return b.SetRaw(encoded, payload)
+}
+
+// PutMVCCTombstone appends one committed MVCC tombstone write to the batch.
+func (b *WriteBatch) PutMVCCTombstone(logicalKey []byte, ts hlc.Timestamp) error {
+	encoded, err := EncodeMVCCVersionKey(logicalKey, ts)
+	if err != nil {
+		return err
+	}
+	payload, err := MVCCValue{Tombstone: true}.MarshalBinary()
+	if err != nil {
+		return err
+	}
+	return b.SetRaw(encoded, payload)
 }
 
 // PutIntent appends an intent write to the batch.

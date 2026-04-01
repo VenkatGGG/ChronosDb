@@ -1442,6 +1442,117 @@ func TestProcessNodeAbortsExpiredPendingTxnInBackground(t *testing.T) {
 	waitForKeyAbsent(t, node1.kv, insertCarol.Key)
 }
 
+func TestProcessNodeCommitsDeleteTombstoneInBackground(t *testing.T) {
+	t.Parallel()
+
+	rootDir := t.TempDir()
+	bootstrapPath := filepath.Join(rootDir, "bootstrap.json")
+	usersRange := meta.RangeDescriptor{
+		RangeID:    74,
+		Generation: 1,
+		StartKey:   storage.GlobalTablePrimaryPrefix(7),
+		EndKey:     storage.GlobalTablePrimaryPrefix(8),
+		Replicas: []meta.ReplicaDescriptor{
+			{ReplicaID: 77, NodeID: 1, Role: meta.ReplicaRoleVoter},
+			{ReplicaID: 78, NodeID: 2, Role: meta.ReplicaRoleVoter},
+			{ReplicaID: 79, NodeID: 3, Role: meta.ReplicaRoleVoter},
+		},
+		LeaseholderReplicaID: 78,
+	}
+	manifest, err := chronosruntime.BuildBootstrapManifest("cluster-background-delete-commit", []chronosruntime.BootstrapNode{
+		{NodeID: 1, StoreID: 77},
+		{NodeID: 2, StoreID: 78},
+		{NodeID: 3, StoreID: 79},
+	}, []meta.RangeDescriptor{usersRange})
+	if err != nil {
+		t.Fatalf("build bootstrap manifest: %v", err)
+	}
+	if err := chronosruntime.WriteBootstrapManifest(bootstrapPath, manifest); err != nil {
+		t.Fatalf("write bootstrap manifest: %v", err)
+	}
+
+	startCfg := func(nodeID, storeID uint64) ProcessNodeConfig {
+		return ProcessNodeConfig{
+			NodeID:              nodeID,
+			StoreID:             storeID,
+			DataDir:             filepath.Join(rootDir, fmt.Sprintf("delete-node-%d", nodeID)),
+			BootstrapPath:       bootstrapPath,
+			PGListenAddr:        "127.0.0.1:0",
+			ObservabilityAddr:   "127.0.0.1:0",
+			ControlAddr:         "127.0.0.1:0",
+			HeartbeatInterval:   50 * time.Millisecond,
+			TxnRecoveryInterval: 50 * time.Millisecond,
+		}
+	}
+
+	node1, cancel1, done1 := startProcessNodeForTest(t, startCfg(1, 77))
+	t.Cleanup(func() {
+		cancel1()
+		waitProcessNodeDone(t, done1, "delete-recovery-node1")
+	})
+	node2, cancel2, done2 := startProcessNodeForTest(t, startCfg(2, 78))
+	t.Cleanup(func() {
+		cancel2()
+		waitProcessNodeDone(t, done2, "delete-recovery-node2")
+	})
+	_, cancel3, done3 := startProcessNodeForTest(t, startCfg(3, 79))
+	t.Cleanup(func() {
+		cancel3()
+		waitProcessNodeDone(t, done3, "delete-recovery-node3")
+	})
+
+	if err := node2.host.Campaign(context.Background(), usersRange.RangeID); err != nil {
+		t.Fatalf("campaign delete range: %v", err)
+	}
+	waitForRangeLeader(t, node2.host, usersRange.RangeID, 78)
+
+	catalog, err := defaultSystemTestCatalog()
+	if err != nil {
+		t.Fatalf("default catalog: %v", err)
+	}
+	planner := chronossql.NewPlanner(chronossql.NewParser(), catalog)
+	insertAlice := mustInsertPlan(t, planner, "insert into users (id, name, email) values (15, 'alice', 'a@example.com')")
+
+	baseTS := hlc.Timestamp{WallTime: uint64(time.Now().UTC().UnixNano())}
+	if err := node1.kv.PutAt(context.Background(), insertAlice.Key, baseTS, insertAlice.Value); err != nil {
+		t.Fatalf("seed committed row: %v", err)
+	}
+	waitForDecodedUserRow(t, node2.kv, mustResolveUsersTable(t, catalog), insertAlice.Key, "15", "alice")
+
+	deleteTS := hlc.Timestamp{WallTime: baseTS.WallTime + uint64(time.Second)}
+	record := txn.Record{
+		ID:         newTxnID(),
+		Status:     txn.StatusCommitted,
+		ReadTS:     deleteTS,
+		WriteTS:    deleteTS,
+		Priority:   1,
+		DeadlineTS: hlc.Timestamp{WallTime: deleteTS.WallTime + uint64(30*time.Second)},
+	}
+	record, err = record.Anchor(usersRange.RangeID, deleteTS)
+	if err != nil {
+		t.Fatalf("anchor delete record: %v", err)
+	}
+	record, err = record.TrackIntent(txn.IntentRef{RangeID: usersRange.RangeID, Key: insertAlice.Key, Strength: storage.IntentStrengthExclusive})
+	if err != nil {
+		t.Fatalf("track delete intent: %v", err)
+	}
+	if err := node1.kv.PutIntent(context.Background(), insertAlice.Key, storage.Intent{
+		TxnID:          record.ID,
+		Epoch:          record.Epoch,
+		WriteTimestamp: record.WriteTS,
+		Strength:       storage.IntentStrengthExclusive,
+		Tombstone:      true,
+	}); err != nil {
+		t.Fatalf("put delete intent: %v", err)
+	}
+	if err := node1.kv.PutTxnRecord(context.Background(), record); err != nil {
+		t.Fatalf("put committed delete txn record: %v", err)
+	}
+
+	waitForIntentMissing(t, node1.kv, insertAlice.Key)
+	waitForKeyAbsent(t, node1.kv, insertAlice.Key)
+}
+
 func waitForRangeLeader(t *testing.T, host *chronosruntime.Host, rangeID, leaderReplicaID uint64) {
 	t.Helper()
 
@@ -1469,6 +1580,15 @@ func waitForReplicatedUserRow(t *testing.T, node *ProcessNode, key []byte) {
 		time.Sleep(25 * time.Millisecond)
 	}
 	t.Fatalf("timed out waiting for replicated row %q on node %d", key, node.cfg.NodeID)
+}
+
+func mustResolveUsersTable(t *testing.T, catalog *chronossql.Catalog) chronossql.TableDescriptor {
+	t.Helper()
+	users, err := catalog.ResolveTable("users")
+	if err != nil {
+		t.Fatalf("resolve users table: %v", err)
+	}
+	return users
 }
 
 func waitForTxnRecordStatus(t *testing.T, kv *kvClient, txnID storage.TxnID, want txn.Status) {

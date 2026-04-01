@@ -174,8 +174,14 @@ func (s *StateMachine) stageEntries(batch *storage.WriteBatch, entries []raftpb.
 			}
 			switch cmd.Type {
 			case CommandTypePutValue:
-				if err := batch.PutMVCCValue(cmd.Put.LogicalKey, cmd.Put.Timestamp, cmd.Put.Value); err != nil {
-					return ApplyDelta{}, nil, err
+				if cmd.Put.Tombstone {
+					if err := batch.PutMVCCTombstone(cmd.Put.LogicalKey, cmd.Put.Timestamp); err != nil {
+						return ApplyDelta{}, nil, err
+					}
+				} else {
+					if err := batch.PutMVCCValue(cmd.Put.LogicalKey, cmd.Put.Timestamp, cmd.Put.Value); err != nil {
+						return ApplyDelta{}, nil, err
+					}
 				}
 				if cmd.Put.Timestamp.Compare(delta.SafeReadFrontier) > 0 {
 					delta.SafeReadFrontier = cmd.Put.Timestamp

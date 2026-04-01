@@ -588,3 +588,135 @@ intent sets.
     deterministic bootstrap manifest, starts the console UI/API, seeds visible
     split ranges for `users` and `orders`, and runs a repeatable smoke sequence
     through pgwire
+
+### [ ] 14. Basic SQL CRUD and App Compatibility
+
+Deliver:
+
+- full basic DML semantics for `SELECT`, `INSERT`, `UPDATE`, `DELETE`, and
+  primary-key `UPSERT`
+- MVCC tombstones and provisional delete intents so deletes are represented as
+  first-class transactional writes instead of ad hoc record removal
+- statement execution semantics that return correct command tags, row counts,
+  and optional `RETURNING` rows for DML
+- extended pgwire protocol support for prepared statements and parameterized
+  execution so real applications can talk to ChronosDB without falling back to
+  simple-query text only
+- catalog and index structures strong enough to support uniqueness enforcement
+  and future `INSERT ... ON CONFLICT ...` semantics without reworking the row
+  encoding model later
+
+Exit criteria:
+
+- a typical CRUD application can issue prepared `SELECT`, `INSERT`, `UPDATE`,
+  `DELETE`, and primary-key `UPSERT` statements against `chronos-node`
+- deletes are transactionally correct under crash/restart and never reappear
+  because of stale MVCC read paths
+- row counts, `RETURNING`, and transaction behavior remain correct under
+  contention, retries, and coordinator recovery
+- the architecture is ready for secondary indexes and full conflict-targeted
+  `ON CONFLICT` without replacing the DML executor again
+
+Design constraints:
+
+- do not bolt `DELETE` on as direct key removal; introduce committed tombstones
+  and delete intents in the same MVCC model as value writes
+- do not implement full `INSERT ... ON CONFLICT ...` before index descriptors
+  and uniqueness enforcement exist; ship primary-key `UPSERT` first
+- do not keep the executor tied to the demo catalog shape; each DML path must
+  work from persisted descriptors and runtime metadata
+- do not stop at parser support; every statement in this phase must execute
+  end-to-end through pgwire, planner/binder, txn coordinator, KV runtime, and
+  storage
+
+### [ ] Phase 14 Planned Execution
+
+- [x] 14.1 Add MVCC tombstones and delete-intent semantics
+  by extending the row/value model so the latest committed version can
+  represent deletion explicitly, scans suppress tombstoned rows, and intent
+  resolution can commit or abort provisional deletes without bypassing MVCC
+  correctness
+  - committed MVCC payloads now carry explicit tombstone encoding with
+    backward-compatible decoding for legacy raw payloads
+  - provisional intents now carry tombstone state explicitly, and txn recovery
+    resolves committed delete intents into replicated MVCC tombstones instead
+    of trying to overload direct key deletion
+  - latest reads and range scans now hide tombstoned rows, and focused storage,
+    runtime, and system tests cover exact tombstone reads, visible-row
+    suppression, and background delete-intent recovery
+- [ ] 14.2 Add `DELETE` planning and execution
+  for primary-key point deletes and primary-key-bounded range deletes,
+  including command tags, row counts, transactional delete intents, and
+  `RETURNING` support on deleted rows
+- [ ] 14.3 Add `UPDATE` planning and execution
+  for primary-key-targeted updates, including `SET` clause binding, row
+  read/merge/rewrite behavior, transactional locking, write-intent updates, and
+  `RETURNING` support
+- [ ] 14.4 Add primary-key `UPSERT`
+  as a first-class plan and executor path that atomically inserts-or-overwrites
+  the primary row under transaction control without yet depending on secondary
+  index conflict targets
+- [ ] 14.5 Add DML `RETURNING`
+  across `INSERT`, `UPDATE`, `DELETE`, and primary-key `UPSERT`, including
+  projection binding and result-row materialization through pgwire
+- [ ] 14.6 Add prepared statements and extended pgwire execution
+  by implementing parse/bind/execute, typed parameters, statement/portal state,
+  and the DML executor hooks required by real client libraries and ORMs
+- [ ] 14.7 Add catalog support for secondary index descriptors and uniqueness metadata
+  so table descriptors can declare future unique and non-unique indexes even if
+  the first executor slice only uses them for validation and conflict-planning
+  scaffolding
+- [ ] 14.8 Add unique-key enforcement and index maintenance
+  for insert/update/delete paths so secondary index rows are written and
+  removed transactionally and uniqueness violations surface as stable SQL
+  errors instead of runtime corruption
+- [ ] 14.9 Add `INSERT ... ON CONFLICT DO NOTHING/DO UPDATE`
+  only after index metadata and uniqueness enforcement exist, including
+  conflict-target resolution, `excluded` row semantics, and correct retry
+  behavior under concurrent conflicting writes
+- [ ] 14.10 Widen `SELECT` for app compatibility
+  by adding `ORDER BY`, `LIMIT`, broader `WHERE` shapes, and the minimum
+  executor support needed so CRUD applications do not immediately fall off the
+  supported SQL surface after basic DML lands
+- [ ] 14.11 Add end-to-end correctness tests for CRUD semantics
+  covering crash/restart during delete and update, duplicate-key races, staged
+  recovery with tombstones, prepared-statement execution, row-count/returning
+  correctness, and cross-node reads after write/delete under lease movement
+- [ ] 14.12 Add a realistic app-compatibility demo and benchmark harness
+  that runs a seeded CRUD workload through prepared statements, reports command
+  latency and error classes, and gives the project a repeatable "can my app do
+  basic SQL here?" answer instead of relying on ad hoc `psql` checks
+
+Execution milestones:
+
+- [ ] Milestone A: MVCC-correct deletes
+  Complete `14.1` and `14.2` together so `DELETE` ships only after tombstones,
+  delete intents, scans, and recovery semantics are all correct under restart
+  and lease movement.
+- [ ] Milestone B: Core mutable-row DML
+  Complete `14.3`, `14.4`, and `14.5` together so `UPDATE`, primary-key
+  `UPSERT`, and `RETURNING` all share one row-rewrite path instead of growing
+  three partially overlapping executors.
+- [ ] Milestone C: Real client compatibility
+  Complete `14.6` and `14.10` together so prepared statements arrive with a
+  broad enough `SELECT` surface that normal application code does not
+  immediately fall back to unsupported query shapes.
+- [ ] Milestone D: Conflict-aware write semantics
+  Complete `14.7`, `14.8`, and `14.9` together so full `ON CONFLICT` only
+  ships after descriptor metadata, index maintenance, and uniqueness checks are
+  already transactionally correct.
+- [ ] Milestone E: Proof and usability
+  Complete `14.11` and `14.12` together so the phase closes with both
+  correctness evidence and a repeatable app-compatibility demo instead of
+  feature claims alone.
+
+Phase gates:
+
+- [ ] Gate 14A: no direct key deletion anywhere in the executor or runtime;
+  all delete behavior must go through tombstone-aware MVCC semantics
+- [ ] Gate 14B: every new DML statement must support explicit transactions
+  before it is considered complete
+- [ ] Gate 14C: no feature may be marked done until it has both unit coverage
+  and end-to-end pgwire coverage against the seeded multi-node demo
+- [ ] Gate 14D: full `ON CONFLICT` must not begin implementation before unique
+  index metadata and maintenance are already live

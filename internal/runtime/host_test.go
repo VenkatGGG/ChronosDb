@@ -187,6 +187,94 @@ func TestHostReplicatesTxnRecordsAndIntents(t *testing.T) {
 	}
 }
 
+func TestHostAppliesMVCCTombstones(t *testing.T) {
+	t.Parallel()
+
+	manifest, err := BuildBootstrapManifest("cluster-runtime-tombstone", []BootstrapNode{
+		{NodeID: 1, StoreID: 1},
+	}, []meta.RangeDescriptor{
+		{
+			RangeID:    11,
+			Generation: 1,
+			StartKey:   storage.GlobalTablePrimaryPrefix(7),
+			EndKey:     storage.GlobalTablePrimaryPrefix(8),
+			Replicas: []meta.ReplicaDescriptor{
+				{ReplicaID: 1, NodeID: 1, Role: meta.ReplicaRoleVoter},
+			},
+			LeaseholderReplicaID: 1,
+		},
+	})
+	if err != nil {
+		t.Fatalf("build bootstrap manifest: %v", err)
+	}
+
+	host, err := Open(context.Background(), Config{
+		NodeID:            1,
+		StoreID:           1,
+		ClusterID:         manifest.ClusterID,
+		DataDir:           t.TempDir(),
+		BootstrapManifest: &manifest,
+	})
+	if err != nil {
+		t.Fatalf("open host: %v", err)
+	}
+	defer host.Close()
+	runCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- host.Run(runCtx)
+	}()
+	defer func() {
+		cancel()
+		select {
+		case err := <-done:
+			if err != nil && err != context.Canceled {
+				t.Fatalf("run host: %v", err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out stopping host")
+		}
+	}()
+
+	waitForLeader(t, host, 11, 1)
+
+	key := storage.GlobalTablePrimaryKey(7, []byte("alice"))
+	putTS := hlc.Timestamp{WallTime: 100, Logical: 1}
+	deleteTS := hlc.Timestamp{WallTime: 200, Logical: 1}
+	if _, err := host.PutValueLocal(context.Background(), key, putTS, []byte("value")); err != nil {
+		t.Fatalf("put value local: %v", err)
+	}
+	value, _, found, err := host.ReadLatestLocal(context.Background(), key)
+	if err != nil {
+		t.Fatalf("read latest after put: %v", err)
+	}
+	if !found || string(value) != "value" {
+		t.Fatalf("latest value after put = %q found=%v, want value/true", value, found)
+	}
+
+	if _, err := host.DeleteValueLocal(context.Background(), key, deleteTS); err != nil {
+		t.Fatalf("delete value local: %v", err)
+	}
+	value, _, found, err = host.ReadLatestLocal(context.Background(), key)
+	if err != nil {
+		t.Fatalf("read latest after tombstone: %v", err)
+	}
+	if found {
+		t.Fatalf("latest value after tombstone = %q found=%v, want hidden row", value, found)
+	}
+	if _, err := host.engine.GetMVCCValue(context.Background(), key, deleteTS); err != storage.ErrMVCCValueDeleted {
+		t.Fatalf("exact tombstone err = %v, want %v", err, storage.ErrMVCCValueDeleted)
+	}
+	rows, _, err := host.ScanRangeLocal(context.Background(), storage.GlobalTablePrimaryPrefix(7), storage.GlobalTablePrimaryPrefix(8), true, false)
+	if err != nil {
+		t.Fatalf("scan after tombstone: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("rows after tombstone = %d, want 0", len(rows))
+	}
+}
+
 func TestHostSeedsAndLoadsSQLCatalog(t *testing.T) {
 	t.Parallel()
 

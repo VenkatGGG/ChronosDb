@@ -49,10 +49,17 @@ func (e *Engine) ScanLatestMVCCRange(_ context.Context, startKey, endKey []byte,
 			continue
 		}
 		lastLogicalKey = append(lastLogicalKey[:0], decoded.LogicalKey...)
+		value, err := UnmarshalMVCCValue(kv.Value)
+		if err != nil {
+			return nil, err
+		}
+		if value.Tombstone {
+			continue
+		}
 		versions = append(versions, MVCCVersion{
 			LogicalKey: decoded.LogicalKey,
 			Timestamp:  decoded.Timestamp,
-			Value:      append([]byte(nil), kv.Value...),
+			Value:      append([]byte(nil), value.Value...),
 		})
 	}
 	return versions, nil

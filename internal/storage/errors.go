@@ -13,6 +13,8 @@ var (
 	ErrCorruptMetadata = errors.New("corrupt store metadata")
 	// ErrMVCCValueNotFound reports that a specific MVCC version does not exist.
 	ErrMVCCValueNotFound = errors.New("mvcc value not found")
+	// ErrMVCCValueDeleted reports that a specific MVCC version is a tombstone.
+	ErrMVCCValueDeleted = errors.New("mvcc value deleted")
 	// ErrIntentNotFound reports that no intent exists for a logical key.
 	ErrIntentNotFound = errors.New("intent not found")
 	// ErrClosedTimestampNotFound reports that no closed timestamp publication exists for a range.
