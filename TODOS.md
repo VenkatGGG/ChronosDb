@@ -644,10 +644,22 @@ Design constraints:
   - latest reads and range scans now hide tombstoned rows, and focused storage,
     runtime, and system tests cover exact tombstone reads, visible-row
     suppression, and background delete-intent recovery
-- [ ] 14.2 Add `DELETE` planning and execution
+- [x] 14.2 Add `DELETE` planning and execution
   for primary-key point deletes and primary-key-bounded range deletes,
-  including command tags, row counts, transactional delete intents, and
-  `RETURNING` support on deleted rows
+  including command tags, row counts, and transactional delete intents
+  through the live runtime
+  - planner, optimizer, flow planning, and pgwire metadata now treat `DELETE`
+    as a first-class statement type with point-delete and bounded-range-delete
+    shapes
+  - the live executor now applies tombstone intents for both implicit and
+    explicit transactions, suppresses pending deletes from in-transaction reads,
+    and commits multi-range delete statements through the durable txn-record
+    path
+  - unit and end-to-end pgwire tests now cover point deletes, bounded
+    multi-range deletes, explicit-transaction delete visibility, command-tag
+    row counts, and cross-node absence after commit
+  - `DELETE RETURNING` stays deferred to `14.5` so all DML `RETURNING`
+    semantics land through the shared projection/materialization path
 - [ ] 14.3 Add `UPDATE` planning and execution
   for primary-key-targeted updates, including `SET` clause binding, row
   read/merge/rewrite behavior, transactional locking, write-intent updates, and
@@ -689,7 +701,7 @@ Design constraints:
 
 Execution milestones:
 
-- [ ] Milestone A: MVCC-correct deletes
+- [x] Milestone A: MVCC-correct deletes
   Complete `14.1` and `14.2` together so `DELETE` ships only after tombstones,
   delete intents, scans, and recovery semantics are all correct under restart
   and lease movement.

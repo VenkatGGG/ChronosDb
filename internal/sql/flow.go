@@ -17,6 +17,7 @@ type OperatorKind string
 const (
 	OperatorKVScan     OperatorKind = "kv_scan"
 	OperatorKVInsert   OperatorKind = "kv_insert"
+	OperatorKVDelete   OperatorKind = "kv_delete"
 	OperatorMerge      OperatorKind = "merge"
 	OperatorHashJoin   OperatorKind = "hash_join"
 	OperatorAggregate  OperatorKind = "aggregate"
@@ -120,6 +121,8 @@ func (p *FlowPlanner) Build(plan Plan) (FlowPlan, error) {
 		return p.buildRangeScan(typed), nil
 	case InsertPlan:
 		return p.buildInsert(typed), nil
+	case DeletePlan:
+		return p.buildDelete(typed), nil
 	case AggregatePlan:
 		return p.buildAggregate(typed), nil
 	case HashJoinPlan:
@@ -223,6 +226,38 @@ func (p *FlowPlanner) buildInsert(plan InsertPlan) FlowPlan {
 							EndKey:         append([]byte(nil), plan.Key...),
 							StartInclusive: true,
 							EndInclusive:   true,
+						},
+					},
+				},
+			},
+		},
+	}, nil)
+}
+
+func (p *FlowPlanner) buildDelete(plan DeletePlan) FlowPlan {
+	distribution := DistributionByRange
+	preferred := scanPreferredRegions(plan.Table)
+	if plan.Singleton {
+		distribution = DistributionLeaseholderOnly
+		preferred = leasePreferredRegions(plan.Table)
+	}
+	return assembleFlowPlan(1, []FlowStage{
+		{
+			ID:               1,
+			Name:             "delete_tombstone",
+			Distribution:     distribution,
+			PreferredRegions: preferred,
+			HomeRegion:       homeRegion(plan.Table),
+			Processors: []ProcessorSpec{
+				{
+					Kind:  OperatorKVDelete,
+					Table: &plan.Table,
+					Spans: []KeySpan{
+						{
+							StartKey:       append([]byte(nil), plan.Input.StartKey...),
+							EndKey:         append([]byte(nil), plan.Input.EndKey...),
+							StartInclusive: plan.Input.StartInclusive,
+							EndInclusive:   plan.Input.EndInclusive,
 						},
 					},
 				},

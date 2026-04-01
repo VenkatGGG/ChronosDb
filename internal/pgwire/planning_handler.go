@@ -79,6 +79,10 @@ func describeResult(plan chronossql.Plan, flow chronossql.FlowPlan) (QueryResult
 		return QueryResult{
 			CommandTag: "INSERT 0 1",
 		}, nil
+	case chronossql.DeletePlan:
+		return QueryResult{
+			CommandTag: "DELETE 0",
+		}, nil
 	default:
 		return QueryResult{}, fmt.Errorf("unsupported sql plan type %T", plan)
 	}

@@ -248,6 +248,234 @@ func TestProcessNodeExecutesRangeScanAcrossLeaseholders(t *testing.T) {
 	}
 }
 
+func TestProcessNodeExecutesPointDeleteAcrossNodes(t *testing.T) {
+	rootDir := t.TempDir()
+	bootstrapPath := filepath.Join(rootDir, "bootstrap.json")
+	usersRange := meta.RangeDescriptor{
+		RangeID:    53,
+		Generation: 1,
+		StartKey:   storage.GlobalTablePrimaryPrefix(7),
+		EndKey:     storage.GlobalTablePrimaryPrefix(8),
+		Replicas: []meta.ReplicaDescriptor{
+			{ReplicaID: 27, NodeID: 1, Role: meta.ReplicaRoleVoter},
+			{ReplicaID: 28, NodeID: 2, Role: meta.ReplicaRoleVoter},
+			{ReplicaID: 29, NodeID: 3, Role: meta.ReplicaRoleVoter},
+		},
+		LeaseholderReplicaID: 28,
+	}
+	manifest, err := chronosruntime.BuildBootstrapManifest("cluster-point-delete", []chronosruntime.BootstrapNode{
+		{NodeID: 1, StoreID: 27},
+		{NodeID: 2, StoreID: 28},
+		{NodeID: 3, StoreID: 29},
+	}, []meta.RangeDescriptor{usersRange})
+	if err != nil {
+		t.Fatalf("build bootstrap manifest: %v", err)
+	}
+	if err := chronosruntime.WriteBootstrapManifest(bootstrapPath, manifest); err != nil {
+		t.Fatalf("write bootstrap manifest: %v", err)
+	}
+
+	node1, cancel1, done1 := startProcessNodeForTest(t, ProcessNodeConfig{
+		NodeID:            1,
+		DataDir:           filepath.Join(rootDir, "node-1"),
+		BootstrapPath:     bootstrapPath,
+		PGListenAddr:      "127.0.0.1:0",
+		ObservabilityAddr: "127.0.0.1:0",
+		ControlAddr:       "127.0.0.1:0",
+	})
+	t.Cleanup(func() {
+		cancel1()
+		waitProcessNodeDone(t, done1, "point-delete-node1")
+	})
+	node2, cancel2, done2 := startProcessNodeForTest(t, ProcessNodeConfig{
+		NodeID:            2,
+		DataDir:           filepath.Join(rootDir, "node-2"),
+		BootstrapPath:     bootstrapPath,
+		PGListenAddr:      "127.0.0.1:0",
+		ObservabilityAddr: "127.0.0.1:0",
+		ControlAddr:       "127.0.0.1:0",
+	})
+	t.Cleanup(func() {
+		cancel2()
+		waitProcessNodeDone(t, done2, "point-delete-node2")
+	})
+	node3, cancel3, done3 := startProcessNodeForTest(t, ProcessNodeConfig{
+		NodeID:            3,
+		DataDir:           filepath.Join(rootDir, "node-3"),
+		BootstrapPath:     bootstrapPath,
+		PGListenAddr:      "127.0.0.1:0",
+		ObservabilityAddr: "127.0.0.1:0",
+		ControlAddr:       "127.0.0.1:0",
+	})
+	t.Cleanup(func() {
+		cancel3()
+		waitProcessNodeDone(t, done3, "point-delete-node3")
+	})
+
+	if err := node2.host.Campaign(context.Background(), usersRange.RangeID); err != nil {
+		t.Fatalf("campaign delete leaseholder: %v", err)
+	}
+	waitForRangeLeader(t, node2.host, usersRange.RangeID, 28)
+
+	conn := openPGConn(t, node1.state.PGAddr)
+	defer conn.Close()
+	if _, err := conn.Write(queryFrame("insert into users (id, name, email) values (17, 'alice', 'a@example.com')")); err != nil {
+		t.Fatalf("write insert: %v", err)
+	}
+	if got := frameTags(readFrames(t, conn, 2)); got != "CZ" {
+		t.Fatalf("insert frame tags = %q, want CZ", got)
+	}
+	if _, err := conn.Write(queryFrame("delete from users where id = 17")); err != nil {
+		t.Fatalf("write delete: %v", err)
+	}
+	deleteFrames := readFrames(t, conn, 2)
+	if got := frameTags(deleteFrames); got != "CZ" {
+		t.Fatalf("delete frame tags = %q, want CZ", got)
+	}
+	if tag := decodeCommandCompleteFrame(deleteFrames[0]); tag != "DELETE 1" {
+		t.Fatalf("delete command tag = %q, want DELETE 1", tag)
+	}
+
+	selectConn := openPGConn(t, node3.state.PGAddr)
+	defer selectConn.Close()
+	if _, err := selectConn.Write(queryFrame("select id, name from users where id = 17")); err != nil {
+		t.Fatalf("write delete check select: %v", err)
+	}
+	selectFrames := readFrames(t, selectConn, 3)
+	if got := frameTags(selectFrames); got != "TCZ" {
+		t.Fatalf("delete check frames = %q, want TCZ", got)
+	}
+}
+
+func TestProcessNodeExecutesBoundedRangeDeleteAcrossLeaseholders(t *testing.T) {
+	rootDir := t.TempDir()
+	bootstrapPath := filepath.Join(rootDir, "bootstrap.json")
+	splitKey := usersPrimaryKey(50)
+	rangeOne := meta.RangeDescriptor{
+		RangeID:    54,
+		Generation: 1,
+		StartKey:   storage.GlobalTablePrimaryPrefix(7),
+		EndKey:     splitKey,
+		Replicas: []meta.ReplicaDescriptor{
+			{ReplicaID: 30, NodeID: 1, Role: meta.ReplicaRoleVoter},
+			{ReplicaID: 31, NodeID: 2, Role: meta.ReplicaRoleVoter},
+			{ReplicaID: 32, NodeID: 3, Role: meta.ReplicaRoleVoter},
+		},
+		LeaseholderReplicaID: 30,
+	}
+	rangeTwo := meta.RangeDescriptor{
+		RangeID:    55,
+		Generation: 1,
+		StartKey:   splitKey,
+		EndKey:     storage.GlobalTablePrimaryPrefix(8),
+		Replicas: []meta.ReplicaDescriptor{
+			{ReplicaID: 33, NodeID: 1, Role: meta.ReplicaRoleVoter},
+			{ReplicaID: 34, NodeID: 2, Role: meta.ReplicaRoleVoter},
+			{ReplicaID: 35, NodeID: 3, Role: meta.ReplicaRoleVoter},
+		},
+		LeaseholderReplicaID: 35,
+	}
+	manifest, err := chronosruntime.BuildBootstrapManifest("cluster-range-delete", []chronosruntime.BootstrapNode{
+		{NodeID: 1, StoreID: 30},
+		{NodeID: 2, StoreID: 31},
+		{NodeID: 3, StoreID: 32},
+	}, []meta.RangeDescriptor{rangeOne, rangeTwo})
+	if err != nil {
+		t.Fatalf("build bootstrap manifest: %v", err)
+	}
+	if err := chronosruntime.WriteBootstrapManifest(bootstrapPath, manifest); err != nil {
+		t.Fatalf("write bootstrap manifest: %v", err)
+	}
+
+	node1, cancel1, done1 := startProcessNodeForTest(t, ProcessNodeConfig{
+		NodeID:            1,
+		DataDir:           filepath.Join(rootDir, "node-1"),
+		BootstrapPath:     bootstrapPath,
+		PGListenAddr:      "127.0.0.1:0",
+		ObservabilityAddr: "127.0.0.1:0",
+		ControlAddr:       "127.0.0.1:0",
+	})
+	t.Cleanup(func() {
+		cancel1()
+		waitProcessNodeDone(t, done1, "range-delete-node1")
+	})
+	node2, cancel2, done2 := startProcessNodeForTest(t, ProcessNodeConfig{
+		NodeID:            2,
+		DataDir:           filepath.Join(rootDir, "node-2"),
+		BootstrapPath:     bootstrapPath,
+		PGListenAddr:      "127.0.0.1:0",
+		ObservabilityAddr: "127.0.0.1:0",
+		ControlAddr:       "127.0.0.1:0",
+	})
+	t.Cleanup(func() {
+		cancel2()
+		waitProcessNodeDone(t, done2, "range-delete-node2")
+	})
+	node3, cancel3, done3 := startProcessNodeForTest(t, ProcessNodeConfig{
+		NodeID:            3,
+		DataDir:           filepath.Join(rootDir, "node-3"),
+		BootstrapPath:     bootstrapPath,
+		PGListenAddr:      "127.0.0.1:0",
+		ObservabilityAddr: "127.0.0.1:0",
+		ControlAddr:       "127.0.0.1:0",
+	})
+	t.Cleanup(func() {
+		cancel3()
+		waitProcessNodeDone(t, done3, "range-delete-node3")
+	})
+
+	if err := node1.host.Campaign(context.Background(), rangeOne.RangeID); err != nil {
+		t.Fatalf("campaign first delete leaseholder: %v", err)
+	}
+	if err := node3.host.Campaign(context.Background(), rangeTwo.RangeID); err != nil {
+		t.Fatalf("campaign second delete leaseholder: %v", err)
+	}
+	waitForRangeLeader(t, node1.host, rangeOne.RangeID, 30)
+	waitForRangeLeader(t, node3.host, rangeTwo.RangeID, 35)
+
+	conn := openPGConn(t, node2.state.PGAddr)
+	defer conn.Close()
+	for _, query := range []string{
+		"insert into users (id, name, email) values (7, 'alice', 'a@example.com')",
+		"insert into users (id, name, email) values (70, 'bob', 'b@example.com')",
+		"insert into users (id, name, email) values (90, 'carol', 'c@example.com')",
+	} {
+		if _, err := conn.Write(queryFrame(query)); err != nil {
+			t.Fatalf("write insert %q: %v", query, err)
+		}
+		if got := frameTags(readFrames(t, conn, 2)); got != "CZ" {
+			t.Fatalf("insert frame tags for %q = %q, want CZ", query, got)
+		}
+	}
+	if _, err := conn.Write(queryFrame("delete from users where id >= 7 and id < 80")); err != nil {
+		t.Fatalf("write range delete: %v", err)
+	}
+	deleteFrames := readFrames(t, conn, 2)
+	if got := frameTags(deleteFrames); got != "CZ" {
+		t.Fatalf("range delete frame tags = %q, want CZ", got)
+	}
+	if tag := decodeCommandCompleteFrame(deleteFrames[0]); tag != "DELETE 2" {
+		t.Fatalf("range delete command tag = %q, want DELETE 2", tag)
+	}
+
+	scanConn := openPGConn(t, node2.state.PGAddr)
+	defer scanConn.Close()
+	if _, err := scanConn.Write(queryFrame("select id, name from users where id >= 1 and id < 100")); err != nil {
+		t.Fatalf("write post-delete scan: %v", err)
+	}
+	frames := readFramesUntilReady(t, scanConn)
+	if got := frameTags(frames); got != "TDCZ" {
+		t.Fatalf("post-delete scan frames = %q, want TDCZ", got)
+	}
+	row, err := decodeDataRowFrame(frames[1])
+	if err != nil {
+		t.Fatalf("decode post-delete row: %v", err)
+	}
+	if len(row) != 2 || string(row[0]) != "90" || string(row[1]) != "carol" {
+		t.Fatalf("remaining row = %q/%q, want 90/carol", row[0], row[1])
+	}
+}
+
 func TestProcessNodeExecutesAggregateAndJoinQueries(t *testing.T) {
 	t.Parallel()
 
@@ -623,6 +851,132 @@ func TestProcessNodeExecutesExplicitTransactionRollback(t *testing.T) {
 	checkFrames := readFrames(t, checkConn, 3)
 	if got := frameTags(checkFrames); got != "TCZ" {
 		t.Fatalf("rollback check frames = %q, want TCZ", got)
+	}
+}
+
+func TestProcessNodeExecutesExplicitTransactionDeleteCommit(t *testing.T) {
+	rootDir := t.TempDir()
+	bootstrapPath := filepath.Join(rootDir, "bootstrap.json")
+	usersRange := meta.RangeDescriptor{
+		RangeID:    64,
+		Generation: 1,
+		StartKey:   storage.GlobalTablePrimaryPrefix(7),
+		EndKey:     storage.GlobalTablePrimaryPrefix(8),
+		Replicas: []meta.ReplicaDescriptor{
+			{ReplicaID: 47, NodeID: 1, Role: meta.ReplicaRoleVoter},
+			{ReplicaID: 48, NodeID: 2, Role: meta.ReplicaRoleVoter},
+			{ReplicaID: 49, NodeID: 3, Role: meta.ReplicaRoleVoter},
+		},
+		LeaseholderReplicaID: 48,
+	}
+	manifest, err := chronosruntime.BuildBootstrapManifest("cluster-explicit-delete", []chronosruntime.BootstrapNode{
+		{NodeID: 1, StoreID: 47},
+		{NodeID: 2, StoreID: 48},
+		{NodeID: 3, StoreID: 49},
+	}, []meta.RangeDescriptor{usersRange})
+	if err != nil {
+		t.Fatalf("build bootstrap manifest: %v", err)
+	}
+	if err := chronosruntime.WriteBootstrapManifest(bootstrapPath, manifest); err != nil {
+		t.Fatalf("write bootstrap manifest: %v", err)
+	}
+
+	node1, cancel1, done1 := startProcessNodeForTest(t, ProcessNodeConfig{
+		NodeID:            1,
+		DataDir:           filepath.Join(rootDir, "node-1"),
+		BootstrapPath:     bootstrapPath,
+		PGListenAddr:      "127.0.0.1:0",
+		ObservabilityAddr: "127.0.0.1:0",
+		ControlAddr:       "127.0.0.1:0",
+	})
+	t.Cleanup(func() {
+		cancel1()
+		waitProcessNodeDone(t, done1, "explicit-delete-node1")
+	})
+	node2, cancel2, done2 := startProcessNodeForTest(t, ProcessNodeConfig{
+		NodeID:            2,
+		DataDir:           filepath.Join(rootDir, "node-2"),
+		BootstrapPath:     bootstrapPath,
+		PGListenAddr:      "127.0.0.1:0",
+		ObservabilityAddr: "127.0.0.1:0",
+		ControlAddr:       "127.0.0.1:0",
+	})
+	t.Cleanup(func() {
+		cancel2()
+		waitProcessNodeDone(t, done2, "explicit-delete-node2")
+	})
+	node3, cancel3, done3 := startProcessNodeForTest(t, ProcessNodeConfig{
+		NodeID:            3,
+		DataDir:           filepath.Join(rootDir, "node-3"),
+		BootstrapPath:     bootstrapPath,
+		PGListenAddr:      "127.0.0.1:0",
+		ObservabilityAddr: "127.0.0.1:0",
+		ControlAddr:       "127.0.0.1:0",
+	})
+	t.Cleanup(func() {
+		cancel3()
+		waitProcessNodeDone(t, done3, "explicit-delete-node3")
+	})
+
+	if err := node2.host.Campaign(context.Background(), usersRange.RangeID); err != nil {
+		t.Fatalf("campaign explicit delete leaseholder: %v", err)
+	}
+	waitForRangeLeader(t, node2.host, usersRange.RangeID, 48)
+
+	seedConn := openPGConn(t, node1.state.PGAddr)
+	defer seedConn.Close()
+	if _, err := seedConn.Write(queryFrame("insert into users (id, name, email) values (29, 'dana', 'd@example.com')")); err != nil {
+		t.Fatalf("seed row: %v", err)
+	}
+	if got := frameTags(readFrames(t, seedConn, 2)); got != "CZ" {
+		t.Fatalf("seed insert frames = %q, want CZ", got)
+	}
+
+	conn := openPGConn(t, node1.state.PGAddr)
+	defer conn.Close()
+	for _, query := range []string{"begin", "delete from users where id = 29"} {
+		if _, err := conn.Write(queryFrame(query)); err != nil {
+			t.Fatalf("write %q: %v", query, err)
+		}
+		frames := readFrames(t, conn, 2)
+		if got := frameTags(frames); got != "CZ" {
+			t.Fatalf("%q frame tags = %q, want CZ", query, got)
+		}
+	}
+
+	if _, err := conn.Write(queryFrame("select id, name from users where id = 29")); err != nil {
+		t.Fatalf("write in-txn select: %v", err)
+	}
+	inTxnFrames := readFrames(t, conn, 3)
+	if got := frameTags(inTxnFrames); got != "TCZ" || readyStatus(inTxnFrames[2]) != byte(pgwire.TxInTransaction) {
+		t.Fatalf("in-txn delete select frames = %q/%q, want TCZ/T", got, readyStatus(inTxnFrames[2]))
+	}
+
+	otherConn := openPGConn(t, node3.state.PGAddr)
+	defer otherConn.Close()
+	if _, err := otherConn.Write(queryFrame("select id, name from users where id = 29")); err != nil {
+		t.Fatalf("write external pre-commit select: %v", err)
+	}
+	otherFrames := readFrames(t, otherConn, 4)
+	if got := frameTags(otherFrames); got != "TDCZ" {
+		t.Fatalf("pre-commit external select frames = %q, want TDCZ", got)
+	}
+
+	if _, err := conn.Write(queryFrame("commit")); err != nil {
+		t.Fatalf("write commit: %v", err)
+	}
+	if got := frameTags(readFrames(t, conn, 2)); got != "CZ" {
+		t.Fatalf("commit frames = %q, want CZ", got)
+	}
+
+	finalConn := openPGConn(t, node3.state.PGAddr)
+	defer finalConn.Close()
+	if _, err := finalConn.Write(queryFrame("select id, name from users where id = 29")); err != nil {
+		t.Fatalf("write external post-commit select: %v", err)
+	}
+	finalFrames := readFrames(t, finalConn, 3)
+	if got := frameTags(finalFrames); got != "TCZ" {
+		t.Fatalf("post-commit external select frames = %q, want TCZ", got)
 	}
 }
 
@@ -1691,6 +2045,17 @@ func decodeDataRowFrame(frame []byte) ([][]byte, error) {
 		payload = payload[size:]
 	}
 	return values, nil
+}
+
+func decodeCommandCompleteFrame(frame []byte) string {
+	if len(frame) < 6 || frame[0] != 'C' {
+		return ""
+	}
+	payload := frame[5:]
+	if len(payload) == 0 {
+		return ""
+	}
+	return string(payload[:len(payload)-1])
 }
 
 func readyStatus(frame []byte) byte {

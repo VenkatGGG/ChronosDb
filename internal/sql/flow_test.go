@@ -108,6 +108,34 @@ func TestFlowPlannerBuildInsert(t *testing.T) {
 	}
 }
 
+func TestFlowPlannerBuildDelete(t *testing.T) {
+	t.Parallel()
+
+	planner := testPlanner(t)
+	plan, err := planner.Plan("delete from users where id >= 10 and id < 20")
+	if err != nil {
+		t.Fatalf("plan query: %v", err)
+	}
+
+	flow, err := NewFlowPlanner().Build(plan)
+	if err != nil {
+		t.Fatalf("build flow: %v", err)
+	}
+	if flow.RootStageID != 1 || flow.RootFragmentID != 1 || len(flow.Stages) != 1 {
+		t.Fatalf("unexpected delete flow shape: %+v", flow)
+	}
+	stage := flow.Stages[0]
+	if stage.Distribution != DistributionByRange {
+		t.Fatalf("delete distribution = %q, want %q", stage.Distribution, DistributionByRange)
+	}
+	if len(stage.Processors) != 1 || stage.Processors[0].Kind != OperatorKVDelete {
+		t.Fatalf("delete processor shape = %+v, want one kv_delete", stage.Processors)
+	}
+	if len(flow.ResultSchema) != 0 {
+		t.Fatalf("delete result schema = %+v, want empty", flow.ResultSchema)
+	}
+}
+
 func TestFlowPlannerBuildAggregate(t *testing.T) {
 	t.Parallel()
 

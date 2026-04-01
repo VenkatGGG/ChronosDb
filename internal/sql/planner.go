@@ -48,6 +48,8 @@ func (p *Planner) Optimize(query string) (OptimizedPlan, error) {
 		return p.optimizeSelect(typed)
 	case *vsqlparser.Insert:
 		return p.optimizeInsert(typed)
+	case *vsqlparser.Delete:
+		return p.optimizeDelete(typed)
 	default:
 		return OptimizedPlan{}, fmt.Errorf("sql planner: unsupported statement type %T", stmt)
 	}
@@ -107,6 +109,13 @@ type InsertPlan struct {
 	Value []byte
 }
 
+// DeletePlan maps one SQL delete onto one KV span of tombstone writes.
+type DeletePlan struct {
+	Table     TableDescriptor
+	Input     RangeScanPlan
+	Singleton bool
+}
+
 // AggregatePlan maps a scan onto distributed grouping/aggregation stages.
 type AggregatePlan struct {
 	Input      RangeScanPlan
@@ -140,6 +149,7 @@ type HashJoinPlan struct {
 func (PointLookupPlan) isPlan() {}
 func (RangeScanPlan) isPlan()   {}
 func (InsertPlan) isPlan()      {}
+func (DeletePlan) isPlan()      {}
 func (AggregatePlan) isPlan()   {}
 func (HashJoinPlan) isPlan()    {}
 
@@ -280,6 +290,35 @@ func (p *Planner) optimizeInsert(stmt *vsqlparser.Insert) (OptimizedPlan, error)
 		Value: value,
 	}
 	return p.optimizer.Choose([]PlanCandidate{makeInsertCandidate(p.optimizer, table, plan)})
+}
+
+func (p *Planner) optimizeDelete(stmt *vsqlparser.Delete) (OptimizedPlan, error) {
+	if stmt.With != nil || stmt.Ignore || len(stmt.Targets) > 0 || len(stmt.Partitions) > 0 || len(stmt.OrderBy) > 0 || stmt.Limit != nil {
+		return OptimizedPlan{}, fmt.Errorf("sql planner: unsupported DELETE shape")
+	}
+	table, err := p.resolveSingleTable(stmt.TableExprs)
+	if err != nil {
+		return OptimizedPlan{}, err
+	}
+	predicate, err := bindPrimaryKeyPredicate(table, stmt.Where)
+	if err != nil {
+		return OptimizedPlan{}, err
+	}
+	switch {
+	case predicate.equality != nil:
+	case predicate.lower != nil && predicate.upper != nil:
+	default:
+		return OptimizedPlan{}, fmt.Errorf("sql planner: DELETE requires a primary-key point predicate or bounded primary-key range")
+	}
+	scanPlan, singleton, err := buildRangeScanPlan(table, table.Columns, predicate)
+	if err != nil {
+		return OptimizedPlan{}, err
+	}
+	return p.optimizer.Choose([]PlanCandidate{makeDeleteCandidate(p.optimizer, table, predicate, singleton, DeletePlan{
+		Table:     table,
+		Input:     scanPlan,
+		Singleton: singleton,
+	})})
 }
 
 func (p *Planner) resolveSingleTable(from []vsqlparser.TableExpr) (TableDescriptor, error) {

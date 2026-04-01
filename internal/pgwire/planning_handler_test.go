@@ -49,6 +49,22 @@ func TestPlanningHandlerDescribeInsert(t *testing.T) {
 	}
 }
 
+func TestPlanningHandlerDescribeDelete(t *testing.T) {
+	t.Parallel()
+
+	handler := newPlanningHandler(t)
+	result, err := handler.HandleSimpleQuery(context.Background(), NewSession(handler), "delete from users where id = 7")
+	if err != nil {
+		t.Fatalf("handle query: %v", err)
+	}
+	if result.CommandTag != "DELETE 0" {
+		t.Fatalf("command tag = %q, want DELETE 0", result.CommandTag)
+	}
+	if len(result.Fields) != 0 {
+		t.Fatalf("delete should not expose row-description fields")
+	}
+}
+
 func TestPlanningHandlerDescribeAggregate(t *testing.T) {
 	t.Parallel()
 

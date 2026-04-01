@@ -101,6 +101,22 @@ func (o *Optimizer) costInsert(table TableDescriptor, valueSize int) CostEstimat
 	}
 }
 
+func (o *Optimizer) costDelete(table TableDescriptor, predicate boundPredicate, singleton bool) CostEstimate {
+	stats := table.StatsOrDefaults()
+	rows := estimateRangeRows(stats, predicate, singleton)
+	bytes := rows * stats.AverageRowBytes
+	cpu := 2.0 + math.Log2(float64(rows)+1)
+	score := float64(rows)*1.5 + cpu + float64(bytes)/4096.0
+	return CostEstimate{
+		KVReads:        max(1, rows),
+		KVWrites:       max(1, rows),
+		EstimatedRows:  rows,
+		EstimatedBytes: bytes,
+		CPUCost:        cpu,
+		Score:          score,
+	}
+}
+
 func (o *Optimizer) costAggregate(table TableDescriptor, projection []ColumnDescriptor, predicate boundPredicate, singleton bool, groupByCount, aggregateCount int) CostEstimate {
 	stats := table.StatsOrDefaults()
 	inputRows := estimateRangeRows(stats, predicate, singleton)
@@ -255,6 +271,18 @@ func makeInsertCandidate(o *Optimizer, table TableDescriptor, plan InsertPlan) P
 		Name: "insert_put",
 		Plan: plan,
 		Cost: o.costInsert(table, len(plan.Value)),
+	}
+}
+
+func makeDeleteCandidate(o *Optimizer, table TableDescriptor, predicate boundPredicate, singleton bool, plan DeletePlan) PlanCandidate {
+	name := "range_delete"
+	if singleton {
+		name = "point_delete"
+	}
+	return PlanCandidate{
+		Name: name,
+		Plan: plan,
+		Cost: o.costDelete(table, predicate, singleton),
 	}
 }
 

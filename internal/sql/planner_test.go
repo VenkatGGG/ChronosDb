@@ -75,6 +75,52 @@ func TestPlannerInsertMapsToKV(t *testing.T) {
 	}
 }
 
+func TestPlannerPointDelete(t *testing.T) {
+	t.Parallel()
+
+	planner := testPlanner(t)
+	plan, err := planner.Plan("delete from users where id = 7")
+	if err != nil {
+		t.Fatalf("plan delete: %v", err)
+	}
+	deletePlan, ok := plan.(DeletePlan)
+	if !ok {
+		t.Fatalf("plan type = %T, want DeletePlan", plan)
+	}
+	if !deletePlan.Singleton {
+		t.Fatalf("delete singleton = false, want true")
+	}
+	if !bytes.Equal(deletePlan.Input.StartKey, storage.GlobalTablePrimaryKey(7, encodedIntKey(7))) {
+		t.Fatalf("delete start key = %q, want point key", deletePlan.Input.StartKey)
+	}
+	if !bytes.Equal(deletePlan.Input.EndKey, storage.PrefixEnd(storage.GlobalTablePrimaryKey(7, encodedIntKey(7)))) {
+		t.Fatalf("delete end key = %q, want point prefix end", deletePlan.Input.EndKey)
+	}
+}
+
+func TestPlannerBoundedRangeDelete(t *testing.T) {
+	t.Parallel()
+
+	planner := testPlanner(t)
+	plan, err := planner.Plan("delete from users where id >= 10 and id < 20")
+	if err != nil {
+		t.Fatalf("plan delete: %v", err)
+	}
+	deletePlan, ok := plan.(DeletePlan)
+	if !ok {
+		t.Fatalf("plan type = %T, want DeletePlan", plan)
+	}
+	if deletePlan.Singleton {
+		t.Fatalf("delete singleton = true, want false")
+	}
+	if !bytes.Equal(deletePlan.Input.StartKey, storage.GlobalTablePrimaryKey(7, encodedIntKey(10))) {
+		t.Fatalf("delete start key = %q, want bounded start", deletePlan.Input.StartKey)
+	}
+	if !bytes.Equal(deletePlan.Input.EndKey, storage.GlobalTablePrimaryKey(7, encodedIntKey(20))) {
+		t.Fatalf("delete end key = %q, want bounded end", deletePlan.Input.EndKey)
+	}
+}
+
 func TestPlannerAggregateSelect(t *testing.T) {
 	t.Parallel()
 
@@ -175,6 +221,21 @@ func TestPlannerRejectsNonPrimaryKeyPredicate(t *testing.T) {
 	if _, err := planner.Plan("select id from users where name = 'alice'"); err == nil {
 		t.Fatalf("expected planner error for non-primary-key predicate")
 	}
+	if _, err := planner.Plan("delete from users where name = 'alice'"); err == nil {
+		t.Fatalf("expected planner error for non-primary-key delete predicate")
+	}
+}
+
+func TestPlannerRejectsUnboundedDelete(t *testing.T) {
+	t.Parallel()
+
+	planner := testPlanner(t)
+	if _, err := planner.Plan("delete from users"); err == nil {
+		t.Fatalf("expected planner error for unbounded delete")
+	}
+	if _, err := planner.Plan("delete from users where id >= 10"); err == nil {
+		t.Fatalf("expected planner error for half-bounded delete")
+	}
 }
 
 func TestPlannerRejectsUngroupedAggregateProjection(t *testing.T) {
@@ -237,6 +298,25 @@ func TestPlannerOptimizeOpenEndedSelectUsesRangeScan(t *testing.T) {
 	}
 	if len(scan.StartKey) == 0 || len(scan.EndKey) == 0 {
 		t.Fatalf("range scan should carry a bounded key span")
+	}
+}
+
+func TestPlannerOptimizePointDeleteUsesPointCandidate(t *testing.T) {
+	t.Parallel()
+
+	planner := testPlanner(t)
+	optimized, err := planner.Optimize("delete from users where id = 7")
+	if err != nil {
+		t.Fatalf("optimize delete: %v", err)
+	}
+	if len(optimized.Candidates) != 1 {
+		t.Fatalf("candidate count = %d, want 1", len(optimized.Candidates))
+	}
+	if optimized.Selected.Name != "point_delete" {
+		t.Fatalf("selected candidate = %q, want point_delete", optimized.Selected.Name)
+	}
+	if _, ok := optimized.Selected.Plan.(DeletePlan); !ok {
+		t.Fatalf("selected plan type = %T, want DeletePlan", optimized.Selected.Plan)
 	}
 }
 

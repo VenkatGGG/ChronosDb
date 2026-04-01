@@ -35,9 +35,15 @@ type sessionTxnState struct {
 }
 
 type pendingTxnWrite struct {
-	key     []byte
-	value   []byte
-	rangeID uint64
+	key       []byte
+	value     []byte
+	tombstone bool
+	rangeID   uint64
+}
+
+type scanRow struct {
+	key []byte
+	row map[string]chronossql.Value
 }
 
 func newRuntimeQueryHandler(planner *chronossql.Planner, flowPlanner *chronossql.FlowPlanner, kv *kvClient) *runtimeQueryHandler {
@@ -80,6 +86,8 @@ func (h *runtimeQueryHandler) HandleSimpleQuery(ctx context.Context, session *pg
 		result, execErr = h.executeRangeScan(ctx, session, result, plan)
 	case chronossql.InsertPlan:
 		result, execErr = h.executeInsert(ctx, session, result, plan)
+	case chronossql.DeletePlan:
+		result, execErr = h.executeDelete(ctx, session, result, plan)
 	case chronossql.AggregatePlan:
 		result, execErr = h.executeAggregateQuery(ctx, session, result, plan)
 	case chronossql.HashJoinPlan:
@@ -123,17 +131,7 @@ func (h *runtimeQueryHandler) beginSessionTxn(session *pgwire.Session) (pgwire.Q
 	}
 
 	now := txnNow()
-	state := &sessionTxnState{
-		record: txn.Record{
-			ID:         newTxnID(),
-			Status:     txn.StatusPending,
-			ReadTS:     now,
-			WriteTS:    now,
-			Priority:   1,
-			DeadlineTS: hlc.Timestamp{WallTime: now.WallTime + uint64(defaultTxnDeadline)},
-		},
-		writes: make(map[string]pendingTxnWrite),
-	}
+	state := newTxnState(now)
 	h.storeSessionState(session, state)
 	h.startHeartbeat(state)
 	session.SetTxStatus(pgwire.TxInTransaction)
@@ -162,46 +160,8 @@ func (h *runtimeQueryHandler) commitSessionTxn(ctx context.Context, session *pgw
 	}
 
 	h.stopHeartbeat(state)
-	record, writes := state.snapshot()
-	if record.AnchorRangeID == 0 || len(writes) == 0 {
-		h.deleteSessionState(session)
-		session.SetTxStatus(pgwire.TxIdle)
-		return pgwire.QueryResult{CommandTag: "COMMIT"}, nil
-	}
-
-	now := txnNow()
-	if record.LastHeartbeatTS.IsZero() || now.Compare(record.LastHeartbeatTS) > 0 {
-		updated, err := record.Heartbeat(now)
-		if err == nil {
-			record = updated
-		}
-	}
-	record.WriteTS = maxTimestamp(record.WriteTS, maxTimestamp(record.MinCommitTS, now))
-
-	if len(writes) > 1 || len(record.TouchedRanges) > 1 {
-		required, err := intentSetFromRecord(record)
-		if err != nil {
-			return pgwire.QueryResult{}, wrapExecutionError("build staged intent set", err)
-		}
-		staged, err := record.StageForParallelCommit(required)
-		if err != nil {
-			return pgwire.QueryResult{}, wrapExecutionError("stage parallel commit", err)
-		}
-		if err := h.kv.PutTxnRecord(ctx, staged); err != nil {
-			return pgwire.QueryResult{}, wrapExecutionError("persist staged txn record", err)
-		}
-		recovered, _, err := txn.RecoverAfterCoordinatorFailure(staged, required, buildObservedIntents(staged, writes))
-		if err != nil {
-			return pgwire.QueryResult{}, wrapExecutionError("recover staged txn record", err)
-		}
-		record = recovered
-	}
-	record.Status = txn.StatusCommitted
-	if err := h.kv.PutTxnRecord(ctx, record); err != nil {
-		return pgwire.QueryResult{}, wrapExecutionError("persist committed txn record", err)
-	}
-	if err := h.resolveTxnRecord(ctx, record, writes); err != nil {
-		return pgwire.QueryResult{}, wrapExecutionError("resolve committed txn", err)
+	if err := h.commitTxnState(ctx, state); err != nil {
+		return pgwire.QueryResult{}, err
 	}
 
 	h.deleteSessionState(session)
@@ -224,15 +184,8 @@ func (h *runtimeQueryHandler) rollbackSessionTxn(ctx context.Context, session *p
 	}
 
 	h.stopHeartbeat(state)
-	record, writes := state.snapshot()
-	if record.AnchorRangeID != 0 {
-		record.Status = txn.StatusAborted
-		if err := h.kv.PutTxnRecord(ctx, record); err != nil {
-			return pgwire.QueryResult{}, wrapExecutionError("persist aborted txn record", err)
-		}
-	}
-	if err := h.resolveTxnRecord(ctx, record, writes); err != nil {
-		return pgwire.QueryResult{}, wrapExecutionError("resolve aborted txn", err)
+	if err := h.abortTxnState(ctx, state); err != nil {
+		return pgwire.QueryResult{}, err
 	}
 
 	h.deleteSessionState(session)
@@ -268,6 +221,9 @@ func (h *runtimeQueryHandler) failActiveTxn(ctx context.Context, session *pgwire
 
 func (h *runtimeQueryHandler) executePointLookup(ctx context.Context, session *pgwire.Session, result pgwire.QueryResult, plan chronossql.PointLookupPlan) (pgwire.QueryResult, error) {
 	if pending, ok := h.pendingWriteForKey(session, plan.Key); ok {
+		if pending.tombstone {
+			return result, nil
+		}
 		row, err := chronossql.DecodeRowValue(plan.Table, pending.value)
 		if err != nil {
 			return pgwire.QueryResult{}, wrapExecutionError("decode row payload", err)
@@ -333,59 +289,51 @@ func (h *runtimeQueryHandler) executeInsert(ctx context.Context, session *pgwire
 			Message:  "transaction state is not available",
 		}
 	}
+	if err := h.stageWrite(ctx, state, plan.Key, plan.Value, false); err != nil {
+		return pgwire.QueryResult{}, err
+	}
+	return result, nil
+}
 
-	desc, err := h.kv.LookupRange(ctx, plan.Key)
+func (h *runtimeQueryHandler) executeDelete(ctx context.Context, session *pgwire.Session, result pgwire.QueryResult, plan chronossql.DeletePlan) (pgwire.QueryResult, error) {
+	targets, err := h.scanRowSet(ctx, session, plan.Input)
 	if err != nil {
 		return pgwire.QueryResult{}, err
 	}
-	record, err := h.ensureAnchoredRecord(ctx, state, desc.RangeID)
-	if err != nil {
-		return pgwire.QueryResult{}, err
+	if len(targets) == 0 {
+		result.CommandTag = "DELETE 0"
+		return result, nil
 	}
-	decision, err := h.kv.AcquireLock(ctx, plan.Key, record, storage.IntentStrengthExclusive)
-	if err != nil {
-		return pgwire.QueryResult{}, err
-	}
-	if decision.Kind == txn.LockDecisionWait {
-		contention, mapErr := txn.ContentionErrorFromDecision(record, decision, 25)
-		if mapErr != nil {
-			return pgwire.QueryResult{}, mapErr
+
+	if session == nil || session.TxStatus() != pgwire.TxInTransaction {
+		state := newTxnState(txnNow())
+		for _, target := range targets {
+			if err := h.stageWrite(ctx, state, target.key, nil, true); err != nil {
+				_ = h.abortTxnState(ctx, state)
+				return pgwire.QueryResult{}, err
+			}
 		}
-		return pgwire.QueryResult{}, contention
+		if err := h.commitTxnState(ctx, state); err != nil {
+			return pgwire.QueryResult{}, err
+		}
+		result.CommandTag = fmt.Sprintf("DELETE %d", len(targets))
+		return result, nil
 	}
 
-	intent := storage.Intent{
-		TxnID:          record.ID,
-		Epoch:          record.Epoch,
-		WriteTimestamp: record.WriteTS,
-		Strength:       storage.IntentStrengthExclusive,
-		Value:          append([]byte(nil), plan.Value...),
+	state, ok := h.lookupSessionState(session)
+	if !ok {
+		return pgwire.QueryResult{}, pgwire.Error{
+			Severity: "ERROR",
+			Code:     "08006",
+			Message:  "transaction state is not available",
+		}
 	}
-	record, err = record.TrackIntent(txn.IntentRef{
-		RangeID:  desc.RangeID,
-		Key:      append([]byte(nil), plan.Key...),
-		Strength: storage.IntentStrengthExclusive,
-	})
-	if err != nil {
-		_ = h.kv.ReleaseLock(ctx, plan.Key, record.ID)
-		return pgwire.QueryResult{}, err
+	for _, target := range targets {
+		if err := h.stageWrite(ctx, state, target.key, nil, true); err != nil {
+			return pgwire.QueryResult{}, err
+		}
 	}
-	if err := h.kv.PutTxnRecord(ctx, record); err != nil {
-		_ = h.kv.ReleaseLock(ctx, plan.Key, record.ID)
-		return pgwire.QueryResult{}, err
-	}
-	if err := h.kv.PutIntent(ctx, plan.Key, intent); err != nil {
-		_ = h.kv.ReleaseLock(ctx, plan.Key, record.ID)
-		return pgwire.QueryResult{}, err
-	}
-	state.mu.Lock()
-	state.record = record
-	state.writes[string(plan.Key)] = pendingTxnWrite{
-		key:     append([]byte(nil), plan.Key...),
-		value:   append([]byte(nil), plan.Value...),
-		rangeID: desc.RangeID,
-	}
-	state.mu.Unlock()
+	result.CommandTag = fmt.Sprintf("DELETE %d", len(targets))
 	return result, nil
 }
 
@@ -556,6 +504,18 @@ func (h *runtimeQueryHandler) executeHashJoin(ctx context.Context, session *pgwi
 }
 
 func (h *runtimeQueryHandler) scanRows(ctx context.Context, session *pgwire.Session, plan chronossql.RangeScanPlan) ([]map[string]chronossql.Value, error) {
+	scanned, err := h.scanRowSet(ctx, session, plan)
+	if err != nil {
+		return nil, err
+	}
+	rows := make([]map[string]chronossql.Value, 0, len(scanned))
+	for _, item := range scanned {
+		rows = append(rows, item.row)
+	}
+	return rows, nil
+}
+
+func (h *runtimeQueryHandler) scanRowSet(ctx context.Context, session *pgwire.Session, plan chronossql.RangeScanPlan) ([]scanRow, error) {
 	scanned, err := h.kv.ScanRange(ctx, plan.StartKey, plan.EndKey, plan.StartInclusive, plan.EndInclusive)
 	if err != nil {
 		return nil, err
@@ -565,6 +525,10 @@ func (h *runtimeQueryHandler) scanRows(ctx context.Context, session *pgwire.Sess
 		rowByKey[string(item.LogicalKey)] = item
 	}
 	for _, pending := range h.pendingWritesInSpan(session, plan.StartKey, plan.EndKey, plan.StartInclusive, plan.EndInclusive) {
+		if pending.tombstone {
+			delete(rowByKey, string(pending.key))
+			continue
+		}
 		rowByKey[string(pending.key)] = kvScanRow{
 			LogicalKey: append([]byte(nil), pending.key...),
 			Value:      append([]byte(nil), pending.value...),
@@ -577,13 +541,16 @@ func (h *runtimeQueryHandler) scanRows(ctx context.Context, session *pgwire.Sess
 	sort.Slice(keys, func(i, j int) bool {
 		return bytes.Compare(keys[i], keys[j]) < 0
 	})
-	rows := make([]map[string]chronossql.Value, 0, len(keys))
+	rows := make([]scanRow, 0, len(keys))
 	for _, key := range keys {
 		row, err := chronossql.DecodeRowValue(plan.Table, rowByKey[string(key)].Value)
 		if err != nil {
 			return nil, wrapExecutionError("decode scanned row", err)
 		}
-		rows = append(rows, row)
+		rows = append(rows, scanRow{
+			key: append([]byte(nil), key...),
+			row: row,
+		})
 	}
 	return rows, nil
 }
@@ -621,6 +588,67 @@ func (h *runtimeQueryHandler) ensureAnchoredRecord(ctx context.Context, state *s
 	return record, nil
 }
 
+func (h *runtimeQueryHandler) stageWrite(ctx context.Context, state *sessionTxnState, key, value []byte, tombstone bool) error {
+	desc, err := h.kv.LookupRange(ctx, key)
+	if err != nil {
+		return err
+	}
+	record, err := h.ensureAnchoredRecord(ctx, state, desc.RangeID)
+	if err != nil {
+		return err
+	}
+	decision, err := h.kv.AcquireLock(ctx, key, record, storage.IntentStrengthExclusive)
+	if err != nil {
+		return err
+	}
+	if decision.Kind == txn.LockDecisionWait {
+		contention, mapErr := txn.ContentionErrorFromDecision(record, decision, 25)
+		if mapErr != nil {
+			return mapErr
+		}
+		return contention
+	}
+
+	intent := storage.Intent{
+		TxnID:          record.ID,
+		Epoch:          record.Epoch,
+		WriteTimestamp: record.WriteTS,
+		Strength:       storage.IntentStrengthExclusive,
+		Tombstone:      tombstone,
+	}
+	if !tombstone {
+		intent.Value = append([]byte(nil), value...)
+	}
+	record, err = record.TrackIntent(txn.IntentRef{
+		RangeID:  desc.RangeID,
+		Key:      append([]byte(nil), key...),
+		Strength: storage.IntentStrengthExclusive,
+	})
+	if err != nil {
+		_ = h.kv.ReleaseLock(ctx, key, record.ID)
+		return err
+	}
+	if err := h.kv.PutTxnRecord(ctx, record); err != nil {
+		_ = h.kv.ReleaseLock(ctx, key, record.ID)
+		return err
+	}
+	if err := h.kv.PutIntent(ctx, key, intent); err != nil {
+		_ = h.kv.ReleaseLock(ctx, key, record.ID)
+		return err
+	}
+
+	state.mu.Lock()
+	state.record = record
+	state.writes[string(key)] = pendingTxnWrite{
+		key:       append([]byte(nil), key...),
+		value:     append([]byte(nil), value...),
+		tombstone: tombstone,
+		rangeID:   desc.RangeID,
+	}
+	state.mu.Unlock()
+	return nil
+}
+
 func (h *runtimeQueryHandler) resolveTxnRecord(ctx context.Context, record txn.Record, writes []pendingTxnWrite) error {
 	if len(record.RequiredIntents) > 0 {
 		return h.kv.ResolveTxnRecord(ctx, record)
@@ -628,6 +656,63 @@ func (h *runtimeQueryHandler) resolveTxnRecord(ctx context.Context, record txn.R
 	for _, write := range writes {
 		_ = h.kv.DeleteIntent(ctx, write.key)
 		_ = h.kv.ReleaseLock(ctx, write.key, record.ID)
+	}
+	return nil
+}
+
+func (h *runtimeQueryHandler) commitTxnState(ctx context.Context, state *sessionTxnState) error {
+	record, writes := state.snapshot()
+	if record.AnchorRangeID == 0 || len(writes) == 0 {
+		return nil
+	}
+
+	now := txnNow()
+	if record.LastHeartbeatTS.IsZero() || now.Compare(record.LastHeartbeatTS) > 0 {
+		updated, err := record.Heartbeat(now)
+		if err == nil {
+			record = updated
+		}
+	}
+	record.WriteTS = maxTimestamp(record.WriteTS, maxTimestamp(record.MinCommitTS, now))
+
+	if len(writes) > 1 || len(record.TouchedRanges) > 1 {
+		required, err := intentSetFromRecord(record)
+		if err != nil {
+			return wrapExecutionError("build staged intent set", err)
+		}
+		staged, err := record.StageForParallelCommit(required)
+		if err != nil {
+			return wrapExecutionError("stage parallel commit", err)
+		}
+		if err := h.kv.PutTxnRecord(ctx, staged); err != nil {
+			return wrapExecutionError("persist staged txn record", err)
+		}
+		recovered, _, err := txn.RecoverAfterCoordinatorFailure(staged, required, buildObservedIntents(staged, writes))
+		if err != nil {
+			return wrapExecutionError("recover staged txn record", err)
+		}
+		record = recovered
+	}
+	record.Status = txn.StatusCommitted
+	if err := h.kv.PutTxnRecord(ctx, record); err != nil {
+		return wrapExecutionError("persist committed txn record", err)
+	}
+	if err := h.resolveTxnRecord(ctx, record, writes); err != nil {
+		return wrapExecutionError("resolve committed txn", err)
+	}
+	return nil
+}
+
+func (h *runtimeQueryHandler) abortTxnState(ctx context.Context, state *sessionTxnState) error {
+	record, writes := state.snapshot()
+	if record.AnchorRangeID != 0 {
+		record.Status = txn.StatusAborted
+		if err := h.kv.PutTxnRecord(ctx, record); err != nil {
+			return wrapExecutionError("persist aborted txn record", err)
+		}
+	}
+	if err := h.resolveTxnRecord(ctx, record, writes); err != nil {
+		return wrapExecutionError("resolve aborted txn", err)
 	}
 	return nil
 }
@@ -753,6 +838,20 @@ func normalizeTransactionControl(query string) string {
 	}
 }
 
+func newTxnState(now hlc.Timestamp) *sessionTxnState {
+	return &sessionTxnState{
+		record: txn.Record{
+			ID:         newTxnID(),
+			Status:     txn.StatusPending,
+			ReadTS:     now,
+			WriteTS:    now,
+			Priority:   1,
+			DeadlineTS: hlc.Timestamp{WallTime: now.WallTime + uint64(defaultTxnDeadline)},
+		},
+		writes: make(map[string]pendingTxnWrite),
+	}
+}
+
 func buildIntentSet(writes []pendingTxnWrite) (txn.IntentSet, error) {
 	var set txn.IntentSet
 	for _, write := range writes {
@@ -791,6 +890,7 @@ func buildObservedIntents(record txn.Record, writes []pendingTxnWrite) []txn.Obs
 				Epoch:          record.Epoch,
 				WriteTimestamp: record.WriteTS,
 				Strength:       storage.IntentStrengthExclusive,
+				Tombstone:      write.tombstone,
 				Value:          append([]byte(nil), write.value...),
 			},
 			Present: true,
@@ -801,9 +901,10 @@ func buildObservedIntents(record txn.Record, writes []pendingTxnWrite) []txn.Obs
 
 func clonePendingWrite(write pendingTxnWrite) pendingTxnWrite {
 	return pendingTxnWrite{
-		key:     append([]byte(nil), write.key...),
-		value:   append([]byte(nil), write.value...),
-		rangeID: write.rangeID,
+		key:       append([]byte(nil), write.key...),
+		value:     append([]byte(nil), write.value...),
+		tombstone: write.tombstone,
+		rangeID:   write.rangeID,
 	}
 }
 
