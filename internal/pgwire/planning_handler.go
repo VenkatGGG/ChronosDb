@@ -79,6 +79,10 @@ func describeResult(plan chronossql.Plan, flow chronossql.FlowPlan) (QueryResult
 		return QueryResult{
 			CommandTag: "INSERT 0 1",
 		}, nil
+	case chronossql.UpsertPlan:
+		return QueryResult{
+			CommandTag: "UPSERT 1",
+		}, nil
 	case chronossql.DeletePlan:
 		return QueryResult{
 			CommandTag: "DELETE 0",

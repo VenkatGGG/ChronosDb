@@ -108,6 +108,30 @@ func TestFlowPlannerBuildInsert(t *testing.T) {
 	}
 }
 
+func TestFlowPlannerBuildUpsert(t *testing.T) {
+	t.Parallel()
+
+	planner := testPlanner(t)
+	plan, err := planner.Plan("upsert into users (id, name, email) values (1, 'alice', 'a@example.com')")
+	if err != nil {
+		t.Fatalf("plan query: %v", err)
+	}
+
+	flow, err := NewFlowPlanner().Build(plan)
+	if err != nil {
+		t.Fatalf("build flow: %v", err)
+	}
+	if flow.RootStageID != 1 || flow.RootFragmentID != 1 || len(flow.Stages) != 1 {
+		t.Fatalf("unexpected upsert flow shape: %+v", flow)
+	}
+	if flow.Stages[0].Processors[0].Kind != OperatorKVUpsert {
+		t.Fatalf("upsert operator kind = %q, want %q", flow.Stages[0].Processors[0].Kind, OperatorKVUpsert)
+	}
+	if len(flow.ResultSchema) != 0 {
+		t.Fatalf("upsert result schema = %+v, want empty", flow.ResultSchema)
+	}
+}
+
 func TestFlowPlannerBuildDelete(t *testing.T) {
 	t.Parallel()
 

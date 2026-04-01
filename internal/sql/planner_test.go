@@ -75,6 +75,27 @@ func TestPlannerInsertMapsToKV(t *testing.T) {
 	}
 }
 
+func TestPlannerUpsertMapsToKV(t *testing.T) {
+	t.Parallel()
+
+	planner := testPlanner(t)
+	plan, err := planner.Plan("upsert into users (id, name, email) values (1, 'alice', 'a@example.com')")
+	if err != nil {
+		t.Fatalf("plan upsert: %v", err)
+	}
+	upsert, ok := plan.(UpsertPlan)
+	if !ok {
+		t.Fatalf("plan type = %T, want UpsertPlan", plan)
+	}
+	if !bytes.Equal(upsert.Key, storage.GlobalTablePrimaryKey(7, encodedIntKey(1))) {
+		t.Fatalf("upsert key = %q, want %q", upsert.Key, storage.GlobalTablePrimaryKey(7, encodedIntKey(1)))
+	}
+	payload := string(upsert.Value)
+	if !strings.Contains(payload, "\"name\"") || !strings.Contains(payload, "\"alice\"") {
+		t.Fatalf("unexpected upsert payload: %s", payload)
+	}
+}
+
 func TestPlannerPointDelete(t *testing.T) {
 	t.Parallel()
 
@@ -397,6 +418,25 @@ func TestPlannerOptimizePointUpdateUsesPointCandidate(t *testing.T) {
 	}
 	if _, ok := optimized.Selected.Plan.(UpdatePlan); !ok {
 		t.Fatalf("selected plan type = %T, want UpdatePlan", optimized.Selected.Plan)
+	}
+}
+
+func TestPlannerOptimizeUpsertUsesUpsertCandidate(t *testing.T) {
+	t.Parallel()
+
+	planner := testPlanner(t)
+	optimized, err := planner.Optimize("upsert into users (id, name, email) values (1, 'alice', 'a@example.com')")
+	if err != nil {
+		t.Fatalf("optimize upsert: %v", err)
+	}
+	if len(optimized.Candidates) != 1 {
+		t.Fatalf("candidate count = %d, want 1", len(optimized.Candidates))
+	}
+	if optimized.Selected.Name != "upsert_put" {
+		t.Fatalf("selected candidate = %q, want upsert_put", optimized.Selected.Name)
+	}
+	if _, ok := optimized.Selected.Plan.(UpsertPlan); !ok {
+		t.Fatalf("selected plan type = %T, want UpsertPlan", optimized.Selected.Plan)
 	}
 }
 

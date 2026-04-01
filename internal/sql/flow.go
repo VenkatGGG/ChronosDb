@@ -17,6 +17,7 @@ type OperatorKind string
 const (
 	OperatorKVScan     OperatorKind = "kv_scan"
 	OperatorKVInsert   OperatorKind = "kv_insert"
+	OperatorKVUpsert   OperatorKind = "kv_upsert"
 	OperatorKVDelete   OperatorKind = "kv_delete"
 	OperatorKVUpdate   OperatorKind = "kv_update"
 	OperatorMerge      OperatorKind = "merge"
@@ -122,6 +123,8 @@ func (p *FlowPlanner) Build(plan Plan) (FlowPlan, error) {
 		return p.buildRangeScan(typed), nil
 	case InsertPlan:
 		return p.buildInsert(typed), nil
+	case UpsertPlan:
+		return p.buildUpsert(typed), nil
 	case DeletePlan:
 		return p.buildDelete(typed), nil
 	case UpdatePlan:
@@ -222,6 +225,32 @@ func (p *FlowPlanner) buildInsert(plan InsertPlan) FlowPlan {
 			Processors: []ProcessorSpec{
 				{
 					Kind:  OperatorKVInsert,
+					Table: &plan.Table,
+					Spans: []KeySpan{
+						{
+							StartKey:       append([]byte(nil), plan.Key...),
+							EndKey:         append([]byte(nil), plan.Key...),
+							StartInclusive: true,
+							EndInclusive:   true,
+						},
+					},
+				},
+			},
+		},
+	}, nil)
+}
+
+func (p *FlowPlanner) buildUpsert(plan UpsertPlan) FlowPlan {
+	return assembleFlowPlan(1, []FlowStage{
+		{
+			ID:               1,
+			Name:             "upsert_put",
+			Distribution:     DistributionLeaseholderOnly,
+			PreferredRegions: leasePreferredRegions(plan.Table),
+			HomeRegion:       homeRegion(plan.Table),
+			Processors: []ProcessorSpec{
+				{
+					Kind:  OperatorKVUpsert,
 					Table: &plan.Table,
 					Spans: []KeySpan{
 						{

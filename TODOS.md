@@ -676,10 +676,18 @@ Design constraints:
     row counts, and cross-node reads of committed updated rows
   - `UPDATE RETURNING` stays deferred to `14.5` so all DML `RETURNING`
     semantics land through the shared projection/materialization path
-- [ ] 14.4 Add primary-key `UPSERT`
+- [x] 14.4 Add primary-key `UPSERT`
   as a first-class plan and executor path that atomically inserts-or-overwrites
   the primary row under transaction control without yet depending on secondary
   index conflict targets
+  - planner, optimizer, flow planning, and pgwire metadata now treat `UPSERT`
+    as a first-class statement type that maps `upsert into ... values ...` onto
+    one primary-key rewrite path
+  - the live executor now stages primary-key upserts through the transaction
+    machinery instead of bypassing intents, and plain `INSERT` now rejects
+    duplicate committed primary keys instead of silently overwriting them
+  - unit and end-to-end pgwire tests now cover upsert planning, duplicate-key
+    insert rejection, command tags, and cross-node reads of the overwritten row
 - [ ] 14.5 Add DML `RETURNING`
   across `INSERT`, `UPDATE`, `DELETE`, and primary-key `UPSERT`, including
   projection binding and result-row materialization through pgwire

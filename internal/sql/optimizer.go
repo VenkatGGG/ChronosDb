@@ -290,6 +290,14 @@ func makeInsertCandidate(o *Optimizer, table TableDescriptor, plan InsertPlan) P
 	}
 }
 
+func makeUpsertCandidate(o *Optimizer, table TableDescriptor, plan UpsertPlan) PlanCandidate {
+	return PlanCandidate{
+		Name: "upsert_put",
+		Plan: plan,
+		Cost: o.costInsert(table, len(plan.Value)),
+	}
+}
+
 func makeDeleteCandidate(o *Optimizer, table TableDescriptor, predicate boundPredicate, singleton bool, plan DeletePlan) PlanCandidate {
 	name := "range_delete"
 	if singleton {

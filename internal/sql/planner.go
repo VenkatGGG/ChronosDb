@@ -39,6 +39,7 @@ func (p *Planner) Plan(query string) (Plan, error) {
 
 // Optimize parses, binds, and cost-ranks one SQL statement.
 func (p *Planner) Optimize(query string) (OptimizedPlan, error) {
+	query, upsert := normalizeUpsertQuery(query)
 	stmt, err := p.parser.Parse(query)
 	if err != nil {
 		return OptimizedPlan{}, err
@@ -47,6 +48,9 @@ func (p *Planner) Optimize(query string) (OptimizedPlan, error) {
 	case *vsqlparser.Select:
 		return p.optimizeSelect(typed)
 	case *vsqlparser.Insert:
+		if upsert {
+			return p.optimizeUpsert(typed)
+		}
 		return p.optimizeInsert(typed)
 	case *vsqlparser.Delete:
 		return p.optimizeDelete(typed)
@@ -111,6 +115,14 @@ type InsertPlan struct {
 	Value []byte
 }
 
+// UpsertPlan maps one SQL upsert to one KV put that may overwrite an existing
+// primary-key row atomically under transaction control.
+type UpsertPlan struct {
+	Table TableDescriptor
+	Key   []byte
+	Value []byte
+}
+
 // DeletePlan maps one SQL delete onto one KV span of tombstone writes.
 type DeletePlan struct {
 	Table     TableDescriptor
@@ -165,6 +177,7 @@ type HashJoinPlan struct {
 func (PointLookupPlan) isPlan() {}
 func (RangeScanPlan) isPlan()   {}
 func (InsertPlan) isPlan()      {}
+func (UpsertPlan) isPlan()      {}
 func (DeletePlan) isPlan()      {}
 func (UpdatePlan) isPlan()      {}
 func (AggregatePlan) isPlan()   {}
@@ -307,6 +320,41 @@ func (p *Planner) optimizeInsert(stmt *vsqlparser.Insert) (OptimizedPlan, error)
 		Value: value,
 	}
 	return p.optimizer.Choose([]PlanCandidate{makeInsertCandidate(p.optimizer, table, plan)})
+}
+
+func (p *Planner) optimizeUpsert(stmt *vsqlparser.Insert) (OptimizedPlan, error) {
+	if stmt.Ignore || len(stmt.OnDup) > 0 || stmt.Rows == nil {
+		return OptimizedPlan{}, fmt.Errorf("sql planner: unsupported UPSERT shape")
+	}
+	tableName, err := stmt.Table.TableName()
+	if err != nil {
+		return OptimizedPlan{}, err
+	}
+	table, err := p.catalog.ResolveTable(tableName.Name.String())
+	if err != nil {
+		return OptimizedPlan{}, err
+	}
+	values, ok := stmt.Rows.(vsqlparser.Values)
+	if !ok {
+		return OptimizedPlan{}, fmt.Errorf("sql planner: only VALUES upserts are supported")
+	}
+	if len(values) != 1 {
+		return OptimizedPlan{}, fmt.Errorf("sql planner: only single-row upserts are supported")
+	}
+	row, err := bindInsertRow(table, stmt.Columns, values[0])
+	if err != nil {
+		return OptimizedPlan{}, err
+	}
+	key, value, err := encodeInsert(table, row)
+	if err != nil {
+		return OptimizedPlan{}, err
+	}
+	plan := UpsertPlan{
+		Table: table,
+		Key:   key,
+		Value: value,
+	}
+	return p.optimizer.Choose([]PlanCandidate{makeUpsertCandidate(p.optimizer, table, plan)})
 }
 
 func (p *Planner) optimizeDelete(stmt *vsqlparser.Delete) (OptimizedPlan, error) {
@@ -1069,4 +1117,13 @@ func encodeRowValue(table TableDescriptor, row map[string]Value) ([]byte, error)
 		payload = append(payload, item)
 	}
 	return json.Marshal(payload)
+}
+
+func normalizeUpsertQuery(query string) (string, bool) {
+	trimmed := strings.TrimLeft(query, " \t\r\n")
+	if !strings.HasPrefix(strings.ToLower(trimmed), "upsert ") {
+		return query, false
+	}
+	leading := len(query) - len(trimmed)
+	return query[:leading] + "insert" + trimmed[len("upsert"):], true
 }

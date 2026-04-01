@@ -86,6 +86,8 @@ func (h *runtimeQueryHandler) HandleSimpleQuery(ctx context.Context, session *pg
 		result, execErr = h.executeRangeScan(ctx, session, result, plan)
 	case chronossql.InsertPlan:
 		result, execErr = h.executeInsert(ctx, session, result, plan)
+	case chronossql.UpsertPlan:
+		result, execErr = h.executeUpsert(ctx, session, result, plan)
 	case chronossql.DeletePlan:
 		result, execErr = h.executeDelete(ctx, session, result, plan)
 	case chronossql.UpdatePlan:
@@ -277,24 +279,11 @@ func (h *runtimeQueryHandler) executeRangeScan(ctx context.Context, session *pgw
 }
 
 func (h *runtimeQueryHandler) executeInsert(ctx context.Context, session *pgwire.Session, result pgwire.QueryResult, plan chronossql.InsertPlan) (pgwire.QueryResult, error) {
-	if session == nil || session.TxStatus() != pgwire.TxInTransaction {
-		if err := h.kv.OnePhasePut(ctx, plan.Key, plan.Value); err != nil {
-			return pgwire.QueryResult{}, err
-		}
-		return result, nil
-	}
-	state, ok := h.lookupSessionState(session)
-	if !ok {
-		return pgwire.QueryResult{}, pgwire.Error{
-			Severity: "ERROR",
-			Code:     "08006",
-			Message:  "transaction state is not available",
-		}
-	}
-	if err := h.stageWrite(ctx, state, plan.Key, plan.Value, false); err != nil {
-		return pgwire.QueryResult{}, err
-	}
-	return result, nil
+	return h.executeInsertLike(ctx, session, result, plan.Table, plan.Key, plan.Value, false)
+}
+
+func (h *runtimeQueryHandler) executeUpsert(ctx context.Context, session *pgwire.Session, result pgwire.QueryResult, plan chronossql.UpsertPlan) (pgwire.QueryResult, error) {
+	return h.executeInsertLike(ctx, session, result, plan.Table, plan.Key, plan.Value, true)
 }
 
 func (h *runtimeQueryHandler) executeDelete(ctx context.Context, session *pgwire.Session, result pgwire.QueryResult, plan chronossql.DeletePlan) (pgwire.QueryResult, error) {
@@ -387,6 +376,41 @@ func (h *runtimeQueryHandler) executeUpdate(ctx context.Context, session *pgwire
 		}
 	}
 	result.CommandTag = fmt.Sprintf("UPDATE %d", len(targets))
+	return result, nil
+}
+
+func (h *runtimeQueryHandler) executeInsertLike(ctx context.Context, session *pgwire.Session, result pgwire.QueryResult, table chronossql.TableDescriptor, key, value []byte, allowOverwrite bool) (pgwire.QueryResult, error) {
+	if !allowOverwrite {
+		allowed, err := h.insertAllowed(ctx, session, table, key)
+		if err != nil {
+			return pgwire.QueryResult{}, err
+		}
+		if !allowed {
+			return pgwire.QueryResult{}, duplicateKeyError(table)
+		}
+	}
+	if session == nil || session.TxStatus() != pgwire.TxInTransaction {
+		state := newTxnState(txnNow())
+		if err := h.stageWrite(ctx, state, key, value, false); err != nil {
+			_ = h.abortTxnState(ctx, state)
+			return pgwire.QueryResult{}, err
+		}
+		if err := h.commitTxnState(ctx, state); err != nil {
+			return pgwire.QueryResult{}, err
+		}
+		return result, nil
+	}
+	state, ok := h.lookupSessionState(session)
+	if !ok {
+		return pgwire.QueryResult{}, pgwire.Error{
+			Severity: "ERROR",
+			Code:     "08006",
+			Message:  "transaction state is not available",
+		}
+	}
+	if err := h.stageWrite(ctx, state, key, value, false); err != nil {
+		return pgwire.QueryResult{}, err
+	}
 	return result, nil
 }
 
@@ -982,6 +1006,25 @@ func cloneSQLValue(value chronossql.Value) chronossql.Value {
 		cloned.Bytes = append([]byte(nil), value.Bytes...)
 	}
 	return cloned
+}
+
+func (h *runtimeQueryHandler) insertAllowed(ctx context.Context, session *pgwire.Session, table chronossql.TableDescriptor, key []byte) (bool, error) {
+	if pending, ok := h.pendingWriteForKey(session, key); ok {
+		return pending.tombstone, nil
+	}
+	_, found, err := h.kv.GetLatest(ctx, key)
+	if err != nil {
+		return false, err
+	}
+	return !found, nil
+}
+
+func duplicateKeyError(table chronossql.TableDescriptor) error {
+	return pgwire.Error{
+		Severity: "ERROR",
+		Code:     "23505",
+		Message:  fmt.Sprintf("duplicate key value violates unique constraint %q", strings.ToLower(strings.TrimSpace(table.Name))+"_pkey"),
+	}
 }
 
 func (s *sessionTxnState) snapshot() (txn.Record, []pendingTxnWrite) {
