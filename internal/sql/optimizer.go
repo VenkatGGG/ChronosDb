@@ -85,6 +85,19 @@ func (o *Optimizer) costRangeScan(table TableDescriptor, projection []ColumnDesc
 	}
 }
 
+func (o *Optimizer) costFilteredScan(table TableDescriptor, projection []ColumnDescriptor, predicate boundPredicate, singleton bool, filters []FilterPredicate, orderBy []OrderBySpec, limit *uint64) CostEstimate {
+	cost := o.costRangeScan(table, projection, predicate, singleton)
+	cost.CPUCost += float64(len(filters))
+	if len(orderBy) > 0 {
+		cost.CPUCost += math.Log2(float64(cost.EstimatedRows)+1) + float64(len(orderBy))
+	}
+	if limit != nil && *limit < cost.EstimatedRows {
+		cost.EstimatedRows = *limit
+	}
+	cost.Score += cost.CPUCost / 2.0
+	return cost
+}
+
 func (o *Optimizer) costInsert(table TableDescriptor, valueSize int) CostEstimate {
 	stats := table.StatsOrDefaults()
 	bytes := uint64(valueSize)
@@ -319,6 +332,14 @@ func makeUpdateCandidate(o *Optimizer, table TableDescriptor, predicate boundPre
 		Name: name,
 		Plan: plan,
 		Cost: o.costUpdate(table, predicate, singleton),
+	}
+}
+
+func makeFilteredSelectCandidate(o *Optimizer, table TableDescriptor, predicate boundPredicate, singleton bool, plan RangeScanPlan) PlanCandidate {
+	return PlanCandidate{
+		Name: "filtered_range_scan",
+		Plan: plan,
+		Cost: o.costFilteredScan(table, plan.Projection, predicate, singleton, plan.Filters, plan.OrderBy, plan.Limit),
 	}
 }
 

@@ -18,6 +18,22 @@ func TestPlannerPrepareInfersParameterTypes(t *testing.T) {
 	}
 }
 
+func TestPlannerPrepareInfersSelectFilterAndLimitParameters(t *testing.T) {
+	t.Parallel()
+
+	planner := testPlanner(t)
+	prepared, err := planner.Prepare("select id, name from users where name >= $1 order by name desc limit $2")
+	if err != nil {
+		t.Fatalf("prepare select query: %v", err)
+	}
+	if len(prepared.ParameterTypes) != 2 {
+		t.Fatalf("parameter count = %d, want 2", len(prepared.ParameterTypes))
+	}
+	if prepared.ParameterTypes[0] != ColumnTypeString || prepared.ParameterTypes[1] != ColumnTypeInt {
+		t.Fatalf("parameter types = %#v, want [STRING INT]", prepared.ParameterTypes)
+	}
+}
+
 func TestRenderPreparedQueryReplacesRepeatedParameters(t *testing.T) {
 	t.Parallel()
 

@@ -249,6 +249,134 @@ func TestProcessNodeExecutesRangeScanAcrossLeaseholders(t *testing.T) {
 	}
 }
 
+func TestProcessNodeExecutesFilteredOrderedLimitedSelectAcrossLeaseholders(t *testing.T) {
+	t.Parallel()
+
+	rootDir := t.TempDir()
+	bootstrapPath := filepath.Join(rootDir, "bootstrap.json")
+	splitKey := usersPrimaryKey(50)
+	rangeOne := meta.RangeDescriptor{
+		RangeID:    53,
+		Generation: 1,
+		StartKey:   storage.GlobalTablePrimaryPrefix(7),
+		EndKey:     splitKey,
+		Replicas: []meta.ReplicaDescriptor{
+			{ReplicaID: 27, NodeID: 1, Role: meta.ReplicaRoleVoter},
+			{ReplicaID: 28, NodeID: 2, Role: meta.ReplicaRoleVoter},
+			{ReplicaID: 29, NodeID: 3, Role: meta.ReplicaRoleVoter},
+		},
+		LeaseholderReplicaID: 27,
+	}
+	rangeTwo := meta.RangeDescriptor{
+		RangeID:    54,
+		Generation: 1,
+		StartKey:   splitKey,
+		EndKey:     storage.GlobalTablePrimaryPrefix(8),
+		Replicas: []meta.ReplicaDescriptor{
+			{ReplicaID: 30, NodeID: 1, Role: meta.ReplicaRoleVoter},
+			{ReplicaID: 31, NodeID: 2, Role: meta.ReplicaRoleVoter},
+			{ReplicaID: 32, NodeID: 3, Role: meta.ReplicaRoleVoter},
+		},
+		LeaseholderReplicaID: 32,
+	}
+	manifest, err := chronosruntime.BuildBootstrapManifest("cluster-filtered-select", []chronosruntime.BootstrapNode{
+		{NodeID: 1, StoreID: 27},
+		{NodeID: 2, StoreID: 28},
+		{NodeID: 3, StoreID: 29},
+	}, []meta.RangeDescriptor{rangeOne, rangeTwo})
+	if err != nil {
+		t.Fatalf("build bootstrap manifest: %v", err)
+	}
+	if err := chronosruntime.WriteBootstrapManifest(bootstrapPath, manifest); err != nil {
+		t.Fatalf("write bootstrap manifest: %v", err)
+	}
+
+	node1, cancel1, done1 := startProcessNodeForTest(t, ProcessNodeConfig{
+		NodeID:            1,
+		DataDir:           filepath.Join(rootDir, "node-1"),
+		BootstrapPath:     bootstrapPath,
+		PGListenAddr:      "127.0.0.1:0",
+		ObservabilityAddr: "127.0.0.1:0",
+		ControlAddr:       "127.0.0.1:0",
+	})
+	t.Cleanup(func() {
+		cancel1()
+		waitProcessNodeDone(t, done1, "filtered-select-node1")
+	})
+	node2, cancel2, done2 := startProcessNodeForTest(t, ProcessNodeConfig{
+		NodeID:            2,
+		DataDir:           filepath.Join(rootDir, "node-2"),
+		BootstrapPath:     bootstrapPath,
+		PGListenAddr:      "127.0.0.1:0",
+		ObservabilityAddr: "127.0.0.1:0",
+		ControlAddr:       "127.0.0.1:0",
+	})
+	t.Cleanup(func() {
+		cancel2()
+		waitProcessNodeDone(t, done2, "filtered-select-node2")
+	})
+	node3, cancel3, done3 := startProcessNodeForTest(t, ProcessNodeConfig{
+		NodeID:            3,
+		DataDir:           filepath.Join(rootDir, "node-3"),
+		BootstrapPath:     bootstrapPath,
+		PGListenAddr:      "127.0.0.1:0",
+		ObservabilityAddr: "127.0.0.1:0",
+		ControlAddr:       "127.0.0.1:0",
+	})
+	t.Cleanup(func() {
+		cancel3()
+		waitProcessNodeDone(t, done3, "filtered-select-node3")
+	})
+
+	if err := node1.host.Campaign(context.Background(), rangeOne.RangeID); err != nil {
+		t.Fatalf("campaign first filtered range leaseholder: %v", err)
+	}
+	if err := node3.host.Campaign(context.Background(), rangeTwo.RangeID); err != nil {
+		t.Fatalf("campaign second filtered range leaseholder: %v", err)
+	}
+	waitForRangeLeader(t, node1.host, rangeOne.RangeID, 27)
+	waitForRangeLeader(t, node3.host, rangeTwo.RangeID, 32)
+
+	conn := openPGConn(t, node2.state.PGAddr)
+	defer conn.Close()
+	for _, query := range []string{
+		"insert into users (id, name, email) values (7, 'alice', 'a@example.com')",
+		"insert into users (id, name, email) values (70, 'bob', 'b@example.com')",
+		"insert into users (id, name, email) values (90, 'carol', 'c@example.com')",
+	} {
+		if _, err := conn.Write(queryFrame(query)); err != nil {
+			t.Fatalf("write insert %q: %v", query, err)
+		}
+		if got := frameTags(readFrames(t, conn, 2)); got != "CZ" {
+			t.Fatalf("insert frame tags for %q = %q, want CZ", query, got)
+		}
+	}
+
+	selectConn := openPGConn(t, node2.state.PGAddr)
+	defer selectConn.Close()
+	if _, err := selectConn.Write(queryFrame("select id, name from users where name >= 'bob' order by name desc limit 2")); err != nil {
+		t.Fatalf("write filtered select: %v", err)
+	}
+	frames := readFramesUntilReady(t, selectConn)
+	if got := frameTags(frames); got != "TDDCZ" {
+		t.Fatalf("filtered select frame tags = %q, want TDDCZ", got)
+	}
+	firstRow, err := decodeDataRowFrame(frames[1])
+	if err != nil {
+		t.Fatalf("decode first filtered row: %v", err)
+	}
+	secondRow, err := decodeDataRowFrame(frames[2])
+	if err != nil {
+		t.Fatalf("decode second filtered row: %v", err)
+	}
+	if len(firstRow) != 2 || string(firstRow[0]) != "90" || string(firstRow[1]) != "carol" {
+		t.Fatalf("first filtered row = %q/%q, want 90/carol", firstRow[0], firstRow[1])
+	}
+	if len(secondRow) != 2 || string(secondRow[0]) != "70" || string(secondRow[1]) != "bob" {
+		t.Fatalf("second filtered row = %q/%q, want 70/bob", secondRow[0], secondRow[1])
+	}
+}
+
 func TestProcessNodeExecutesPointDeleteAcrossNodes(t *testing.T) {
 	rootDir := t.TempDir()
 	bootstrapPath := filepath.Join(rootDir, "bootstrap.json")

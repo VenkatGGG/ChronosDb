@@ -54,6 +54,35 @@ func TestPlannerRangeScanSelect(t *testing.T) {
 	}
 }
 
+func TestPlannerBroadSelectSupportsFilterOrderByAndLimit(t *testing.T) {
+	t.Parallel()
+
+	planner := testPlanner(t)
+	plan, err := planner.Plan("select id, name from users where name >= 'bob' order by name desc limit 2")
+	if err != nil {
+		t.Fatalf("plan broad select: %v", err)
+	}
+	scan, ok := plan.(RangeScanPlan)
+	if !ok {
+		t.Fatalf("plan type = %T, want RangeScanPlan", plan)
+	}
+	if len(scan.Filters) != 1 || scan.Filters[0].Column.Name != "name" || scan.Filters[0].Operator != ComparisonGreaterEqual {
+		t.Fatalf("filters = %#v, want name >= ...", scan.Filters)
+	}
+	if len(scan.OrderBy) != 1 || scan.OrderBy[0].Column.Name != "name" || !scan.OrderBy[0].Descending {
+		t.Fatalf("order by = %#v, want name desc", scan.OrderBy)
+	}
+	if scan.Limit == nil || *scan.Limit != 2 {
+		t.Fatalf("limit = %#v, want 2", scan.Limit)
+	}
+	if !bytes.Equal(scan.StartKey, storage.GlobalTablePrimaryPrefix(7)) {
+		t.Fatalf("unexpected broad-scan start key: %q", scan.StartKey)
+	}
+	if !bytes.Equal(scan.EndKey, storage.PrefixEnd(storage.GlobalTablePrimaryPrefix(7))) {
+		t.Fatalf("unexpected broad-scan end key: %q", scan.EndKey)
+	}
+}
+
 func TestPlannerInsertMapsToKV(t *testing.T) {
 	t.Parallel()
 
@@ -329,12 +358,16 @@ func TestPlannerHashJoinSelect(t *testing.T) {
 	}
 }
 
-func TestPlannerRejectsNonPrimaryKeyPredicate(t *testing.T) {
+func TestPlannerRejectsNonPrimaryKeyPredicateForMutableStatements(t *testing.T) {
 	t.Parallel()
 
 	planner := testPlanner(t)
-	if _, err := planner.Plan("select id from users where name = 'alice'"); err == nil {
-		t.Fatalf("expected planner error for non-primary-key predicate")
+	plan, err := planner.Plan("select id from users where name = 'alice'")
+	if err != nil {
+		t.Fatalf("select with non-primary-key predicate should plan: %v", err)
+	}
+	if _, ok := plan.(RangeScanPlan); !ok {
+		t.Fatalf("select plan type = %T, want RangeScanPlan", plan)
 	}
 	if _, err := planner.Plan("delete from users where name = 'alice'"); err == nil {
 		t.Fatalf("expected planner error for non-primary-key delete predicate")

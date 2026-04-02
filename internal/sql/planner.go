@@ -109,6 +109,33 @@ type RangeScanPlan struct {
 	EndKey         []byte
 	StartInclusive bool
 	EndInclusive   bool
+	Filters        []FilterPredicate
+	OrderBy        []OrderBySpec
+	Limit          *uint64
+}
+
+// ComparisonOperator identifies one supported comparison operator in a filter.
+type ComparisonOperator string
+
+const (
+	ComparisonEqual        ComparisonOperator = "="
+	ComparisonGreaterThan  ComparisonOperator = ">"
+	ComparisonGreaterEqual ComparisonOperator = ">="
+	ComparisonLessThan     ComparisonOperator = "<"
+	ComparisonLessEqual    ComparisonOperator = "<="
+)
+
+// FilterPredicate is one typed row-level filter evaluated after the KV scan.
+type FilterPredicate struct {
+	Column   ColumnDescriptor
+	Operator ComparisonOperator
+	Value    Value
+}
+
+// OrderBySpec captures one row-ordering requirement on the result set.
+type OrderBySpec struct {
+	Column     ColumnDescriptor
+	Descending bool
 }
 
 // InsertPlan maps one SQL insert to one KV put.
@@ -216,13 +243,19 @@ type queryFeatures struct {
 }
 
 func (p *Planner) optimizeSelect(stmt *vsqlparser.Select) (OptimizedPlan, error) {
-	if stmt.Distinct || stmt.Having != nil || stmt.Limit != nil || len(stmt.OrderBy) > 0 {
+	if stmt.Distinct || stmt.Having != nil {
 		return OptimizedPlan{}, fmt.Errorf("sql planner: unsupported SELECT shape")
 	}
 	if isJoinSelect(stmt.From) {
+		if stmt.Limit != nil || len(stmt.OrderBy) > 0 {
+			return OptimizedPlan{}, fmt.Errorf("sql planner: ORDER BY and LIMIT on joins are unsupported")
+		}
 		return p.optimizeJoinSelect(stmt)
 	}
 	if stmt.GroupBy != nil || hasAggregateExprs(stmt.SelectExprs) {
+		if stmt.Limit != nil || len(stmt.OrderBy) > 0 {
+			return OptimizedPlan{}, fmt.Errorf("sql planner: ORDER BY and LIMIT on aggregates are unsupported")
+		}
 		return p.optimizeAggregateSelect(stmt)
 	}
 	table, err := p.resolveSingleTable(stmt.From)
@@ -233,15 +266,36 @@ func (p *Planner) optimizeSelect(stmt *vsqlparser.Select) (OptimizedPlan, error)
 	if err != nil {
 		return OptimizedPlan{}, err
 	}
-	predicate, err := bindPrimaryKeyPredicate(table, stmt.Where)
+	if stmt.Limit == nil && len(stmt.OrderBy) == 0 {
+		predicate, predicateErr := bindPrimaryKeyPredicate(table, stmt.Where)
+		if predicateErr == nil {
+			candidates, err := makeSelectCandidates(p.optimizer, table, projection, predicate)
+			if err != nil {
+				return OptimizedPlan{}, err
+			}
+			return p.optimizer.Choose(candidates)
+		}
+	}
+	scanPredicate, filters, err := bindSelectFilters(table, stmt.Where)
 	if err != nil {
 		return OptimizedPlan{}, err
 	}
-	candidates, err := makeSelectCandidates(p.optimizer, table, projection, predicate)
+	orderBy, err := bindOrderBy(table, stmt.OrderBy)
 	if err != nil {
 		return OptimizedPlan{}, err
 	}
-	return p.optimizer.Choose(candidates)
+	limit, err := bindLimit(stmt.Limit)
+	if err != nil {
+		return OptimizedPlan{}, err
+	}
+	scanPlan, singleton, err := buildRangeScanPlan(table, projection, scanPredicate)
+	if err != nil {
+		return OptimizedPlan{}, err
+	}
+	scanPlan.Filters = filters
+	scanPlan.OrderBy = orderBy
+	scanPlan.Limit = limit
+	return p.optimizer.Choose([]PlanCandidate{makeFilteredSelectCandidate(p.optimizer, table, scanPredicate, singleton, scanPlan)})
 }
 
 func (p *Planner) optimizeJoinSelect(stmt *vsqlparser.Select) (OptimizedPlan, error) {
@@ -929,6 +983,97 @@ func bindPrimaryKeyPredicate(table TableDescriptor, where *vsqlparser.Where) (bo
 	return predicate, nil
 }
 
+func bindSelectFilters(table TableDescriptor, where *vsqlparser.Where) (boundPredicate, []FilterPredicate, error) {
+	if where == nil || where.Expr == nil {
+		return boundPredicate{}, nil, nil
+	}
+	pk, err := table.PrimaryKeyColumn()
+	if err != nil {
+		return boundPredicate{}, nil, err
+	}
+	comparisons, err := flattenComparisons(where.Expr)
+	if err != nil {
+		return boundPredicate{}, nil, err
+	}
+	predicate := boundPredicate{}
+	filters := make([]FilterPredicate, 0, len(comparisons))
+	for _, cmp := range comparisons {
+		column, operator, value, err := normalizeColumnComparison(table, cmp)
+		if err != nil {
+			return boundPredicate{}, nil, err
+		}
+		filters = append(filters, FilterPredicate{
+			Column:   column,
+			Operator: operator,
+			Value:    value,
+		})
+		if canonicalName(column.Name) != canonicalName(pk.Name) {
+			continue
+		}
+		switch operator {
+		case ComparisonEqual:
+			copyValue := value
+			predicate.equality = &copyValue
+		case ComparisonGreaterThan:
+			bound := predicateBound{value: value, inclusive: false}
+			predicate.lower = &bound
+		case ComparisonGreaterEqual:
+			bound := predicateBound{value: value, inclusive: true}
+			predicate.lower = &bound
+		case ComparisonLessThan:
+			bound := predicateBound{value: value, inclusive: false}
+			predicate.upper = &bound
+		case ComparisonLessEqual:
+			bound := predicateBound{value: value, inclusive: true}
+			predicate.upper = &bound
+		}
+	}
+	return predicate, filters, nil
+}
+
+func bindOrderBy(table TableDescriptor, orderBy vsqlparser.OrderBy) ([]OrderBySpec, error) {
+	if len(orderBy) == 0 {
+		return nil, nil
+	}
+	out := make([]OrderBySpec, 0, len(orderBy))
+	for _, item := range orderBy {
+		columnExpr, ok := item.Expr.(*vsqlparser.ColName)
+		if !ok {
+			return nil, fmt.Errorf("sql planner: ORDER BY expressions must be columns")
+		}
+		column, ok := table.ColumnByName(columnExpr.Name.String())
+		if !ok {
+			return nil, fmt.Errorf("sql planner: unknown ORDER BY column %q", columnExpr.Name.String())
+		}
+		out = append(out, OrderBySpec{
+			Column:     column,
+			Descending: item.Direction == vsqlparser.DescOrder,
+		})
+	}
+	return out, nil
+}
+
+func bindLimit(limit *vsqlparser.Limit) (*uint64, error) {
+	if limit == nil {
+		return nil, nil
+	}
+	if limit.Offset != nil {
+		return nil, fmt.Errorf("sql planner: LIMIT with OFFSET is unsupported")
+	}
+	literal, ok := limit.Rowcount.(*vsqlparser.Literal)
+	if !ok {
+		return nil, fmt.Errorf("sql planner: LIMIT must be a literal")
+	}
+	if literal.Type != vsqlparser.IntVal {
+		return nil, fmt.Errorf("sql planner: LIMIT must be an INT literal")
+	}
+	value, err := strconv.ParseUint(literal.Val, 10, 64)
+	if err != nil {
+		return nil, err
+	}
+	return &value, nil
+}
+
 func flattenComparisons(expr vsqlparser.Expr) ([]*vsqlparser.ComparisonExpr, error) {
 	switch typed := expr.(type) {
 	case *vsqlparser.AndExpr:
@@ -945,6 +1090,69 @@ func flattenComparisons(expr vsqlparser.Expr) ([]*vsqlparser.ComparisonExpr, err
 		return []*vsqlparser.ComparisonExpr{typed}, nil
 	default:
 		return nil, fmt.Errorf("sql planner: unsupported WHERE expression %T", expr)
+	}
+}
+
+func normalizeColumnComparison(table TableDescriptor, cmp *vsqlparser.ComparisonExpr) (ColumnDescriptor, ComparisonOperator, Value, error) {
+	leftCol, leftIsCol := cmp.Left.(*vsqlparser.ColName)
+	rightCol, rightIsCol := cmp.Right.(*vsqlparser.ColName)
+	leftLiteral, leftIsLiteral := cmp.Left.(*vsqlparser.Literal)
+	rightLiteral, rightIsLiteral := cmp.Right.(*vsqlparser.Literal)
+
+	switch {
+	case leftIsCol && rightIsLiteral:
+		column, ok := table.ColumnByName(leftCol.Name.String())
+		if !ok {
+			return ColumnDescriptor{}, "", Value{}, fmt.Errorf("sql planner: unknown WHERE column %q", leftCol.Name.String())
+		}
+		value, err := bindLiteral(column.Type, rightLiteral)
+		if err != nil {
+			return ColumnDescriptor{}, "", Value{}, err
+		}
+		operator, err := normalizeComparisonOperator(cmp.Operator)
+		if err != nil {
+			return ColumnDescriptor{}, "", Value{}, err
+		}
+		return column, operator, value, nil
+	case rightIsCol && leftIsLiteral:
+		column, ok := table.ColumnByName(rightCol.Name.String())
+		if !ok {
+			return ColumnDescriptor{}, "", Value{}, fmt.Errorf("sql planner: unknown WHERE column %q", rightCol.Name.String())
+		}
+		operator, ok := cmp.Operator.SwitchSides()
+		if !ok {
+			return ColumnDescriptor{}, "", Value{}, fmt.Errorf("sql planner: unsupported comparison operator %s", cmp.Operator.ToString())
+		}
+		normalized, err := normalizeComparisonOperator(operator)
+		if err != nil {
+			return ColumnDescriptor{}, "", Value{}, err
+		}
+		value, err := bindLiteral(column.Type, leftLiteral)
+		if err != nil {
+			return ColumnDescriptor{}, "", Value{}, err
+		}
+		return column, normalized, value, nil
+	case leftIsCol && rightIsCol:
+		return ColumnDescriptor{}, "", Value{}, fmt.Errorf("sql planner: WHERE comparisons between two columns are unsupported")
+	default:
+		return ColumnDescriptor{}, "", Value{}, fmt.Errorf("sql planner: WHERE predicates must compare a column against a literal")
+	}
+}
+
+func normalizeComparisonOperator(operator vsqlparser.ComparisonExprOperator) (ComparisonOperator, error) {
+	switch operator {
+	case vsqlparser.EqualOp:
+		return ComparisonEqual, nil
+	case vsqlparser.GreaterThanOp:
+		return ComparisonGreaterThan, nil
+	case vsqlparser.GreaterEqualOp:
+		return ComparisonGreaterEqual, nil
+	case vsqlparser.LessThanOp:
+		return ComparisonLessThan, nil
+	case vsqlparser.LessEqualOp:
+		return ComparisonLessEqual, nil
+	default:
+		return "", fmt.Errorf("sql planner: unsupported comparison operator %s", operator.ToString())
 	}
 }
 

@@ -168,7 +168,7 @@ func TestPlanningHandlerMapsPlannerErrors(t *testing.T) {
 	t.Parallel()
 
 	handler := newPlanningHandler(t)
-	_, err := handler.HandleSimpleQuery(context.Background(), NewSession(handler), "select id from users where name = 'alice'")
+	_, err := handler.HandleSimpleQuery(context.Background(), NewSession(handler), "select distinct id from users")
 	if err == nil {
 		t.Fatalf("expected planner error")
 	}

@@ -207,6 +207,14 @@ func TestClientExtendedQueryAgainstProcessNode(t *testing.T) {
 	if len(selectResult.Rows) != 1 || len(selectResult.Rows[0]) != 2 || selectResult.Rows[0][0] != "9" || selectResult.Rows[0][1] != "robert" {
 		t.Fatalf("select rows = %#v, want [[9 robert]]", selectResult.Rows)
 	}
+
+	filteredResult, err := client.ExtendedQuery(queryCtx, "select id, name from users where name >= $1 order by name desc limit $2", "r", int64(1))
+	if err != nil {
+		t.Fatalf("extended filtered select: %v", err)
+	}
+	if len(filteredResult.Rows) != 1 || len(filteredResult.Rows[0]) != 2 || filteredResult.Rows[0][0] != "9" || filteredResult.Rows[0][1] != "robert" {
+		t.Fatalf("filtered rows = %#v, want [[9 robert]]", filteredResult.Rows)
+	}
 }
 
 func waitForNodeState(t *testing.T, node *systemtest.ProcessNode) systemtest.ProcessNodeState {

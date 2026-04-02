@@ -148,13 +148,19 @@ func RenderPreparedQuery(query string, values []Value) (string, error) {
 
 func (p *Planner) inferSelectParameters(stmt *vsqlparser.Select, paramTypes []ColumnType) error {
 	if isJoinSelect(stmt.From) {
+		if len(paramTypes) > 0 {
+			return fmt.Errorf("sql planner: prepared parameters on joins are unsupported")
+		}
 		return nil
 	}
 	table, err := p.resolveSingleTable(stmt.From)
 	if err != nil {
 		return err
 	}
-	return inferPrimaryKeyPredicateParameters(table, stmt.Where, paramTypes)
+	if err := inferPredicateParameters(table, stmt.Where, paramTypes); err != nil {
+		return err
+	}
+	return inferLimitParameters(stmt.Limit, paramTypes)
 }
 
 func (p *Planner) inferInsertParameters(stmt *vsqlparser.Insert, paramTypes []ColumnType) error {
@@ -199,7 +205,7 @@ func (p *Planner) inferDeleteParameters(stmt *vsqlparser.Delete, paramTypes []Co
 	if err != nil {
 		return err
 	}
-	return inferPrimaryKeyPredicateParameters(table, stmt.Where, paramTypes)
+	return inferPredicateParameters(table, stmt.Where, paramTypes)
 }
 
 func (p *Planner) inferUpdateParameters(stmt *vsqlparser.Update, paramTypes []ColumnType) error {
@@ -225,45 +231,56 @@ func (p *Planner) inferUpdateParameters(stmt *vsqlparser.Update, paramTypes []Co
 			return fmt.Errorf("sql planner: only literal or parameter UPDATE values are supported")
 		}
 	}
-	return inferPrimaryKeyPredicateParameters(table, stmt.Where, paramTypes)
+	return inferPredicateParameters(table, stmt.Where, paramTypes)
 }
 
-func inferPrimaryKeyPredicateParameters(table TableDescriptor, where *vsqlparser.Where, paramTypes []ColumnType) error {
+func inferPredicateParameters(table TableDescriptor, where *vsqlparser.Where, paramTypes []ColumnType) error {
 	if where == nil || where.Expr == nil {
 		return nil
-	}
-	pk, err := table.PrimaryKeyColumn()
-	if err != nil {
-		return err
 	}
 	comparisons, err := flattenComparisons(where.Expr)
 	if err != nil {
 		return err
 	}
 	for _, cmp := range comparisons {
-		leftCol, leftIsCol := cmp.Left.(*vsqlparser.ColName)
-		rightCol, rightIsCol := cmp.Right.(*vsqlparser.ColName)
-		leftArg, leftIsArg := cmp.Left.(*vsqlparser.Argument)
-		rightArg, rightIsArg := cmp.Right.(*vsqlparser.Argument)
-		switch {
-		case leftIsCol && rightIsArg:
-			if canonicalName(leftCol.Name.String()) != canonicalName(pk.Name) {
-				return fmt.Errorf("sql planner: WHERE predicates must target primary key %q", pk.Name)
-			}
-			if err := assignArgumentType(paramTypes, rightArg, pk.Type); err != nil {
-				return err
-			}
-		case rightIsCol && leftIsArg:
-			if canonicalName(rightCol.Name.String()) != canonicalName(pk.Name) {
-				return fmt.Errorf("sql planner: WHERE predicates must target primary key %q", pk.Name)
-			}
-			if err := assignArgumentType(paramTypes, leftArg, pk.Type); err != nil {
-				return err
-			}
-		case leftIsCol || rightIsCol:
-			// Literal comparisons are already handled by the normal binder.
-			continue
+		if err := inferComparisonParameters(table, cmp, paramTypes); err != nil {
+			return err
 		}
+	}
+	return nil
+}
+
+func inferComparisonParameters(table TableDescriptor, cmp *vsqlparser.ComparisonExpr, paramTypes []ColumnType) error {
+	leftCol, leftIsCol := cmp.Left.(*vsqlparser.ColName)
+	rightCol, rightIsCol := cmp.Right.(*vsqlparser.ColName)
+	leftArg, leftIsArg := cmp.Left.(*vsqlparser.Argument)
+	rightArg, rightIsArg := cmp.Right.(*vsqlparser.Argument)
+	switch {
+	case leftIsCol && rightIsArg:
+		column, ok := table.ColumnByName(leftCol.Name.String())
+		if !ok {
+			return fmt.Errorf("sql planner: unknown WHERE column %q", leftCol.Name.String())
+		}
+		return assignArgumentType(paramTypes, rightArg, column.Type)
+	case rightIsCol && leftIsArg:
+		column, ok := table.ColumnByName(rightCol.Name.String())
+		if !ok {
+			return fmt.Errorf("sql planner: unknown WHERE column %q", rightCol.Name.String())
+		}
+		return assignArgumentType(paramTypes, leftArg, column.Type)
+	case leftIsCol || rightIsCol:
+		return nil
+	default:
+		return fmt.Errorf("sql planner: WHERE predicates must compare a column against a literal or parameter")
+	}
+}
+
+func inferLimitParameters(limit *vsqlparser.Limit, paramTypes []ColumnType) error {
+	if limit == nil {
+		return nil
+	}
+	if arg, ok := limit.Rowcount.(*vsqlparser.Argument); ok {
+		return assignArgumentType(paramTypes, arg, ColumnTypeInt)
 	}
 	return nil
 }

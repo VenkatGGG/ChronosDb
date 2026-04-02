@@ -728,6 +728,19 @@ Design constraints:
   by adding `ORDER BY`, `LIMIT`, broader `WHERE` shapes, and the minimum
   executor support needed so CRUD applications do not immediately fall off the
   supported SQL surface after basic DML lands
+- [x] 14.10 Widen `SELECT` for app compatibility
+  by adding `ORDER BY`, `LIMIT`, broader `WHERE` shapes, and the minimum
+  executor support needed so CRUD applications do not immediately fall off the
+  supported SQL surface after basic DML lands
+  - single-table `SELECT` now falls back to a filter-aware scan path when
+    predicates are not purely primary-key bounded, while still preserving the
+    fast primary-key point/range paths when they apply
+  - the live executor now applies row-level filters, deterministic ordering,
+    and limit trimming on distributed scan results, including multi-range scans
+    across different leaseholders
+  - planner, prepared-parameter inference, pgclient extended-query tests, and
+    multi-range process-node tests now cover non-primary-key filters plus
+    `ORDER BY ... LIMIT ...` execution
 - [ ] 14.11 Add end-to-end correctness tests for CRUD semantics
   covering crash/restart during delete and update, duplicate-key races, staged
   recovery with tombstones, prepared-statement execution, row-count/returning
@@ -747,7 +760,7 @@ Execution milestones:
   Complete `14.3`, `14.4`, and `14.5` together so `UPDATE`, primary-key
   `UPSERT`, and `RETURNING` all share one row-rewrite path instead of growing
   three partially overlapping executors.
-- [ ] Milestone C: Real client compatibility
+- [x] Milestone C: Real client compatibility
   Complete `14.6` and `14.10` together so prepared statements arrive with a
   broad enough `SELECT` surface that normal application code does not
   immediately fall back to unsupported query shapes.

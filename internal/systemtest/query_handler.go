@@ -266,6 +266,10 @@ func (h *runtimeQueryHandler) executeRangeScan(ctx context.Context, session *pgw
 	if err != nil {
 		return pgwire.QueryResult{}, err
 	}
+	rows, err = applyRangeScanPostProcessing(rows, plan)
+	if err != nil {
+		return pgwire.QueryResult{}, err
+	}
 	result.Rows = make([][][]byte, 0, len(rows))
 	for _, row := range rows {
 		projected, err := chronossql.ProjectRowText(plan.Projection, row)
@@ -629,6 +633,105 @@ func (h *runtimeQueryHandler) scanRows(ctx context.Context, session *pgwire.Sess
 		rows = append(rows, item.row)
 	}
 	return rows, nil
+}
+
+func applyRangeScanPostProcessing(rows []map[string]chronossql.Value, plan chronossql.RangeScanPlan) ([]map[string]chronossql.Value, error) {
+	filtered := make([]map[string]chronossql.Value, 0, len(rows))
+	for _, row := range rows {
+		match, err := rowMatchesFilters(row, plan.Filters)
+		if err != nil {
+			return nil, err
+		}
+		if match {
+			filtered = append(filtered, row)
+		}
+	}
+	if len(plan.OrderBy) > 0 {
+		sort.SliceStable(filtered, func(i, j int) bool {
+			return compareOrderedRows(filtered[i], filtered[j], plan.OrderBy)
+		})
+	}
+	if plan.Limit != nil && uint64(len(filtered)) > *plan.Limit {
+		filtered = append([]map[string]chronossql.Value(nil), filtered[:*plan.Limit]...)
+	}
+	return filtered, nil
+}
+
+func rowMatchesFilters(row map[string]chronossql.Value, filters []chronossql.FilterPredicate) (bool, error) {
+	for _, filter := range filters {
+		value, ok := lookupValue(row, filter.Column.Name)
+		if !ok {
+			return false, wrapExecutionError("filter row", fmt.Errorf("missing filter column %q", filter.Column.Name))
+		}
+		match, err := compareFilter(value, filter)
+		if err != nil {
+			return false, err
+		}
+		if !match {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+func compareFilter(value chronossql.Value, filter chronossql.FilterPredicate) (bool, error) {
+	compare, err := compareValues(value, filter.Value)
+	if err != nil {
+		return false, wrapExecutionError("filter row", err)
+	}
+	switch filter.Operator {
+	case chronossql.ComparisonEqual:
+		return compare == 0, nil
+	case chronossql.ComparisonGreaterThan:
+		return compare > 0, nil
+	case chronossql.ComparisonGreaterEqual:
+		return compare >= 0, nil
+	case chronossql.ComparisonLessThan:
+		return compare < 0, nil
+	case chronossql.ComparisonLessEqual:
+		return compare <= 0, nil
+	default:
+		return false, wrapExecutionError("filter row", fmt.Errorf("unsupported operator %q", filter.Operator))
+	}
+}
+
+func compareOrderedRows(left, right map[string]chronossql.Value, orderBy []chronossql.OrderBySpec) bool {
+	for _, item := range orderBy {
+		leftValue, _ := lookupValue(left, item.Column.Name)
+		rightValue, _ := lookupValue(right, item.Column.Name)
+		compare, err := compareValues(leftValue, rightValue)
+		if err != nil || compare == 0 {
+			continue
+		}
+		if item.Descending {
+			return compare > 0
+		}
+		return compare < 0
+	}
+	return false
+}
+
+func compareValues(left, right chronossql.Value) (int, error) {
+	if left.Type != right.Type {
+		return 0, fmt.Errorf("cannot compare %s with %s", left.Type, right.Type)
+	}
+	switch left.Type {
+	case chronossql.ColumnTypeInt:
+		switch {
+		case left.Int64 < right.Int64:
+			return -1, nil
+		case left.Int64 > right.Int64:
+			return 1, nil
+		default:
+			return 0, nil
+		}
+	case chronossql.ColumnTypeBytes:
+		return bytes.Compare(left.Bytes, right.Bytes), nil
+	case chronossql.ColumnTypeString:
+		fallthrough
+	default:
+		return strings.Compare(left.String, right.String), nil
+	}
 }
 
 func (h *runtimeQueryHandler) scanRowSet(ctx context.Context, session *pgwire.Session, plan chronossql.RangeScanPlan) ([]scanRow, error) {
