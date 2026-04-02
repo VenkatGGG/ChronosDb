@@ -317,7 +317,12 @@ func TestScanLatestMVCCRangeReturnsNewestPerLogicalKey(t *testing.T) {
 		t.Fatalf("put keyC ts1: %v", err)
 	}
 
-	versions, err := engine.ScanLatestMVCCRange(ctx, GlobalTablePrimaryPrefix(7), GlobalTablePrimaryPrefix(8), true, false)
+	versions, err := engine.ScanLatestMVCCRange(ctx, MVCCScanRequest{
+		StartKey:       GlobalTablePrimaryPrefix(7),
+		EndKey:         GlobalTablePrimaryPrefix(8),
+		StartInclusive: true,
+		EndInclusive:   false,
+	})
 	if err != nil {
 		t.Fatalf("scan latest mvcc range: %v", err)
 	}
@@ -360,7 +365,12 @@ func TestScanLatestMVCCRangeSuppressesTombstones(t *testing.T) {
 		t.Fatalf("put keyB live: %v", err)
 	}
 
-	versions, err := engine.ScanLatestMVCCRange(ctx, GlobalTablePrimaryPrefix(7), GlobalTablePrimaryPrefix(8), true, false)
+	versions, err := engine.ScanLatestMVCCRange(ctx, MVCCScanRequest{
+		StartKey:       GlobalTablePrimaryPrefix(7),
+		EndKey:         GlobalTablePrimaryPrefix(8),
+		StartInclusive: true,
+		EndInclusive:   false,
+	})
 	if err != nil {
 		t.Fatalf("scan latest mvcc range: %v", err)
 	}

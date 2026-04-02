@@ -15,6 +15,7 @@ import (
 	"github.com/VenkatGGG/ChronosDb/internal/hlc"
 	"github.com/VenkatGGG/ChronosDb/internal/meta"
 	"github.com/VenkatGGG/ChronosDb/internal/replica"
+	chronosruntime "github.com/VenkatGGG/ChronosDb/internal/runtime"
 	"github.com/VenkatGGG/ChronosDb/internal/storage"
 	"github.com/VenkatGGG/ChronosDb/internal/txn"
 	raftpb "go.etcd.io/raft/v3/raftpb"
@@ -390,11 +391,16 @@ func (n *ProcessNode) executeRebalance(ctx context.Context, desc meta.RangeDescr
 	recordStage("prepare_target_replica", map[string]string{
 		"target_node_id": fmt.Sprintf("%d", targetReplica.NodeID),
 	})
-	snapshot, err := n.host.CaptureReplicaSnapshot(ctx, desc.RangeID)
+	snapshot, err := n.host.CaptureReplicaSnapshot(desc.RangeID)
 	if err != nil {
 		return err
 	}
-	if err := n.kv.PrepareReplica(ctx, targetReplica.NodeID, desc.RangeID, targetReplica.ReplicaID, preparedReplicaDescriptor(desc, targetReplica), snapshot); err != nil {
+	if err := n.kv.PrepareReplica(ctx, targetReplica.NodeID, chronosruntime.ReplicaInstallRequest{
+		RangeID:        desc.RangeID,
+		ReplicaID:      targetReplica.ReplicaID,
+		DescriptorHint: ptr(preparedReplicaDescriptor(desc, targetReplica)),
+		Snapshot:       snapshot,
+	}); err != nil {
 		return err
 	}
 	if err := n.waitForReplicaApplied(ctx, targetReplica.NodeID, desc.RangeID, 0); err != nil {
@@ -518,7 +524,7 @@ func (n *ProcessNode) waitForReplicaApplied(ctx context.Context, nodeID, rangeID
 		lastErr    error
 	)
 	for time.Now().Before(deadline) {
-		status, err := n.kv.RangeStatus(ctx, nodeID, rangeID)
+		status, err := n.kv.RangeStatus(ctx, nodeID, chronosruntime.RangeStatusRequest{RangeID: rangeID})
 		lastStatus = status
 		lastErr = err
 		if err == nil && status.Hosted && status.AppliedIndex >= minApplied {
@@ -536,7 +542,7 @@ func (n *ProcessNode) waitForReplicaRole(ctx context.Context, nodeID, rangeID, r
 		lastErr    error
 	)
 	for time.Now().Before(deadline) {
-		status, err := n.kv.RangeStatus(ctx, nodeID, rangeID)
+		status, err := n.kv.RangeStatus(ctx, nodeID, chronosruntime.RangeStatusRequest{RangeID: rangeID})
 		lastStatus = status
 		lastErr = err
 		if err == nil && status.DescriptorSource != "prepared" && descriptorReplicaRole(status.Descriptor, replicaID) == role {
@@ -554,7 +560,7 @@ func (n *ProcessNode) waitForReplicaRemoved(ctx context.Context, nodeID, rangeID
 		lastErr    error
 	)
 	for time.Now().Before(deadline) {
-		status, err := n.kv.RangeStatus(ctx, nodeID, rangeID)
+		status, err := n.kv.RangeStatus(ctx, nodeID, chronosruntime.RangeStatusRequest{RangeID: rangeID})
 		lastStatus = status
 		lastErr = err
 		if err == nil && descriptorReplicaRole(status.Descriptor, replicaID) == "" {
@@ -592,7 +598,7 @@ func nextReplicaID(desc meta.RangeDescriptor) uint64 {
 }
 
 func (n *ProcessNode) localRangeAppliedIndex(rangeID uint64) (uint64, error) {
-	status, err := n.host.RangeStatus(rangeID)
+	status, err := n.host.RangeStatus(chronosruntime.RangeStatusRequest{RangeID: rangeID})
 	if err != nil {
 		return 0, err
 	}
@@ -608,4 +614,8 @@ func preparedReplicaDescriptor(desc meta.RangeDescriptor, target meta.ReplicaDes
 		hint.Replicas = append(hint.Replicas, target)
 	}
 	return hint
+}
+
+func ptr[T any](value T) *T {
+	return &value
 }

@@ -262,18 +262,18 @@ func (h *Host) ReadLatestLocal(ctx context.Context, key []byte) ([]byte, meta.Ra
 }
 
 // ScanRangeLocal returns the latest committed row version for each key in the span hosted locally.
-func (h *Host) ScanRangeLocal(ctx context.Context, startKey, endKey []byte, startInclusive, endInclusive bool) ([]KVRow, meta.RangeDescriptor, error) {
+func (h *Host) ScanRangeLocal(ctx context.Context, req storage.MVCCScanRequest) ([]KVRow, meta.RangeDescriptor, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	desc, err := h.catalog.Lookup(ctx, startKey)
+	desc, err := h.catalog.Lookup(ctx, req.StartKey)
 	if err != nil {
 		return nil, meta.RangeDescriptor{}, err
 	}
 	if !descriptorReplicaOnNode(desc, h.ident.NodeID) {
 		return nil, meta.RangeDescriptor{}, ErrRangeNotHosted
 	}
-	versions, err := h.engine.ScanLatestMVCCRange(ctx, startKey, endKey, startInclusive, endInclusive)
+	versions, err := h.engine.ScanLatestMVCCRange(ctx, req)
 	if err != nil {
 		return nil, meta.RangeDescriptor{}, err
 	}
@@ -554,7 +554,12 @@ func (h *Host) ScanTxnRecordsLocal(ctx context.Context, startKey, endKey []byte)
 
 // LoadSQLCatalog loads persisted SQL table descriptors from the system span.
 func (h *Host) LoadSQLCatalog(ctx context.Context) (*chronossql.Catalog, error) {
-	rows, err := h.engine.ScanLatestMVCCRange(ctx, storage.GlobalSystemTableDescriptorPrefix(), storage.PrefixEnd(storage.GlobalSystemTableDescriptorPrefix()), true, false)
+	rows, err := h.engine.ScanLatestMVCCRange(ctx, storage.MVCCScanRequest{
+		StartKey:       storage.GlobalSystemTableDescriptorPrefix(),
+		EndKey:         storage.PrefixEnd(storage.GlobalSystemTableDescriptorPrefix()),
+		StartInclusive: true,
+		EndInclusive:   false,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -576,7 +581,12 @@ func (h *Host) SeedSQLCatalog(ctx context.Context, catalog *chronossql.Catalog) 
 	if catalog == nil {
 		return nil
 	}
-	rows, err := h.engine.ScanLatestMVCCRange(ctx, storage.GlobalSystemTableDescriptorPrefix(), storage.PrefixEnd(storage.GlobalSystemTableDescriptorPrefix()), true, false)
+	rows, err := h.engine.ScanLatestMVCCRange(ctx, storage.MVCCScanRequest{
+		StartKey:       storage.GlobalSystemTableDescriptorPrefix(),
+		EndKey:         storage.PrefixEnd(storage.GlobalSystemTableDescriptorPrefix()),
+		StartInclusive: true,
+		EndInclusive:   false,
+	})
 	if err != nil {
 		return err
 	}

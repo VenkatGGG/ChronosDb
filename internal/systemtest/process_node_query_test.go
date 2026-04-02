@@ -3768,13 +3768,13 @@ func waitForLeaseholderHint(t *testing.T, host *chronosruntime.Host, rangeID, le
 
 	deadline := time.Now().Add(4 * time.Second)
 	for time.Now().Before(deadline) {
-		status, err := host.RangeStatus(rangeID)
+		status, err := host.RangeStatus(chronosruntime.RangeStatusRequest{RangeID: rangeID})
 		if err == nil && status.Descriptor.LeaseholderReplicaID == leaseholderReplicaID {
 			return
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
-	status, _ := host.RangeStatus(rangeID)
+	status, _ := host.RangeStatus(chronosruntime.RangeStatusRequest{RangeID: rangeID})
 	t.Fatalf("range %d leaseholder hint = %d, want %d", rangeID, status.Descriptor.LeaseholderReplicaID, leaseholderReplicaID)
 }
 

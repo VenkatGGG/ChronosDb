@@ -47,7 +47,7 @@ func TestWaitForSeededClusterReadyWaitsForLeaseholderLeaders(t *testing.T) {
 		statusMap = map[statusKey]rangeStatusResponse{
 			{nodeID: 1, rangeID: manifest.Meta1[0].RangeID}: {Hosted: true, LeaderReplicaID: manifest.Meta1[0].LeaseholderReplicaID},
 			{nodeID: 1, rangeID: manifest.Meta2[0].RangeID}: {Hosted: true, LeaderReplicaID: manifest.Meta2[0].LeaseholderReplicaID},
-			{nodeID: 2, rangeID: 41}:                          {Hosted: true, LeaderReplicaID: 0},
+			{nodeID: 2, rangeID: 41}:                        {Hosted: true, LeaderReplicaID: 0},
 		}
 	)
 
@@ -58,7 +58,7 @@ func TestWaitForSeededClusterReadyWaitsForLeaseholderLeaders(t *testing.T) {
 				w.Header().Set("Content-Type", "application/json")
 				_, _ = w.Write([]byte(`{"nodes":[],"ranges":[]}`))
 			case r.Method == http.MethodPost && r.URL.Path == "/control/range/status":
-				var req rangeStatusRequest
+				var req chronosruntime.RangeStatusRequest
 				if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 					http.Error(w, err.Error(), http.StatusBadRequest)
 					return

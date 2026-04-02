@@ -659,7 +659,7 @@ func waitForRangeReplicaRole(t *testing.T, client *http.Client, controlURL strin
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		var status rangeStatusResponse
-		postJSONExpectJSON(t, client, controlURL+"/control/range/status", rangeStatusRequest{RangeID: rangeID}, &status)
+		postJSONExpectJSON(t, client, controlURL+"/control/range/status", chronosruntime.RangeStatusRequest{RangeID: rangeID}, &status)
 		for _, repl := range status.Descriptor.Replicas {
 			if repl.ReplicaID == replicaID && repl.Role == role {
 				return
@@ -668,7 +668,7 @@ func waitForRangeReplicaRole(t *testing.T, client *http.Client, controlURL strin
 		time.Sleep(25 * time.Millisecond)
 	}
 	var status rangeStatusResponse
-	postJSONExpectJSON(t, client, controlURL+"/control/range/status", rangeStatusRequest{RangeID: rangeID}, &status)
+	postJSONExpectJSON(t, client, controlURL+"/control/range/status", chronosruntime.RangeStatusRequest{RangeID: rangeID}, &status)
 	t.Fatalf("range %d replica %d role not %q: %+v", rangeID, replicaID, role, status)
 }
 
@@ -678,7 +678,7 @@ func waitForRangeReplicaAbsent(t *testing.T, client *http.Client, controlURL str
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		var status rangeStatusResponse
-		postJSONExpectJSON(t, client, controlURL+"/control/range/status", rangeStatusRequest{RangeID: rangeID}, &status)
+		postJSONExpectJSON(t, client, controlURL+"/control/range/status", chronosruntime.RangeStatusRequest{RangeID: rangeID}, &status)
 		found := false
 		for _, repl := range status.Descriptor.Replicas {
 			if repl.ReplicaID == replicaID {
@@ -692,7 +692,7 @@ func waitForRangeReplicaAbsent(t *testing.T, client *http.Client, controlURL str
 		time.Sleep(25 * time.Millisecond)
 	}
 	var status rangeStatusResponse
-	postJSONExpectJSON(t, client, controlURL+"/control/range/status", rangeStatusRequest{RangeID: rangeID}, &status)
+	postJSONExpectJSON(t, client, controlURL+"/control/range/status", chronosruntime.RangeStatusRequest{RangeID: rangeID}, &status)
 	t.Fatalf("range %d still contains replica %d: %+v", rangeID, replicaID, status)
 }
 

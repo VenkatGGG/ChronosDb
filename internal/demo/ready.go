@@ -14,10 +14,6 @@ import (
 	"github.com/VenkatGGG/ChronosDb/internal/systemtest"
 )
 
-type rangeStatusRequest struct {
-	RangeID uint64 `json:"range_id"`
-}
-
 type rangeStatusResponse struct {
 	Hosted          bool   `json:"hosted"`
 	LeaderReplicaID uint64 `json:"leader_replica_id,omitempty"`
@@ -106,7 +102,7 @@ func waitForAdminSnapshot(ctx context.Context, baseURL string) error {
 }
 
 func fetchRangeStatus(ctx context.Context, client *http.Client, controlURL string, rangeID uint64) (rangeStatusResponse, error) {
-	body, err := json.Marshal(rangeStatusRequest{RangeID: rangeID})
+	body, err := json.Marshal(chronosruntime.RangeStatusRequest{RangeID: rangeID})
 	if err != nil {
 		return rangeStatusResponse{}, err
 	}

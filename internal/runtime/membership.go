@@ -54,22 +54,22 @@ func (h *Host) ClearPendingReplicaTarget(rangeID, replicaID uint64) {
 }
 
 // RangeStatus returns the local scheduler and descriptor state for one range.
-func (h *Host) RangeStatus(rangeID uint64) (RangeStatus, error) {
+func (h *Host) RangeStatus(req RangeStatusRequest) (RangeStatus, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	repl, err := h.scheduler.Replica(rangeID)
+	repl, err := h.scheduler.Replica(req.RangeID)
 	if err != nil {
-		return RangeStatus{RangeID: rangeID}, nil
+		return RangeStatus{RangeID: req.RangeID}, nil
 	}
-	leader, err := h.scheduler.Leader(rangeID)
+	leader, err := h.scheduler.Leader(req.RangeID)
 	if err != nil {
 		return RangeStatus{}, err
 	}
-	desc, source := h.descriptorForRangeLocked(rangeID, repl.Descriptor())
+	desc, source := h.descriptorForRangeLocked(req.RangeID, repl.Descriptor())
 	localReplicaID, _ := localReplicaID(desc, h.ident.NodeID)
 	return RangeStatus{
-		RangeID:          rangeID,
+		RangeID:          req.RangeID,
 		LocalReplicaID:   localReplicaID,
 		LeaderReplicaID:  leader,
 		AppliedIndex:     repl.AppliedIndex(),

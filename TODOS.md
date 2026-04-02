@@ -875,12 +875,22 @@ Design constraints:
   by renaming or reshaping the planner-only helper so it no longer looks like
   the live extended-protocol `PrepareQuery` contract while carrying fewer
   inputs and guarantees
-- [ ] 15.4 Replace high-arity scan and replica-preparation APIs with request structs
+- [x] 15.4 Replace high-arity scan and replica-preparation APIs with request structs
   so range spans, inclusivity flags, and replica/snapshot parameters are named
   once instead of repeated across storage, runtime, and systemtest layers
-- [ ] 15.5 Make runtime cancellation contracts consistent
+  - storage, runtime, demo-readiness, and control-plane callers now share one
+    `MVCCScanRequest` span contract instead of repeating four positional scan
+    arguments through every layer boundary
+  - range-status and replica-install flows now use exported runtime request
+    structs, and learner snapshot installation now carries an explicit optional
+    descriptor hint instead of silently accepting an ignored extra descriptor
+- [x] 15.5 Make runtime cancellation contracts consistent
   by choosing which exported runtime operations are actually cancellable and
   removing unused `context.Context` parameters from synchronous helpers
+  - local snapshot capture/install are now explicitly synchronous runtime
+    helpers without fake cancellation parameters, while proposal/dispatch/read
+    paths keep `context.Context` only where they actually resolve, block, or
+    wait on distributed state
 - [ ] 15.6 Reduce runtime/systemtest boundary bleed
   by carving durable runtime-facing pieces out of `internal/systemtest` where
   production/demo code currently depends on test-oriented package seams
@@ -896,7 +906,7 @@ Execution order:
 - [ ] Milestone 15B: auth and trust boundaries
   Complete `15.1` before any further UI/runtime exposure work so pgwire no
   longer remains the most obvious unauthenticated surface.
-- [ ] Milestone 15C: API-shape cleanup
+- [x] Milestone 15C: API-shape cleanup
   Complete `15.4` and `15.5` together so request-shape and cancellation-policy
   changes settle into one coherent exported contract set.
 - [ ] Milestone 15D: package and doc cleanup

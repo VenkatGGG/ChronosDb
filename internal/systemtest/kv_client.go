@@ -44,13 +44,6 @@ type kvDeleteRequest struct {
 	Timestamp hlc.Timestamp `json:"timestamp"`
 }
 
-type kvScanRequest struct {
-	StartKey       []byte `json:"start_key"`
-	EndKey         []byte `json:"end_key"`
-	StartInclusive bool   `json:"start_inclusive"`
-	EndInclusive   bool   `json:"end_inclusive"`
-}
-
 type kvScanRow struct {
 	LogicalKey []byte        `json:"logical_key"`
 	Timestamp  hlc.Timestamp `json:"timestamp"`
@@ -102,17 +95,6 @@ type kvLockAcquireResponse struct {
 type kvLockReleaseRequest struct {
 	Key   []byte        `json:"key"`
 	TxnID storage.TxnID `json:"txn_id"`
-}
-
-type rangeStatusRequest struct {
-	RangeID uint64 `json:"range_id"`
-}
-
-type rangePrepareRequest struct {
-	RangeID    uint64                         `json:"range_id"`
-	ReplicaID  uint64                         `json:"replica_id"`
-	Descriptor meta.RangeDescriptor           `json:"descriptor"`
-	Snapshot   chronosruntime.ReplicaSnapshot `json:"snapshot"`
 }
 
 type rangeStatusResponse struct {
@@ -248,7 +230,7 @@ func (c *kvClient) ScanRange(ctx context.Context, startKey, endKey []byte, start
 			return nil, err
 		}
 		segmentEnd, segmentEndInclusive, done := clampScanEnd(desc, endKey, endInclusive)
-		request := kvScanRequest{
+		request := storage.MVCCScanRequest{
 			StartKey:       currentStart,
 			EndKey:         segmentEnd,
 			StartInclusive: currentStartInclusive,
@@ -256,7 +238,7 @@ func (c *kvClient) ScanRange(ctx context.Context, startKey, endKey []byte, start
 		}
 		var segment kvScanResponse
 		if targetNodeID == c.nodeID {
-			localRows, _, err := c.host.ScanRangeLocal(ctx, request.StartKey, request.EndKey, request.StartInclusive, request.EndInclusive)
+			localRows, _, err := c.host.ScanRangeLocal(ctx, request)
 			if err != nil {
 				return nil, err
 			}
@@ -344,9 +326,9 @@ func (c *kvClient) GetIntent(ctx context.Context, key []byte) (storage.Intent, b
 	return resp.Intent, resp.Found, nil
 }
 
-func (c *kvClient) RangeStatus(ctx context.Context, targetNodeID, rangeID uint64) (rangeStatusResponse, error) {
+func (c *kvClient) RangeStatus(ctx context.Context, targetNodeID uint64, req chronosruntime.RangeStatusRequest) (rangeStatusResponse, error) {
 	if targetNodeID == c.nodeID {
-		status, err := c.host.RangeStatus(rangeID)
+		status, err := c.host.RangeStatus(req)
 		if err != nil {
 			return rangeStatusResponse{}, err
 		}
@@ -360,22 +342,17 @@ func (c *kvClient) RangeStatus(ctx context.Context, targetNodeID, rangeID uint64
 		}, nil
 	}
 	var resp rangeStatusResponse
-	if err := c.postJSON(ctx, targetNodeID, "/control/range/status", rangeStatusRequest{RangeID: rangeID}, &resp); err != nil {
+	if err := c.postJSON(ctx, targetNodeID, "/control/range/status", req, &resp); err != nil {
 		return rangeStatusResponse{}, err
 	}
 	return resp, nil
 }
 
-func (c *kvClient) PrepareReplica(ctx context.Context, targetNodeID, rangeID, replicaID uint64, desc meta.RangeDescriptor, snapshot chronosruntime.ReplicaSnapshot) error {
+func (c *kvClient) PrepareReplica(ctx context.Context, targetNodeID uint64, req chronosruntime.ReplicaInstallRequest) error {
 	if targetNodeID == c.nodeID {
-		return c.host.InstallReplicaSnapshot(ctx, rangeID, replicaID, snapshot)
+		return c.host.InstallReplicaSnapshot(req)
 	}
-	return c.postJSON(ctx, targetNodeID, "/control/range/prepare", rangePrepareRequest{
-		RangeID:    rangeID,
-		ReplicaID:  replicaID,
-		Descriptor: desc,
-		Snapshot:   snapshot,
-	}, nil)
+	return c.postJSON(ctx, targetNodeID, "/control/range/prepare", req, nil)
 }
 
 func (c *kvClient) PutTxnRecord(ctx context.Context, record txn.Record) error {

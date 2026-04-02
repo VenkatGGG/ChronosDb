@@ -267,7 +267,12 @@ func TestHostAppliesMVCCTombstones(t *testing.T) {
 	if _, err := host.engine.GetMVCCValue(context.Background(), key, deleteTS); err != storage.ErrMVCCValueDeleted {
 		t.Fatalf("exact tombstone err = %v, want %v", err, storage.ErrMVCCValueDeleted)
 	}
-	rows, _, err := host.ScanRangeLocal(context.Background(), storage.GlobalTablePrimaryPrefix(7), storage.GlobalTablePrimaryPrefix(8), true, false)
+	rows, _, err := host.ScanRangeLocal(context.Background(), storage.MVCCScanRequest{
+		StartKey:       storage.GlobalTablePrimaryPrefix(7),
+		EndKey:         storage.GlobalTablePrimaryPrefix(8),
+		StartInclusive: true,
+		EndInclusive:   false,
+	})
 	if err != nil {
 		t.Fatalf("scan after tombstone: %v", err)
 	}

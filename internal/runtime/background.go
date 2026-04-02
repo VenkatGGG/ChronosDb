@@ -300,7 +300,12 @@ func (h *Host) applySplitTriggersLocked(ctx context.Context, now time.Time) ([]O
 		if leader != localReplica {
 			continue
 		}
-		versions, err := h.engine.ScanLatestMVCCRange(ctx, desc.StartKey, desc.EndKey, true, false)
+		versions, err := h.engine.ScanLatestMVCCRange(ctx, storage.MVCCScanRequest{
+			StartKey:       desc.StartKey,
+			EndKey:         desc.EndKey,
+			StartInclusive: true,
+			EndInclusive:   false,
+		})
 		if err != nil {
 			return nil, err
 		}

@@ -546,12 +546,12 @@ func (n *ProcessNode) handleRangePrepare(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	var req rangePrepareRequest
+	var req chronosruntime.ReplicaInstallRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	if err := n.host.InstallReplicaSnapshot(r.Context(), req.RangeID, req.ReplicaID, req.Snapshot); err != nil {
+	if err := n.host.InstallReplicaSnapshot(req); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -563,12 +563,12 @@ func (n *ProcessNode) handleRangeStatus(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	var req rangeStatusRequest
+	var req chronosruntime.RangeStatusRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	status, err := n.host.RangeStatus(req.RangeID)
+	status, err := n.host.RangeStatus(req)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -643,12 +643,12 @@ func (n *ProcessNode) handleKVScan(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	var req kvScanRequest
+	var req storage.MVCCScanRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	rows, _, err := n.host.ScanRangeLocal(r.Context(), req.StartKey, req.EndKey, req.StartInclusive, req.EndInclusive)
+	rows, _, err := n.host.ScanRangeLocal(r.Context(), req)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
