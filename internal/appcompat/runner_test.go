@@ -2,7 +2,6 @@ package appcompat
 
 import (
 	"context"
-	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -61,7 +60,10 @@ func TestRunAgainstSeededDemoCluster(t *testing.T) {
 		}
 	})
 
-	state := waitForDemoNodeReady(t, nodes[0])
+	if err := demo.WaitForSeededClusterReady(ctx, manifest, configs); err != nil {
+		t.Fatalf("wait for seeded cluster readiness: %v", err)
+	}
+	state := nodes[0].State()
 	runCtx, runCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer runCancel()
 	report, err := Run(runCtx, Config{
@@ -110,27 +112,6 @@ func TestSummaryStringIncludesStatusAndFailures(t *testing.T) {
 	if !containsAll(summary, "FAIL", "insert_user", "errors=map[23:1]", "missing-success coverage") {
 		t.Fatalf("summary = %q", summary)
 	}
-}
-
-func waitForDemoNodeReady(t *testing.T, node *systemtest.ProcessNode) systemtest.ProcessNodeState {
-	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	client := &http.Client{Timeout: 250 * time.Millisecond}
-	for time.Now().Before(deadline) {
-		state := node.State()
-		if state.PGAddr != "" && state.ObservabilityURL != "" {
-			resp, err := client.Get(state.ObservabilityURL + "/admin/snapshot?event_limit=4")
-			if err == nil {
-				_ = resp.Body.Close()
-				if resp.StatusCode == http.StatusOK {
-					return state
-				}
-			}
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	t.Fatalf("node never became ready: pg=%s obs=%s", node.State().PGAddr, node.State().ObservabilityURL)
-	return systemtest.ProcessNodeState{}
 }
 
 func containsAll(value string, parts ...string) bool {

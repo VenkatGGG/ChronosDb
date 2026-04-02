@@ -91,10 +91,8 @@ func main() {
 		nodes = append(nodes, node)
 		doneChans = append(doneChans, done)
 	}
-	for _, cfg := range nodeConfigs {
-		if err := waitForAdminSnapshot(ctx, "http://"+cfg.ObservabilityAddr); err != nil {
-			log.Fatal(err)
-		}
+	if err := demo.WaitForSeededClusterReady(ctx, manifest, nodeConfigs); err != nil {
+		log.Fatal(err)
 	}
 
 	rawTargets := demo.DefaultObservabilityURLs()
@@ -213,31 +211,6 @@ func startNode(ctx context.Context, cfg systemtest.ProcessNodeConfig) (*systemte
 		done <- node.Run(ctx)
 	}()
 	return node, done, nil
-}
-
-func waitForAdminSnapshot(ctx context.Context, baseURL string) error {
-	client := &http.Client{Timeout: 500 * time.Millisecond}
-	url := strings.TrimRight(baseURL, "/") + "/admin/snapshot?event_limit=16"
-	ticker := time.NewTicker(100 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-		if err != nil {
-			return err
-		}
-		resp, err := client.Do(req)
-		if err == nil {
-			resp.Body.Close()
-			if resp.StatusCode == http.StatusOK {
-				return nil
-			}
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-ticker.C:
-		}
-	}
 }
 
 func runSmoke(ctx context.Context, addr string) error {
