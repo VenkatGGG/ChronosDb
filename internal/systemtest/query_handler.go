@@ -310,31 +310,26 @@ func (h *runtimeQueryHandler) executeDelete(ctx context.Context, session *pgwire
 		}
 	}
 
-	if session == nil || session.TxStatus() != pgwire.TxInTransaction {
-		state := newTxnState(txnNow())
-		for _, target := range targets {
-			if err := h.stageWrite(ctx, state, target.key, nil, true); err != nil {
-				_ = h.abortTxnState(ctx, state)
-				return pgwire.QueryResult{}, err
-			}
-		}
-		if err := h.commitTxnState(ctx, state); err != nil {
-			return pgwire.QueryResult{}, err
-		}
-		result.CommandTag = fmt.Sprintf("DELETE %d", len(targets))
-		return result, nil
-	}
-
-	state, ok := h.lookupSessionState(session)
-	if !ok {
-		return pgwire.QueryResult{}, pgwire.Error{
-			Severity: "ERROR",
-			Code:     "08006",
-			Message:  "transaction state is not available",
-		}
+	state, autoCommit, err := h.statementTxnState(session)
+	if err != nil {
+		return pgwire.QueryResult{}, err
 	}
 	for _, target := range targets {
+		if err := h.stageIndexMutations(ctx, state, plan.Table, target.row, nil); err != nil {
+			if autoCommit {
+				_ = h.abortTxnState(ctx, state)
+			}
+			return pgwire.QueryResult{}, err
+		}
 		if err := h.stageWrite(ctx, state, target.key, nil, true); err != nil {
+			if autoCommit {
+				_ = h.abortTxnState(ctx, state)
+			}
+			return pgwire.QueryResult{}, err
+		}
+	}
+	if autoCommit {
+		if err := h.commitTxnState(ctx, state); err != nil {
 			return pgwire.QueryResult{}, err
 		}
 	}
@@ -353,56 +348,43 @@ func (h *runtimeQueryHandler) executeUpdate(ctx context.Context, session *pgwire
 	}
 	returningRows := make([][][]byte, 0, len(targets))
 
-	if session == nil || session.TxStatus() != pgwire.TxInTransaction {
-		state := newTxnState(txnNow())
-		for _, target := range targets {
-			updatedRow, updatedPayload, err := rewriteUpdatedRow(plan.Table, target.row, plan.Assignments)
-			if err != nil {
-				_ = h.abortTxnState(ctx, state)
-				return pgwire.QueryResult{}, err
-			}
-			if len(plan.Returning) > 0 {
-				projected, err := chronossql.ProjectRowText(plan.Returning, updatedRow)
-				if err != nil {
-					_ = h.abortTxnState(ctx, state)
-					return pgwire.QueryResult{}, wrapExecutionError("project update returning row", err)
-				}
-				returningRows = append(returningRows, projected)
-			}
-			if err := h.stageWrite(ctx, state, target.key, updatedPayload, false); err != nil {
-				_ = h.abortTxnState(ctx, state)
-				return pgwire.QueryResult{}, err
-			}
-		}
-		if err := h.commitTxnState(ctx, state); err != nil {
-			return pgwire.QueryResult{}, err
-		}
-		result.Rows = returningRows
-		result.CommandTag = fmt.Sprintf("UPDATE %d", len(targets))
-		return result, nil
-	}
-
-	state, ok := h.lookupSessionState(session)
-	if !ok {
-		return pgwire.QueryResult{}, pgwire.Error{
-			Severity: "ERROR",
-			Code:     "08006",
-			Message:  "transaction state is not available",
-		}
+	state, autoCommit, err := h.statementTxnState(session)
+	if err != nil {
+		return pgwire.QueryResult{}, err
 	}
 	for _, target := range targets {
 		updatedRow, updatedPayload, err := rewriteUpdatedRow(plan.Table, target.row, plan.Assignments)
 		if err != nil {
+			if autoCommit {
+				_ = h.abortTxnState(ctx, state)
+			}
 			return pgwire.QueryResult{}, err
 		}
 		if len(plan.Returning) > 0 {
 			projected, err := chronossql.ProjectRowText(plan.Returning, updatedRow)
 			if err != nil {
+				if autoCommit {
+					_ = h.abortTxnState(ctx, state)
+				}
 				return pgwire.QueryResult{}, wrapExecutionError("project update returning row", err)
 			}
 			returningRows = append(returningRows, projected)
 		}
+		if err := h.stageIndexMutations(ctx, state, plan.Table, target.row, updatedRow); err != nil {
+			if autoCommit {
+				_ = h.abortTxnState(ctx, state)
+			}
+			return pgwire.QueryResult{}, err
+		}
 		if err := h.stageWrite(ctx, state, target.key, updatedPayload, false); err != nil {
+			if autoCommit {
+				_ = h.abortTxnState(ctx, state)
+			}
+			return pgwire.QueryResult{}, err
+		}
+	}
+	if autoCommit {
+		if err := h.commitTxnState(ctx, state); err != nil {
 			return pgwire.QueryResult{}, err
 		}
 	}
@@ -412,47 +394,56 @@ func (h *runtimeQueryHandler) executeUpdate(ctx context.Context, session *pgwire
 }
 
 func (h *runtimeQueryHandler) executeInsertLike(ctx context.Context, session *pgwire.Session, result pgwire.QueryResult, table chronossql.TableDescriptor, key, value []byte, returning []chronossql.ColumnDescriptor, allowOverwrite bool) (pgwire.QueryResult, error) {
-	if !allowOverwrite {
-		allowed, err := h.insertAllowed(ctx, session, table, key)
-		if err != nil {
-			return pgwire.QueryResult{}, err
+	state, autoCommit, err := h.statementTxnState(session)
+	if err != nil {
+		return pgwire.QueryResult{}, err
+	}
+	existingRow, existingFound, err := h.visibleRowForKey(ctx, state, table, key)
+	if err != nil {
+		if autoCommit {
+			_ = h.abortTxnState(ctx, state)
 		}
-		if !allowed {
-			return pgwire.QueryResult{}, duplicateKeyError(table)
+		return pgwire.QueryResult{}, err
+	}
+	if !allowOverwrite && existingFound {
+		if autoCommit {
+			_ = h.abortTxnState(ctx, state)
 		}
+		return pgwire.QueryResult{}, duplicateKeyError(table)
+	}
+	row, err := chronossql.DecodeRowValue(table, value)
+	if err != nil {
+		if autoCommit {
+			_ = h.abortTxnState(ctx, state)
+		}
+		return pgwire.QueryResult{}, wrapExecutionError("decode returning row", err)
+	}
+	if err := h.stageIndexMutations(ctx, state, table, existingRowIfFound(existingRow, existingFound), row); err != nil {
+		if autoCommit {
+			_ = h.abortTxnState(ctx, state)
+		}
+		return pgwire.QueryResult{}, err
 	}
 	if len(returning) > 0 {
-		row, err := chronossql.DecodeRowValue(table, value)
-		if err != nil {
-			return pgwire.QueryResult{}, wrapExecutionError("decode returning row", err)
-		}
 		projected, err := chronossql.ProjectRowText(returning, row)
 		if err != nil {
+			if autoCommit {
+				_ = h.abortTxnState(ctx, state)
+			}
 			return pgwire.QueryResult{}, wrapExecutionError("project returning row", err)
 		}
 		result.Rows = [][][]byte{projected}
 	}
-	if session == nil || session.TxStatus() != pgwire.TxInTransaction {
-		state := newTxnState(txnNow())
-		if err := h.stageWrite(ctx, state, key, value, false); err != nil {
+	if err := h.stageWrite(ctx, state, key, value, false); err != nil {
+		if autoCommit {
 			_ = h.abortTxnState(ctx, state)
-			return pgwire.QueryResult{}, err
 		}
+		return pgwire.QueryResult{}, err
+	}
+	if autoCommit {
 		if err := h.commitTxnState(ctx, state); err != nil {
 			return pgwire.QueryResult{}, err
 		}
-		return result, nil
-	}
-	state, ok := h.lookupSessionState(session)
-	if !ok {
-		return pgwire.QueryResult{}, pgwire.Error{
-			Severity: "ERROR",
-			Code:     "08006",
-			Message:  "transaction state is not available",
-		}
-	}
-	if err := h.stageWrite(ctx, state, key, value, false); err != nil {
-		return pgwire.QueryResult{}, err
 	}
 	return result, nil
 }
@@ -762,6 +753,9 @@ func (h *runtimeQueryHandler) scanRowSet(ctx context.Context, session *pgwire.Se
 	})
 	rows := make([]scanRow, 0, len(keys))
 	for _, key := range keys {
+		if !storage.IsGlobalTablePrimaryRowKey(plan.Table.ID, key) {
+			continue
+		}
 		row, err := chronossql.DecodeRowValue(plan.Table, rowByKey[string(key)].Value)
 		if err != nil {
 			return nil, wrapExecutionError("decode scanned row", err)
@@ -1150,22 +1144,121 @@ func cloneSQLValue(value chronossql.Value) chronossql.Value {
 	return cloned
 }
 
-func (h *runtimeQueryHandler) insertAllowed(ctx context.Context, session *pgwire.Session, table chronossql.TableDescriptor, key []byte) (bool, error) {
-	if pending, ok := h.pendingWriteForKey(session, key); ok {
-		return pending.tombstone, nil
+func (h *runtimeQueryHandler) statementTxnState(session *pgwire.Session) (*sessionTxnState, bool, error) {
+	if session == nil || session.TxStatus() != pgwire.TxInTransaction {
+		return newTxnState(txnNow()), true, nil
 	}
-	_, found, err := h.kv.GetLatest(ctx, key)
+	state, ok := h.lookupSessionState(session)
+	if !ok {
+		return nil, false, pgwire.Error{
+			Severity: "ERROR",
+			Code:     "08006",
+			Message:  "transaction state is not available",
+		}
+	}
+	return state, false, nil
+}
+
+func (h *runtimeQueryHandler) visibleRowForKey(ctx context.Context, state *sessionTxnState, table chronossql.TableDescriptor, key []byte) (map[string]chronossql.Value, bool, error) {
+	if pending, ok := pendingWriteForState(state, key); ok {
+		if pending.tombstone {
+			return nil, false, nil
+		}
+		row, err := chronossql.DecodeRowValue(table, pending.value)
+		if err != nil {
+			return nil, false, wrapExecutionError("decode pending row payload", err)
+		}
+		return row, true, nil
+	}
+	value, found, err := h.kv.GetLatest(ctx, key)
+	if err != nil {
+		return nil, false, err
+	}
+	if !found {
+		return nil, false, nil
+	}
+	row, err := chronossql.DecodeRowValue(table, value)
+	if err != nil {
+		return nil, false, wrapExecutionError("decode visible row payload", err)
+	}
+	return row, true, nil
+}
+
+func (h *runtimeQueryHandler) stageIndexMutations(ctx context.Context, state *sessionTxnState, table chronossql.TableDescriptor, oldRow, newRow map[string]chronossql.Value) error {
+	if len(table.Indexes) == 0 {
+		return nil
+	}
+	oldEntries, err := chronossql.BuildIndexEntries(table, oldRow)
+	if err != nil {
+		return wrapExecutionError("build old index entries", err)
+	}
+	newEntries, err := chronossql.BuildIndexEntries(table, newRow)
+	if err != nil {
+		return wrapExecutionError("build new index entries", err)
+	}
+	oldByID := make(map[uint64]chronossql.IndexEntry, len(oldEntries))
+	for _, entry := range oldEntries {
+		oldByID[entry.Index.ID] = entry
+	}
+	newByID := make(map[uint64]chronossql.IndexEntry, len(newEntries))
+	for _, entry := range newEntries {
+		newByID[entry.Index.ID] = entry
+	}
+	for _, index := range table.Indexes {
+		oldEntry, oldOK := oldByID[index.ID]
+		newEntry, newOK := newByID[index.ID]
+		if oldOK && newOK && bytes.Equal(oldEntry.Key, newEntry.Key) && bytes.Equal(oldEntry.Value, newEntry.Value) {
+			continue
+		}
+		if newOK && index.Unique {
+			allowed, err := h.uniqueIndexWriteAllowed(ctx, state, newEntry.Key, newEntry.Value)
+			if err != nil {
+				return err
+			}
+			if !allowed {
+				return duplicateConstraintError(index.Name)
+			}
+		}
+		if oldOK {
+			if err := h.stageWrite(ctx, state, oldEntry.Key, nil, true); err != nil {
+				return err
+			}
+		}
+		if newOK {
+			if err := h.stageWrite(ctx, state, newEntry.Key, newEntry.Value, false); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (h *runtimeQueryHandler) uniqueIndexWriteAllowed(ctx context.Context, state *sessionTxnState, key, owner []byte) (bool, error) {
+	if pending, ok := pendingWriteForState(state, key); ok {
+		if pending.tombstone {
+			return true, nil
+		}
+		return bytes.Equal(pending.value, owner), nil
+	}
+	value, found, err := h.kv.GetLatest(ctx, key)
 	if err != nil {
 		return false, err
 	}
-	return !found, nil
+	if !found {
+		return true, nil
+	}
+	return bytes.Equal(value, owner), nil
 }
 
 func duplicateKeyError(table chronossql.TableDescriptor) error {
+	return duplicateConstraintError(strings.ToLower(strings.TrimSpace(table.Name)) + "_pkey")
+}
+
+func duplicateConstraintError(name string) error {
 	return pgwire.Error{
 		Severity: "ERROR",
 		Code:     "23505",
-		Message:  fmt.Sprintf("duplicate key value violates unique constraint %q", strings.ToLower(strings.TrimSpace(table.Name))+"_pkey"),
+		Message:  fmt.Sprintf("duplicate key value violates unique constraint %q", strings.ToLower(strings.TrimSpace(name))),
 	}
 }
 
@@ -1177,6 +1270,26 @@ func (s *sessionTxnState) snapshot() (txn.Record, []pendingTxnWrite) {
 		writes = append(writes, clonePendingWrite(write))
 	}
 	return s.record, writes
+}
+
+func pendingWriteForState(state *sessionTxnState, key []byte) (pendingTxnWrite, bool) {
+	if state == nil {
+		return pendingTxnWrite{}, false
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	write, ok := state.writes[string(key)]
+	if !ok {
+		return pendingTxnWrite{}, false
+	}
+	return clonePendingWrite(write), true
+}
+
+func existingRowIfFound(row map[string]chronossql.Value, found bool) map[string]chronossql.Value {
+	if !found {
+		return nil
+	}
+	return row
 }
 
 func keyWithinSpan(key, startKey, endKey []byte, startInclusive, endInclusive bool) bool {

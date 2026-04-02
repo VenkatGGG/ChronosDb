@@ -82,7 +82,20 @@ func TestNamespaceBuilders(t *testing.T) {
 	if prefix := string(GlobalTablePrimaryPrefix(9)); prefix != "/mvcc/global/table/\x00\x00\x00\x00\x00\x00\x00\t/primary/" {
 		t.Fatalf("unexpected table primary prefix: %q", prefix)
 	}
+	indexPrefix := GlobalTableIndexPrefix(9, 2)
+	if !bytes.HasPrefix(indexPrefix, GlobalTablePrimaryPrefix(9)) {
+		t.Fatalf("index prefix should live under primary span: %q", indexPrefix)
+	}
+	if bytes.Compare(indexPrefix, GlobalTablePrimaryPrefix(10)) >= 0 {
+		t.Fatalf("index prefix %q should sort before next table prefix %q", indexPrefix, GlobalTablePrimaryPrefix(10))
+	}
 	if end := PrefixEnd([]byte("/demo/")); !bytes.Equal(end, []byte("/demo/\xff")) {
 		t.Fatalf("unexpected prefix end: %q", end)
+	}
+	if !IsGlobalTablePrimaryRowKey(9, GlobalTablePrimaryKey(9, []byte("alice"))) {
+		t.Fatalf("primary row key should classify as primary")
+	}
+	if IsGlobalTablePrimaryRowKey(9, GlobalTableUniqueIndexKey(9, 2, []byte("alice@example.com"))) {
+		t.Fatalf("unique index key should not classify as primary")
 	}
 }

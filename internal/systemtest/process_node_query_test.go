@@ -1,6 +1,7 @@
 package systemtest
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"fmt"
@@ -811,7 +812,7 @@ func TestProcessNodeExecutesBoundedRangeUpdateAcrossLeaseholders(t *testing.T) {
 			t.Fatalf("insert frame tags for %q = %q, want CZ", query, got)
 		}
 	}
-	if _, err := conn.Write(queryFrame("update users set email = 'group@example.com' where id >= 7 and id < 80")); err != nil {
+	if _, err := conn.Write(queryFrame("update users set name = 'grouped' where id >= 7 and id < 80")); err != nil {
 		t.Fatalf("write range update: %v", err)
 	}
 	updateFrames := readFrames(t, conn, 2)
@@ -843,11 +844,11 @@ func TestProcessNodeExecutesBoundedRangeUpdateAcrossLeaseholders(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decode updated row 3: %v", err)
 	}
-	if len(row1) != 3 || string(row1[0]) != "7" || string(row1[1]) != "alice" || string(row1[2]) != "group@example.com" {
-		t.Fatalf("updated row 1 = %q/%q/%q, want 7/alice/group@example.com", row1[0], row1[1], row1[2])
+	if len(row1) != 3 || string(row1[0]) != "7" || string(row1[1]) != "grouped" || string(row1[2]) != "a@example.com" {
+		t.Fatalf("updated row 1 = %q/%q/%q, want 7/grouped/a@example.com", row1[0], row1[1], row1[2])
 	}
-	if len(row2) != 3 || string(row2[0]) != "70" || string(row2[1]) != "bob" || string(row2[2]) != "group@example.com" {
-		t.Fatalf("updated row 2 = %q/%q/%q, want 70/bob/group@example.com", row2[0], row2[1], row2[2])
+	if len(row2) != 3 || string(row2[0]) != "70" || string(row2[1]) != "grouped" || string(row2[2]) != "b@example.com" {
+		t.Fatalf("updated row 2 = %q/%q/%q, want 70/grouped/b@example.com", row2[0], row2[1], row2[2])
 	}
 	if len(row3) != 3 || string(row3[0]) != "90" || string(row3[1]) != "carol" || string(row3[2]) != "c@example.com" {
 		t.Fatalf("updated row 3 = %q/%q/%q, want 90/carol/c@example.com", row3[0], row3[1], row3[2])
@@ -1064,6 +1065,304 @@ func TestProcessNodeRejectsDuplicatePrimaryKeyInsert(t *testing.T) {
 	if len(row) != 3 || string(row[0]) != "41" || string(row[1]) != "alice" || string(row[2]) != "a@example.com" {
 		t.Fatalf("duplicate check row = %q/%q/%q, want 41/alice/a@example.com", row[0], row[1], row[2])
 	}
+}
+
+func TestProcessNodeRejectsDuplicateUniqueIndexInsert(t *testing.T) {
+	rootDir := t.TempDir()
+	bootstrapPath := filepath.Join(rootDir, "bootstrap.json")
+	usersRange := meta.RangeDescriptor{
+		RangeID:    70,
+		Generation: 1,
+		StartKey:   storage.GlobalTablePrimaryPrefix(7),
+		EndKey:     storage.GlobalTablePrimaryPrefix(8),
+		Replicas: []meta.ReplicaDescriptor{
+			{ReplicaID: 71, NodeID: 1, Role: meta.ReplicaRoleVoter},
+			{ReplicaID: 72, NodeID: 2, Role: meta.ReplicaRoleVoter},
+			{ReplicaID: 73, NodeID: 3, Role: meta.ReplicaRoleVoter},
+		},
+		LeaseholderReplicaID: 72,
+	}
+	manifest, err := chronosruntime.BuildBootstrapManifest("cluster-duplicate-unique-insert", []chronosruntime.BootstrapNode{
+		{NodeID: 1, StoreID: 71},
+		{NodeID: 2, StoreID: 72},
+		{NodeID: 3, StoreID: 73},
+	}, []meta.RangeDescriptor{usersRange})
+	if err != nil {
+		t.Fatalf("build bootstrap manifest: %v", err)
+	}
+	if err := chronosruntime.WriteBootstrapManifest(bootstrapPath, manifest); err != nil {
+		t.Fatalf("write bootstrap manifest: %v", err)
+	}
+
+	node1, cancel1, done1 := startProcessNodeForTest(t, ProcessNodeConfig{
+		NodeID:            1,
+		DataDir:           filepath.Join(rootDir, "node-1"),
+		BootstrapPath:     bootstrapPath,
+		PGListenAddr:      "127.0.0.1:0",
+		ObservabilityAddr: "127.0.0.1:0",
+		ControlAddr:       "127.0.0.1:0",
+	})
+	t.Cleanup(func() {
+		cancel1()
+		waitProcessNodeDone(t, done1, "dup-unique-node1")
+	})
+	node2, cancel2, done2 := startProcessNodeForTest(t, ProcessNodeConfig{
+		NodeID:            2,
+		DataDir:           filepath.Join(rootDir, "node-2"),
+		BootstrapPath:     bootstrapPath,
+		PGListenAddr:      "127.0.0.1:0",
+		ObservabilityAddr: "127.0.0.1:0",
+		ControlAddr:       "127.0.0.1:0",
+	})
+	t.Cleanup(func() {
+		cancel2()
+		waitProcessNodeDone(t, done2, "dup-unique-node2")
+	})
+	node3, cancel3, done3 := startProcessNodeForTest(t, ProcessNodeConfig{
+		NodeID:            3,
+		DataDir:           filepath.Join(rootDir, "node-3"),
+		BootstrapPath:     bootstrapPath,
+		PGListenAddr:      "127.0.0.1:0",
+		ObservabilityAddr: "127.0.0.1:0",
+		ControlAddr:       "127.0.0.1:0",
+	})
+	t.Cleanup(func() {
+		cancel3()
+		waitProcessNodeDone(t, done3, "dup-unique-node3")
+	})
+
+	if err := node2.host.Campaign(context.Background(), usersRange.RangeID); err != nil {
+		t.Fatalf("campaign duplicate unique insert leaseholder: %v", err)
+	}
+	waitForRangeLeader(t, node2.host, usersRange.RangeID, 72)
+
+	conn := openPGConn(t, node1.state.PGAddr)
+	defer conn.Close()
+	if _, err := conn.Write(queryFrame("insert into users (id, name, email) values (51, 'alice', 'shared@example.com')")); err != nil {
+		t.Fatalf("write first unique insert: %v", err)
+	}
+	if got := frameTags(readFrames(t, conn, 2)); got != "CZ" {
+		t.Fatalf("first unique insert frame tags = %q, want CZ", got)
+	}
+	if _, err := conn.Write(queryFrame("insert into users (id, name, email) values (52, 'ally', 'shared@example.com')")); err != nil {
+		t.Fatalf("write duplicate unique insert: %v", err)
+	}
+	dupFrames := readFrames(t, conn, 2)
+	if got := frameTags(dupFrames); got != "EZ" {
+		t.Fatalf("duplicate unique insert frame tags = %q, want EZ", got)
+	}
+	if message := decodeErrorMessageFrame(dupFrames[0]); !strings.Contains(message, "users_email_key") {
+		t.Fatalf("duplicate unique insert error = %q, want users_email_key", message)
+	}
+
+	table := usersTableDescriptor(t)
+	waitForDecodedUserRow(t, node3.kv, table, usersPrimaryKey(51), "51", "alice")
+	waitForKeyAbsent(t, node3.kv, usersPrimaryKey(52))
+}
+
+func TestProcessNodeRejectsUniqueIndexConflictOnUpdate(t *testing.T) {
+	rootDir := t.TempDir()
+	bootstrapPath := filepath.Join(rootDir, "bootstrap.json")
+	usersRange := meta.RangeDescriptor{
+		RangeID:    74,
+		Generation: 1,
+		StartKey:   storage.GlobalTablePrimaryPrefix(7),
+		EndKey:     storage.GlobalTablePrimaryPrefix(8),
+		Replicas: []meta.ReplicaDescriptor{
+			{ReplicaID: 75, NodeID: 1, Role: meta.ReplicaRoleVoter},
+			{ReplicaID: 76, NodeID: 2, Role: meta.ReplicaRoleVoter},
+			{ReplicaID: 77, NodeID: 3, Role: meta.ReplicaRoleVoter},
+		},
+		LeaseholderReplicaID: 76,
+	}
+	manifest, err := chronosruntime.BuildBootstrapManifest("cluster-duplicate-unique-update", []chronosruntime.BootstrapNode{
+		{NodeID: 1, StoreID: 75},
+		{NodeID: 2, StoreID: 76},
+		{NodeID: 3, StoreID: 77},
+	}, []meta.RangeDescriptor{usersRange})
+	if err != nil {
+		t.Fatalf("build bootstrap manifest: %v", err)
+	}
+	if err := chronosruntime.WriteBootstrapManifest(bootstrapPath, manifest); err != nil {
+		t.Fatalf("write bootstrap manifest: %v", err)
+	}
+
+	node1, cancel1, done1 := startProcessNodeForTest(t, ProcessNodeConfig{
+		NodeID:            1,
+		DataDir:           filepath.Join(rootDir, "node-1"),
+		BootstrapPath:     bootstrapPath,
+		PGListenAddr:      "127.0.0.1:0",
+		ObservabilityAddr: "127.0.0.1:0",
+		ControlAddr:       "127.0.0.1:0",
+	})
+	t.Cleanup(func() {
+		cancel1()
+		waitProcessNodeDone(t, done1, "dup-update-node1")
+	})
+	node2, cancel2, done2 := startProcessNodeForTest(t, ProcessNodeConfig{
+		NodeID:            2,
+		DataDir:           filepath.Join(rootDir, "node-2"),
+		BootstrapPath:     bootstrapPath,
+		PGListenAddr:      "127.0.0.1:0",
+		ObservabilityAddr: "127.0.0.1:0",
+		ControlAddr:       "127.0.0.1:0",
+	})
+	t.Cleanup(func() {
+		cancel2()
+		waitProcessNodeDone(t, done2, "dup-update-node2")
+	})
+	node3, cancel3, done3 := startProcessNodeForTest(t, ProcessNodeConfig{
+		NodeID:            3,
+		DataDir:           filepath.Join(rootDir, "node-3"),
+		BootstrapPath:     bootstrapPath,
+		PGListenAddr:      "127.0.0.1:0",
+		ObservabilityAddr: "127.0.0.1:0",
+		ControlAddr:       "127.0.0.1:0",
+	})
+	t.Cleanup(func() {
+		cancel3()
+		waitProcessNodeDone(t, done3, "dup-update-node3")
+	})
+
+	if err := node2.host.Campaign(context.Background(), usersRange.RangeID); err != nil {
+		t.Fatalf("campaign duplicate update leaseholder: %v", err)
+	}
+	waitForRangeLeader(t, node2.host, usersRange.RangeID, 76)
+
+	conn := openPGConn(t, node1.state.PGAddr)
+	defer conn.Close()
+	for _, query := range []string{
+		"insert into users (id, name, email) values (61, 'alice', 'alice@example.com')",
+		"insert into users (id, name, email) values (62, 'ally', 'ally@example.com')",
+	} {
+		if _, err := conn.Write(queryFrame(query)); err != nil {
+			t.Fatalf("write seed query %q: %v", query, err)
+		}
+		if got := frameTags(readFrames(t, conn, 2)); got != "CZ" {
+			t.Fatalf("seed query frame tags = %q, want CZ", got)
+		}
+	}
+
+	if _, err := conn.Write(queryFrame("update users set email = 'alice@example.com' where id = 62")); err != nil {
+		t.Fatalf("write duplicate update: %v", err)
+	}
+	dupFrames := readFrames(t, conn, 2)
+	if got := frameTags(dupFrames); got != "EZ" {
+		t.Fatalf("duplicate update frame tags = %q, want EZ", got)
+	}
+	if message := decodeErrorMessageFrame(dupFrames[0]); !strings.Contains(message, "users_email_key") {
+		t.Fatalf("duplicate update error = %q, want users_email_key", message)
+	}
+
+	table := usersTableDescriptor(t)
+	waitForDecodedUserRow(t, node3.kv, table, usersPrimaryKey(62), "62", "ally")
+}
+
+func TestProcessNodeMaintainsSecondaryIndexesAcrossUpdateAndDelete(t *testing.T) {
+	rootDir := t.TempDir()
+	bootstrapPath := filepath.Join(rootDir, "bootstrap.json")
+	usersRange := meta.RangeDescriptor{
+		RangeID:    78,
+		Generation: 1,
+		StartKey:   storage.GlobalTablePrimaryPrefix(7),
+		EndKey:     storage.GlobalTablePrimaryPrefix(8),
+		Replicas: []meta.ReplicaDescriptor{
+			{ReplicaID: 79, NodeID: 1, Role: meta.ReplicaRoleVoter},
+			{ReplicaID: 80, NodeID: 2, Role: meta.ReplicaRoleVoter},
+			{ReplicaID: 81, NodeID: 3, Role: meta.ReplicaRoleVoter},
+		},
+		LeaseholderReplicaID: 80,
+	}
+	manifest, err := chronosruntime.BuildBootstrapManifest("cluster-secondary-index-maintenance", []chronosruntime.BootstrapNode{
+		{NodeID: 1, StoreID: 79},
+		{NodeID: 2, StoreID: 80},
+		{NodeID: 3, StoreID: 81},
+	}, []meta.RangeDescriptor{usersRange})
+	if err != nil {
+		t.Fatalf("build bootstrap manifest: %v", err)
+	}
+	if err := chronosruntime.WriteBootstrapManifest(bootstrapPath, manifest); err != nil {
+		t.Fatalf("write bootstrap manifest: %v", err)
+	}
+
+	node1, cancel1, done1 := startProcessNodeForTest(t, ProcessNodeConfig{
+		NodeID:            1,
+		DataDir:           filepath.Join(rootDir, "node-1"),
+		BootstrapPath:     bootstrapPath,
+		PGListenAddr:      "127.0.0.1:0",
+		ObservabilityAddr: "127.0.0.1:0",
+		ControlAddr:       "127.0.0.1:0",
+	})
+	t.Cleanup(func() {
+		cancel1()
+		waitProcessNodeDone(t, done1, "index-maintenance-node1")
+	})
+	node2, cancel2, done2 := startProcessNodeForTest(t, ProcessNodeConfig{
+		NodeID:            2,
+		DataDir:           filepath.Join(rootDir, "node-2"),
+		BootstrapPath:     bootstrapPath,
+		PGListenAddr:      "127.0.0.1:0",
+		ObservabilityAddr: "127.0.0.1:0",
+		ControlAddr:       "127.0.0.1:0",
+	})
+	t.Cleanup(func() {
+		cancel2()
+		waitProcessNodeDone(t, done2, "index-maintenance-node2")
+	})
+	node3, cancel3, done3 := startProcessNodeForTest(t, ProcessNodeConfig{
+		NodeID:            3,
+		DataDir:           filepath.Join(rootDir, "node-3"),
+		BootstrapPath:     bootstrapPath,
+		PGListenAddr:      "127.0.0.1:0",
+		ObservabilityAddr: "127.0.0.1:0",
+		ControlAddr:       "127.0.0.1:0",
+	})
+	t.Cleanup(func() {
+		cancel3()
+		waitProcessNodeDone(t, done3, "index-maintenance-node3")
+	})
+
+	if err := node2.host.Campaign(context.Background(), usersRange.RangeID); err != nil {
+		t.Fatalf("campaign index maintenance leaseholder: %v", err)
+	}
+	waitForRangeLeader(t, node2.host, usersRange.RangeID, 80)
+
+	conn := openPGConn(t, node1.state.PGAddr)
+	defer conn.Close()
+	if _, err := conn.Write(queryFrame("insert into users (id, name, email) values (71, 'alice', 'a@example.com')")); err != nil {
+		t.Fatalf("write maintenance insert: %v", err)
+	}
+	if got := frameTags(readFrames(t, conn, 2)); got != "CZ" {
+		t.Fatalf("maintenance insert frame tags = %q, want CZ", got)
+	}
+
+	oldNameKey, oldEmailKey, oldPK := usersIndexKeys(t, 71, "alice", "a@example.com")
+	waitForKeyValue(t, node3.kv, oldNameKey, oldPK)
+	waitForKeyValue(t, node3.kv, oldEmailKey, oldPK)
+
+	if _, err := conn.Write(queryFrame("update users set name = 'ally', email = 'ally@example.com' where id = 71")); err != nil {
+		t.Fatalf("write maintenance update: %v", err)
+	}
+	if got := frameTags(readFrames(t, conn, 2)); got != "CZ" {
+		t.Fatalf("maintenance update frame tags = %q, want CZ", got)
+	}
+
+	newNameKey, newEmailKey, newPK := usersIndexKeys(t, 71, "ally", "ally@example.com")
+	waitForKeyAbsent(t, node3.kv, oldNameKey)
+	waitForKeyAbsent(t, node3.kv, oldEmailKey)
+	waitForKeyValue(t, node3.kv, newNameKey, newPK)
+	waitForKeyValue(t, node3.kv, newEmailKey, newPK)
+
+	if _, err := conn.Write(queryFrame("delete from users where id = 71")); err != nil {
+		t.Fatalf("write maintenance delete: %v", err)
+	}
+	if got := frameTags(readFrames(t, conn, 2)); got != "CZ" {
+		t.Fatalf("maintenance delete frame tags = %q, want CZ", got)
+	}
+
+	waitForKeyAbsent(t, node3.kv, usersPrimaryKey(71))
+	waitForKeyAbsent(t, node3.kv, newNameKey)
+	waitForKeyAbsent(t, node3.kv, newEmailKey)
 }
 
 func TestProcessNodeExecutesDMLReturning(t *testing.T) {
@@ -2876,6 +3175,20 @@ func waitForKeyAbsent(t *testing.T, kv *kvClient, key []byte) {
 	t.Fatalf("key %q is still present", key)
 }
 
+func waitForKeyValue(t *testing.T, kv *kvClient, key, want []byte) {
+	t.Helper()
+
+	deadline := time.Now().Add(4 * time.Second)
+	for time.Now().Before(deadline) {
+		value, found, err := kv.GetLatest(context.Background(), key)
+		if err == nil && found && bytes.Equal(value, want) {
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for key %q to equal %v", key, want)
+}
+
 func waitForDecodedUserRow(t *testing.T, kv *kvClient, table chronossql.TableDescriptor, key []byte, wantID, wantName string) {
 	t.Helper()
 
@@ -2909,6 +3222,52 @@ func mustInsertPlan(t *testing.T, planner *chronossql.Planner, query string) chr
 		t.Fatalf("plan type = %T, want InsertPlan", plan)
 	}
 	return insert
+}
+
+func usersTableDescriptor(t *testing.T) chronossql.TableDescriptor {
+	t.Helper()
+
+	catalog, err := DefaultCatalog()
+	if err != nil {
+		t.Fatalf("build default catalog: %v", err)
+	}
+	table, err := catalog.ResolveTable("users")
+	if err != nil {
+		t.Fatalf("resolve users table: %v", err)
+	}
+	return table
+}
+
+func usersIndexKeys(t *testing.T, id int64, name, email string) ([]byte, []byte, []byte) {
+	t.Helper()
+
+	table := usersTableDescriptor(t)
+	row := map[string]chronossql.Value{
+		"id":    {Type: chronossql.ColumnTypeInt, Int64: id},
+		"name":  {Type: chronossql.ColumnTypeString, String: name},
+		"email": {Type: chronossql.ColumnTypeString, String: email},
+	}
+	entries, err := chronossql.BuildIndexEntries(table, row)
+	if err != nil {
+		t.Fatalf("build index entries: %v", err)
+	}
+	encodedPK, err := chronossql.EncodePrimaryKeyBytes(table, row)
+	if err != nil {
+		t.Fatalf("encode primary key bytes: %v", err)
+	}
+	var nameKey, emailKey []byte
+	for _, entry := range entries {
+		switch entry.Index.Name {
+		case "users_name_idx":
+			nameKey = append([]byte(nil), entry.Key...)
+		case "users_email_key":
+			emailKey = append([]byte(nil), entry.Key...)
+		}
+	}
+	if len(nameKey) == 0 || len(emailKey) == 0 {
+		t.Fatalf("missing expected users secondary index keys: name=%q email=%q", nameKey, emailKey)
+	}
+	return nameKey, emailKey, encodedPK
 }
 
 func usersPrimaryKey(id int64) []byte {

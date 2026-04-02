@@ -724,10 +724,20 @@ Design constraints:
     for later executor work
   - catalog and runtime tests now verify index validation, lookup helpers, and
     persisted descriptor reload across host restart
-- [ ] 14.8 Add unique-key enforcement and index maintenance
+- [x] 14.8 Add unique-key enforcement and index maintenance
   for insert/update/delete paths so secondary index rows are written and
   removed transactionally and uniqueness violations surface as stable SQL
   errors instead of runtime corruption
+  - secondary index key encoding is now explicit and catalog-driven, with
+    unique and non-unique entries colocated under each table span without
+    breaking primary-row scan classification
+  - insert, upsert, update, and delete now stage row and secondary-index
+    intents together through the same transaction path, so index maintenance,
+    recovery, and lock release share one correctness boundary
+  - unique secondary indexes now reject conflicting inserts and updates with
+    stable `23505` errors naming the violated constraint, while process-node
+    tests verify duplicate insert, duplicate update, and index rewrite/remove
+    behavior across nodes
 - [ ] 14.9 Add `INSERT ... ON CONFLICT DO NOTHING/DO UPDATE`
   only after index metadata and uniqueness enforcement exist, including
   conflict-target resolution, `excluded` row semantics, and correct retry

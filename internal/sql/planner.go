@@ -1291,12 +1291,7 @@ func bindReturningProjection(table TableDescriptor, clause string) ([]ColumnDesc
 }
 
 func encodeInsert(table TableDescriptor, row map[string]Value) ([]byte, []byte, error) {
-	pkColumn, err := table.PrimaryKeyColumn()
-	if err != nil {
-		return nil, nil, err
-	}
-	pkValue := row[canonicalName(pkColumn.Name)]
-	encodedPK, err := encodePrimaryKeyValue(pkValue)
+	encodedPK, err := EncodePrimaryKeyBytes(table, row)
 	if err != nil {
 		return nil, nil, err
 	}

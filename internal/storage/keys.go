@@ -172,6 +172,17 @@ func GlobalTablePrimaryKey(tableID uint64, encodedPrimaryKey []byte) []byte {
 	return appendEscapedBytes(GlobalTablePrimaryPrefix(tableID), encodedPrimaryKey)
 }
 
+// IsGlobalTablePrimaryRowKey reports whether a logical key refers to a primary
+// row for the given table rather than a colocated secondary-index entry.
+func IsGlobalTablePrimaryRowKey(tableID uint64, logicalKey []byte) bool {
+	prefix := GlobalTablePrimaryPrefix(tableID)
+	if !bytes.HasPrefix(logicalKey, prefix) {
+		return false
+	}
+	suffix := logicalKey[len(prefix):]
+	return len(suffix) > 0 && !bytes.HasPrefix(suffix, []byte{0x00, 0x00})
+}
+
 // GlobalTxnRecordKey returns the logical key for one durable transaction record.
 func GlobalTxnRecordKey(txnID TxnID) []byte {
 	return append(bytes.Clone(prefixSystemTxn), txnID[:]...)
@@ -202,14 +213,40 @@ func GlobalTableDescriptorKey(tableID uint64) []byte {
 	return append(bytes.Clone(prefixSystemDescTable), encodeUint64(tableID)...)
 }
 
-// GlobalTableIndexKey returns the logical MVCC key for a table secondary index row.
-func GlobalTableIndexKey(tableID, indexID uint64, encodedIndexKey []byte) []byte {
-	dst := append(bytes.Clone(prefixMVCCGlobal), []byte("table/")...)
-	dst = append(dst, encodeUint64(tableID)...)
-	dst = append(dst, []byte("/index/")...)
+// GlobalTableIndexPrefix returns the logical prefix shared by one table/index.
+// Index keys live under the table's /primary/ span so existing table ranges
+// own both primary rows and index rows for the same table.
+func GlobalTableIndexPrefix(tableID, indexID uint64) []byte {
+	dst := GlobalTablePrimaryPrefix(tableID)
+	dst = append(dst, 0x00, 0x00)
+	dst = append(dst, []byte("index/")...)
 	dst = append(dst, encodeUint64(indexID)...)
-	dst = append(dst, '/')
-	return appendEscapedBytes(dst, encodedIndexKey)
+	return append(dst, '/')
+}
+
+// GlobalTableUniqueIndexKey returns the logical key for one unique secondary
+// index value. The MVCC payload stores the owning primary key bytes.
+func GlobalTableUniqueIndexKey(tableID, indexID uint64, encodedIndexKey []byte) []byte {
+	return appendEscapedBytes(GlobalTableIndexPrefix(tableID, indexID), encodedIndexKey)
+}
+
+// GlobalTableSecondaryIndexPrefix returns the logical prefix shared by all
+// non-unique entries for one encoded index value.
+func GlobalTableSecondaryIndexPrefix(tableID, indexID uint64, encodedIndexKey []byte) []byte {
+	dst := appendEscapedBytes(GlobalTableIndexPrefix(tableID, indexID), encodedIndexKey)
+	return append(dst, 0x00, 0x00)
+}
+
+// GlobalTableSecondaryIndexKey returns the logical key for one non-unique
+// secondary index row identified by index value plus primary key.
+func GlobalTableSecondaryIndexKey(tableID, indexID uint64, encodedIndexKey, encodedPrimaryKey []byte) []byte {
+	return appendEscapedBytes(GlobalTableSecondaryIndexPrefix(tableID, indexID, encodedIndexKey), encodedPrimaryKey)
+}
+
+// GlobalTableIndexKey returns the logical key for a unique secondary index
+// value. New code should prefer the more explicit GlobalTableUniqueIndexKey.
+func GlobalTableIndexKey(tableID, indexID uint64, encodedIndexKey []byte) []byte {
+	return GlobalTableUniqueIndexKey(tableID, indexID, encodedIndexKey)
 }
 
 // EncodeMVCCVersionKey returns the on-disk key for a committed MVCC version.
