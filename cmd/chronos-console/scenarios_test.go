@@ -1,10 +1,12 @@
 package main
 
 import (
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/VenkatGGG/ChronosDb/internal/adminapi"
 	"github.com/VenkatGGG/ChronosDb/internal/systemtest"
 )
 
@@ -44,6 +46,10 @@ func TestScenarioStoreListAndLoad(t *testing.T) {
 	}
 	if detail.Handoff == nil || detail.Handoff.Manifest.Scenario != "crash-during-staging" {
 		t.Fatalf("handoff = %+v, want crash-during-staging handoff", detail.Handoff)
+	}
+
+	if _, err := store.LoadRun("missing-run"); !errors.Is(err, adminapi.ErrScenarioRunNotFound) {
+		t.Fatalf("missing run err = %v, want ErrScenarioRunNotFound", err)
 	}
 }
 

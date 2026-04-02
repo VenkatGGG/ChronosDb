@@ -33,6 +33,31 @@ func TestPlanningHandlerDescribeSelect(t *testing.T) {
 	}
 }
 
+func TestPlanningHandlerDescribePreparedQuery(t *testing.T) {
+	t.Parallel()
+
+	handler := newPlanningHandler(t)
+	prepared, err := handler.DescribePreparedQuery("select id, name from users where id = $1")
+	if err != nil {
+		t.Fatalf("describe prepared query: %v", err)
+	}
+	if prepared.Query != "select id, name from users where id = $1" {
+		t.Fatalf("prepared query = %q", prepared.Query)
+	}
+	if len(prepared.ParameterTypes) != 1 || prepared.ParameterTypes[0] != chronossql.ColumnTypeInt {
+		t.Fatalf("parameter types = %+v, want [int]", prepared.ParameterTypes)
+	}
+	if len(prepared.ParameterTypeOIDs) != 1 || prepared.ParameterTypeOIDs[0] != 20 {
+		t.Fatalf("parameter oid = %+v, want [20]", prepared.ParameterTypeOIDs)
+	}
+	if len(prepared.Result.Fields) != 2 || prepared.Result.Fields[0].Name != "id" || prepared.Result.Fields[1].Name != "name" {
+		t.Fatalf("prepared fields = %+v, want [id name]", prepared.Result.Fields)
+	}
+	if prepared.Result.CommandTag != "SELECT 0" {
+		t.Fatalf("prepared command tag = %q, want SELECT 0", prepared.Result.CommandTag)
+	}
+}
+
 func TestPlanningHandlerDescribeInsert(t *testing.T) {
 	t.Parallel()
 

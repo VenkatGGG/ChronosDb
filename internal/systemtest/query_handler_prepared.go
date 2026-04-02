@@ -11,7 +11,7 @@ import (
 )
 
 func (h *runtimeQueryHandler) PrepareQuery(_ context.Context, _ *pgwire.Session, query string, parameterTypeOIDs []uint32) (pgwire.PreparedQueryDescription, error) {
-	prepared, err := h.planning.PrepareQuery(query)
+	prepared, err := h.planning.DescribePreparedQuery(query)
 	if err != nil {
 		return pgwire.PreparedQueryDescription{}, err
 	}

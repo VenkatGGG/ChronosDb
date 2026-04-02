@@ -24,6 +24,9 @@ var ErrNodeNotFound = errors.New("node not found")
 // ErrRangeNotFound reports that the requested range is absent from the merged snapshot.
 var ErrRangeNotFound = errors.New("range not found")
 
+// ErrScenarioRunNotFound reports that the requested retained scenario run is absent.
+var ErrScenarioRunNotFound = errors.New("scenario run not found")
+
 // NodeTarget identifies one node admin endpoint for snapshot polling.
 type NodeTarget struct {
 	NodeID  uint64

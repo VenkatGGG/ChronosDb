@@ -54,10 +54,10 @@ func (h *PlanningHandler) DescribeQuery(query string) (chronossql.OptimizedPlan,
 	return optimized, flow, result, nil
 }
 
-// PrepareQuery validates one positional-parameter SQL statement and returns its
-// parameter contract plus the row/command metadata clients need during Parse
-// and Describe.
-func (h *PlanningHandler) PrepareQuery(query string) (PreparedQueryDescription, error) {
+// DescribePreparedQuery validates one positional-parameter SQL statement and
+// returns the planner-owned parameter contract plus the row/command metadata
+// clients need during Parse and Describe.
+func (h *PlanningHandler) DescribePreparedQuery(query string) (PreparedQueryDescription, error) {
 	if h == nil || h.planner == nil || h.flowPlanner == nil {
 		return PreparedQueryDescription{}, Error{
 			Severity: "ERROR",

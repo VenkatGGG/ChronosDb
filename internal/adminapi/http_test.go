@@ -11,6 +11,7 @@ import (
 type stubScenarioReader struct {
 	runs   []ScenarioRunView
 	detail ScenarioRunDetail
+	err    error
 }
 
 func (s stubScenarioReader) ListRuns() ([]ScenarioRunView, error) {
@@ -18,6 +19,9 @@ func (s stubScenarioReader) ListRuns() ([]ScenarioRunView, error) {
 }
 
 func (s stubScenarioReader) LoadRun(string) (ScenarioRunDetail, error) {
+	if s.err != nil {
+		return ScenarioRunDetail{}, s.err
+	}
 	return s.detail, nil
 }
 
@@ -298,6 +302,18 @@ func TestHTTPHandlerServesMergedClusterAPI(t *testing.T) {
 		}
 		if len(detail.LiveCorrelation.Ranges) != 1 || detail.LiveCorrelation.Ranges[0].RangeID != 11 {
 			t.Fatalf("live correlation ranges = %+v, want range 11", detail.LiveCorrelation.Ranges)
+		}
+	})
+
+	t.Run("scenario detail missing", func(t *testing.T) {
+		missingHandler := NewHTTPHandlerWithOptions(aggregator, HTTPHandlerOptions{
+			Scenarios: stubScenarioReader{err: ErrScenarioRunNotFound},
+		})
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/scenarios/missing-run", nil)
+		missingHandler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("scenario detail missing status = %d, want %d", rec.Code, http.StatusNotFound)
 		}
 	})
 }

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -55,8 +56,19 @@ func (s *scenarioStore) LoadRun(runID string) (adminapi.ScenarioRunDetail, error
 		return adminapi.ScenarioRunDetail{}, fmt.Errorf("console: scenario run id must not be empty")
 	}
 	root := filepath.Join(s.root, runID)
+	if info, err := os.Stat(root); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return adminapi.ScenarioRunDetail{}, fmt.Errorf("%w: %s", adminapi.ErrScenarioRunNotFound, runID)
+		}
+		return adminapi.ScenarioRunDetail{}, err
+	} else if !info.IsDir() {
+		return adminapi.ScenarioRunDetail{}, fmt.Errorf("%w: %s", adminapi.ErrScenarioRunNotFound, runID)
+	}
 	artifacts, err := systemtest.LoadRunArtifacts(root)
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return adminapi.ScenarioRunDetail{}, fmt.Errorf("%w: %s", adminapi.ErrScenarioRunNotFound, runID)
+		}
 		return adminapi.ScenarioRunDetail{}, err
 	}
 	detail := adminapi.ScenarioRunDetail{
@@ -77,6 +89,9 @@ func (s *scenarioStore) LoadRun(runID string) (adminapi.ScenarioRunDetail, error
 func (s *scenarioStore) loadRunView(runID string) (adminapi.ScenarioRunView, error) {
 	artifacts, err := systemtest.LoadRunArtifacts(filepath.Join(s.root, runID))
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return adminapi.ScenarioRunView{}, fmt.Errorf("%w: %s", adminapi.ErrScenarioRunNotFound, runID)
+		}
 		return adminapi.ScenarioRunView{}, err
 	}
 	return viewFromArtifacts(runID, artifacts), nil

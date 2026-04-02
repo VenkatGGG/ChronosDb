@@ -173,7 +173,11 @@ func NewHTTPHandlerWithOptions(aggregator *Aggregator, opts HTTPHandlerOptions) 
 			}
 			detail, err := opts.Scenarios.LoadRun(runID)
 			if err != nil {
-				http.Error(w, err.Error(), http.StatusBadGateway)
+				status := http.StatusBadGateway
+				if errors.Is(err, ErrScenarioRunNotFound) {
+					status = http.StatusNotFound
+				}
+				http.Error(w, err.Error(), status)
 				return
 			}
 			correlation, err := aggregator.CorrelateScenarioDetail(r.Context(), detail)

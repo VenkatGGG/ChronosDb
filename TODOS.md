@@ -868,10 +868,10 @@ Design constraints:
   by introducing an explicit startup authenticator seam, propagating the
   authenticated principal into the session, and teaching the pgwire client/test
   stack how to satisfy the new handshake
-- [ ] 15.2 Fix scenario run HTTP contracts
+- [x] 15.2 Fix scenario run HTTP contracts
   so missing retained runs map to `404` at the console API boundary instead of
   surfacing as generic `502` backend failures
-- [ ] 15.3 Unify prepared-query API shape
+- [x] 15.3 Unify prepared-query API shape
   by renaming or reshaping the planner-only helper so it no longer looks like
   the live extended-protocol `PrepareQuery` contract while carrying fewer
   inputs and guarantees
@@ -890,7 +890,7 @@ Design constraints:
 
 Execution order:
 
-- [ ] Milestone 15A: contract correctness
+- [x] Milestone 15A: contract correctness
   Complete `15.2` and `15.3` first so HTTP and prepared-query callers stop
   depending on misleading contracts before broader refactors begin.
 - [ ] Milestone 15B: auth and trust boundaries
