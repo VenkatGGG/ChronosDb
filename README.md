@@ -11,6 +11,8 @@ Implementation is underway. The repository already contains:
 - the full Phase 3 through Phase 8 distributed systems core, locality, and hardening work
 - the Phase 11 cluster console with live nodes, ranges, key lookup, events, and retained scenario browsing
 - the Phase 12 topology drilldowns and the seeded `chronos-demo` cluster launcher
+- the Phase 13 live runtime integration and seeded distributed SQL execution path
+- the Phase 14 CRUD/app-compatibility surface, including `DELETE`, `UPDATE`, `UPSERT`, `ON CONFLICT`, extended pgwire, and a repeatable workload harness
 
 The repo still follows a plan-first discipline: protocol and scope changes
 should be written down before the corresponding code lands.
@@ -135,7 +137,8 @@ flowchart TD
 9. **Phase 8**: hardening, simulation, and external chaos runner integration. Status: complete for current scope.
 10. **Phase 11**: cluster console and real-time operations UI. Status: complete.
 11. **Phase 12**: topology drilldowns, operational forensics, and the seeded demo launcher. Status: complete.
-12. **Phase 13**: live runtime integration and end-to-end SQL execution. Status: in progress.
+12. **Phase 13**: live runtime integration and end-to-end SQL execution. Status: complete.
+13. **Phase 14**: basic SQL CRUD and app compatibility. Status: complete.
 
 ## Quick Demo
 
@@ -145,6 +148,7 @@ Build the binaries and UI:
 go build -o bin/chronos-demo ./cmd/chronos-demo
 go build -o bin/chronos-node ./cmd/chronos-node
 go build -o bin/chronos-console ./cmd/chronos-console
+go build -o bin/chronos-appcompat ./cmd/chronos-appcompat
 cd ui && npm install && npm run build && cd ..
 ```
 
@@ -158,6 +162,18 @@ Then open [http://127.0.0.1:8080](http://127.0.0.1:8080) and connect with:
 
 ```bash
 psql "postgresql://chronos@127.0.0.1:26257/postgres?sslmode=disable"
+```
+
+Run the prepared-statement CRUD workload harness against the seeded cluster:
+
+```bash
+./bin/chronos-appcompat -pg-addr 127.0.0.1:26257 -iterations 10
+```
+
+Or have the seeded demo run it automatically on startup:
+
+```bash
+./bin/chronos-demo -ui-dir ./ui/dist -app-compat -app-compat-iterations 10
 ```
 
 ## Phase 8 Evidence

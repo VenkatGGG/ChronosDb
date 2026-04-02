@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/VenkatGGG/ChronosDb/internal/appcompat"
 	"github.com/VenkatGGG/ChronosDb/internal/adminapi"
 	"github.com/VenkatGGG/ChronosDb/internal/demo"
 	"github.com/VenkatGGG/ChronosDb/internal/pgclient"
@@ -28,12 +30,18 @@ func main() {
 		consoleListenAddr string
 		uiDir             string
 		runSmokeTest      bool
+		runAppCompat      bool
+		appCompatIters    int
+		appCompatReport   string
 	)
 	flag.StringVar(&dataRoot, "data-root", "", "demo data root (defaults to a fresh temp dir)")
 	flag.StringVar(&clusterID, "cluster-id", demo.DefaultClusterID, "demo cluster identifier")
 	flag.StringVar(&consoleListenAddr, "console-listen", demo.DefaultConsoleAddress, "console listen address")
 	flag.StringVar(&uiDir, "ui-dir", "", "optional built UI directory to serve with the console")
 	flag.BoolVar(&runSmokeTest, "smoke-test", true, "run the seeded insert/select smoke test after startup")
+	flag.BoolVar(&runAppCompat, "app-compat", false, "run the prepared CRUD app-compatibility workload after startup")
+	flag.IntVar(&appCompatIters, "app-compat-iterations", 10, "number of workload iterations when -app-compat is set")
+	flag.StringVar(&appCompatReport, "app-compat-report-json", "", "optional JSON report path for the app-compatibility workload")
 	flag.Parse()
 
 	if dataRoot == "" {
@@ -153,6 +161,29 @@ func main() {
 		}
 		cancel()
 	}
+	if runAppCompat {
+		workloadCtx, cancel := context.WithTimeout(ctx, time.Duration(appCompatIters+10)*time.Second)
+		report, err := appcompat.Run(workloadCtx, appcompat.Config{
+			Addr:       nodeConfigs[0].PGListenAddr,
+			Iterations: appCompatIters,
+		})
+		cancel()
+		if err != nil {
+			log.Fatal(err)
+		}
+		if appCompatReport != "" {
+			if err := writeAppCompatReport(appCompatReport, report); err != nil {
+				log.Fatal(err)
+			}
+		}
+		log.Print(strings.TrimRight(appcompat.SummaryString(report), "\n"))
+		if appCompatReport != "" {
+			log.Printf("app-compat report: %s", appCompatReport)
+		}
+		if !report.Compatible {
+			log.Fatal("app-compat workload failed")
+		}
+	}
 
 	log.Printf("chronos demo data root: %s", dataRoot)
 	log.Printf("console: http://%s", consoleListenAddr)
@@ -161,6 +192,7 @@ func main() {
 	}
 	log.Printf("psql: psql \"postgresql://chronos@%s/postgres?sslmode=disable\"", nodeConfigs[0].PGListenAddr)
 	log.Printf("seeded smoke queries are loaded across split users/orders ranges")
+	log.Printf("app compatibility: ./bin/chronos-appcompat -pg-addr %s -iterations 10", nodeConfigs[0].PGListenAddr)
 
 	<-ctx.Done()
 
@@ -238,6 +270,17 @@ func retryQuery(ctx context.Context, client *pgclient.Client, sql string) (pgcli
 		case <-ticker.C:
 		}
 	}
+}
+
+func writeAppCompatReport(path string, report appcompat.Report) error {
+	payload, err := json.MarshalIndent(report, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(path, append(payload, '\n'), 0o644); err != nil {
+		return err
+	}
+	return nil
 }
 
 func buildHandler(api http.Handler, uiDir string) (http.Handler, error) {

@@ -629,7 +629,7 @@ Design constraints:
   end-to-end through pgwire, planner/binder, txn coordinator, KV runtime, and
   storage
 
-### [ ] Phase 14 Planned Execution
+### [x] Phase 14 Planned Execution
 
 - [x] 14.1 Add MVCC tombstones and delete-intent semantics
   by extending the row/value model so the latest committed version can
@@ -780,10 +780,20 @@ Design constraints:
   - extended pgwire coverage now exercises prepared `ON CONFLICT ... DO
     UPDATE ... RETURNING`, `DELETE ... RETURNING`, and the final visibility
     checks a CRUD client actually depends on
-- [ ] 14.12 Add a realistic app-compatibility demo and benchmark harness
+- [x] 14.12 Add a realistic app-compatibility demo and benchmark harness
   that runs a seeded CRUD workload through prepared statements, reports command
   latency and error classes, and gives the project a repeatable "can my app do
   basic SQL here?" answer instead of relying on ad hoc `psql` checks
+  - `internal/appcompat` now runs a deterministic prepared-statement CRUD
+    workload over insert/select/update/upsert/explicit-tx update/conflict
+    update/scan/delete/absence verification and emits latency plus SQLSTATE
+    class summaries per operation
+  - the new `chronos-appcompat` CLI can target any running node, emit a
+    human-readable PASS/FAIL summary, and optionally persist a JSON report for
+    retained benchmark evidence
+  - the seeded `chronos-demo` launcher can now run the same workload on
+    startup, so the repository has a one-command "can my CRUD app do basic SQL
+    here?" path instead of forcing manual `psql` sessions
 
 Execution milestones:
 
@@ -803,18 +813,18 @@ Execution milestones:
   Complete `14.7`, `14.8`, and `14.9` together so full `ON CONFLICT` only
   ships after descriptor metadata, index maintenance, and uniqueness checks are
   already transactionally correct.
-- [ ] Milestone E: Proof and usability
+- [x] Milestone E: Proof and usability
   Complete `14.11` and `14.12` together so the phase closes with both
   correctness evidence and a repeatable app-compatibility demo instead of
   feature claims alone.
 
 Phase gates:
 
-- [ ] Gate 14A: no direct key deletion anywhere in the executor or runtime;
+- [x] Gate 14A: no direct key deletion anywhere in the executor or runtime;
   all delete behavior must go through tombstone-aware MVCC semantics
-- [ ] Gate 14B: every new DML statement must support explicit transactions
+- [x] Gate 14B: every new DML statement must support explicit transactions
   before it is considered complete
-- [ ] Gate 14C: no feature may be marked done until it has both unit coverage
+- [x] Gate 14C: no feature may be marked done until it has both unit coverage
   and end-to-end pgwire coverage against the seeded multi-node demo
 - [x] Gate 14D: full `ON CONFLICT` must not begin implementation before unique
   index metadata and maintenance are already live
