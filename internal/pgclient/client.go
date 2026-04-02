@@ -225,14 +225,11 @@ func decodeError(frame []byte) error {
 		fields[code] = value
 		payload = rest
 	}
-	message := fields['M']
-	if message == "" {
-		message = "unknown pgwire error"
+	return ServerError{
+		Severity: fields['S'],
+		Code:     fields['C'],
+		Message:  fields['M'],
 	}
-	if sqlState := fields['C']; sqlState != "" {
-		return fmt.Errorf("%s (%s)", message, sqlState)
-	}
-	return fmt.Errorf("%s", message)
 }
 
 func readCString(payload []byte) (string, []byte, error) {
