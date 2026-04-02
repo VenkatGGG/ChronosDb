@@ -18,6 +18,13 @@ type QueryHandler interface {
 	HandleSimpleQuery(ctx context.Context, session *Session, query string) (QueryResult, error)
 }
 
+// PreparedQueryHandler extends the query handler with the Parse/Bind/Execute
+// flow needed by PostgreSQL clients that use the extended protocol.
+type PreparedQueryHandler interface {
+	PrepareQuery(ctx context.Context, session *Session, query string, parameterTypeOIDs []uint32) (PreparedQueryDescription, error)
+	ExecutePreparedQuery(ctx context.Context, session *Session, prepared PreparedQueryDescription, params []BoundParameter) (QueryResult, error)
+}
+
 // SessionCloseHandler allows handlers to clean up per-session resources when a
 // connection terminates.
 type SessionCloseHandler interface {
@@ -47,13 +54,24 @@ type Session struct {
 	serverParameters map[string]string
 	handler          QueryHandler
 	txStatus         TxStatus
+	prepared         map[string]PreparedQueryDescription
+	portals          map[string]boundPortal
+	discardUntilSync bool
+}
+
+type boundPortal struct {
+	prepared         PreparedQueryDescription
+	parameters       []BoundParameter
+	resultFormatCode []uint16
 }
 
 // NewSession constructs a session with default PostgreSQL bootstrap parameters.
 func NewSession(handler QueryHandler) *Session {
 	return &Session{
-		handler: handler,
+		handler:  handler,
 		txStatus: TxIdle,
+		prepared: make(map[string]PreparedQueryDescription),
+		portals:  make(map[string]boundPortal),
 		serverParameters: map[string]string{
 			"client_encoding": "UTF8",
 			"server_version":  "ChronosDB dev",
@@ -97,6 +115,17 @@ func (s *Session) Close(ctx context.Context) error {
 
 // HandleFrontend processes one frontend message into backend frames.
 func (s *Session) HandleFrontend(ctx context.Context, msg FrontendMessage) (frames [][]byte, close bool, err error) {
+	if s.discardUntilSync {
+		switch msg.(type) {
+		case Sync:
+			s.discardUntilSync = false
+			return [][]byte{EncodeReadyForQuery(s.txStatus)}, false, nil
+		case Terminate:
+			return nil, true, nil
+		default:
+			return nil, false, nil
+		}
+	}
 	switch typed := msg.(type) {
 	case Query:
 		if s.handler == nil {
@@ -124,11 +153,152 @@ func (s *Session) HandleFrontend(ctx context.Context, msg FrontendMessage) (fram
 		frames = append(frames, EncodeCommandComplete(result.CommandTag))
 		frames = append(frames, EncodeReadyForQuery(s.txStatus))
 		return frames, false, nil
+	case Parse:
+		handler, ok := s.handler.(PreparedQueryHandler)
+		if !ok {
+			return s.extendedError(Error{
+				Severity: "ERROR",
+				Code:     "0A000",
+				Message:  "extended query protocol is not configured",
+			}), false, nil
+		}
+		prepared, handlerErr := handler.PrepareQuery(ctx, s, typed.Query, typed.ParameterTypeOIDs)
+		if handlerErr != nil {
+			return s.extendedError(asWireError(handlerErr)), false, nil
+		}
+		s.prepared[typed.Name] = prepared
+		return [][]byte{EncodeParseComplete()}, false, nil
+	case Bind:
+		prepared, ok := s.prepared[typed.StatementName]
+		if !ok {
+			return s.extendedError(Error{
+				Severity: "ERROR",
+				Code:     "26000",
+				Message:  "prepared statement does not exist",
+			}), false, nil
+		}
+		if len(prepared.ParameterTypeOIDs) != len(typed.Parameters) {
+			return s.extendedError(Error{
+				Severity: "ERROR",
+				Code:     "08P01",
+				Message:  "bind parameter count does not match prepared statement",
+			}), false, nil
+		}
+		for _, code := range typed.ResultFormatCodes {
+			if code != 0 {
+				return s.extendedError(Error{
+					Severity: "ERROR",
+					Code:     "0A000",
+					Message:  "binary result formats are unsupported",
+				}), false, nil
+			}
+		}
+		s.portals[typed.PortalName] = boundPortal{
+			prepared:         prepared,
+			parameters:       append([]BoundParameter(nil), typed.Parameters...),
+			resultFormatCode: append([]uint16(nil), typed.ResultFormatCodes...),
+		}
+		return [][]byte{EncodeBindComplete()}, false, nil
+	case Describe:
+		switch typed.ObjectType {
+		case 'S':
+			prepared, ok := s.prepared[typed.Name]
+			if !ok {
+				return s.extendedError(Error{
+					Severity: "ERROR",
+					Code:     "26000",
+					Message:  "prepared statement does not exist",
+				}), false, nil
+			}
+			frames := [][]byte{EncodeParameterDescription(prepared.ParameterTypeOIDs)}
+			if len(prepared.Result.Fields) == 0 {
+				frames = append(frames, EncodeNoData())
+			} else {
+				frames = append(frames, EncodeRowDescription(prepared.Result.Fields))
+			}
+			return frames, false, nil
+		case 'P':
+			portal, ok := s.portals[typed.Name]
+			if !ok {
+				return s.extendedError(Error{
+					Severity: "ERROR",
+					Code:     "34000",
+					Message:  "portal does not exist",
+				}), false, nil
+			}
+			if len(portal.prepared.Result.Fields) == 0 {
+				return [][]byte{EncodeNoData()}, false, nil
+			}
+			return [][]byte{EncodeRowDescription(portal.prepared.Result.Fields)}, false, nil
+		default:
+			return s.extendedError(Error{
+				Severity: "ERROR",
+				Code:     "08P01",
+				Message:  "Describe target must be a statement or portal",
+			}), false, nil
+		}
+	case Execute:
+		if typed.MaxRows != 0 {
+			return s.extendedError(Error{
+				Severity: "ERROR",
+				Code:     "0A000",
+				Message:  "partial portal execution is unsupported",
+			}), false, nil
+		}
+		portal, ok := s.portals[typed.PortalName]
+		if !ok {
+			return s.extendedError(Error{
+				Severity: "ERROR",
+				Code:     "34000",
+				Message:  "portal does not exist",
+			}), false, nil
+		}
+		handler, ok := s.handler.(PreparedQueryHandler)
+		if !ok {
+			return s.extendedError(Error{
+				Severity: "ERROR",
+				Code:     "0A000",
+				Message:  "extended query protocol is not configured",
+			}), false, nil
+		}
+		result, handlerErr := handler.ExecutePreparedQuery(ctx, s, portal.prepared, portal.parameters)
+		if handlerErr != nil {
+			return s.extendedError(asWireError(handlerErr)), false, nil
+		}
+		frames = make([][]byte, 0, len(result.Rows)+1)
+		for _, row := range result.Rows {
+			frames = append(frames, EncodeDataRow(row))
+		}
+		frames = append(frames, EncodeCommandComplete(result.CommandTag))
+		return frames, false, nil
+	case Close:
+		switch typed.ObjectType {
+		case 'S':
+			delete(s.prepared, typed.Name)
+		case 'P':
+			delete(s.portals, typed.Name)
+		default:
+			return s.extendedError(Error{
+				Severity: "ERROR",
+				Code:     "08P01",
+				Message:  "Close target must be a statement or portal",
+			}), false, nil
+		}
+		return [][]byte{EncodeCloseComplete()}, false, nil
+	case Sync:
+		return [][]byte{EncodeReadyForQuery(s.txStatus)}, false, nil
+	case Flush:
+		return nil, false, nil
 	case Terminate:
 		return nil, true, nil
 	default:
 		return nil, false, fmt.Errorf("pgwire: unsupported frontend message %T", msg)
 	}
+}
+
+func (s *Session) extendedError(err Error) [][]byte {
+	s.discardUntilSync = true
+	return [][]byte{EncodeErrorResponse(err.Severity, err.Code, err.Message)}
 }
 
 func errorFrames(err Error, status TxStatus) [][]byte {

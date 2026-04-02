@@ -48,6 +48,68 @@ func TestDecodeFrontendQuery(t *testing.T) {
 	}
 }
 
+func TestDecodeFrontendParse(t *testing.T) {
+	t.Parallel()
+
+	var payload bytes.Buffer
+	writeCString(&payload, "stmt1")
+	writeCString(&payload, "select id from users where id = $1")
+	writeUint16(&payload, 1)
+	writeUint32(&payload, 20)
+
+	frame := append([]byte{'P'}, encodeLengthPrefixedPayload(payload.Bytes())...)
+	msg, err := DecodeFrontendMessage(bytes.NewReader(frame))
+	if err != nil {
+		t.Fatalf("decode parse: %v", err)
+	}
+	parse, ok := msg.(Parse)
+	if !ok {
+		t.Fatalf("frontend message type = %T, want Parse", msg)
+	}
+	if parse.Name != "stmt1" || parse.Query != "select id from users where id = $1" {
+		t.Fatalf("unexpected parse payload: %+v", parse)
+	}
+	if len(parse.ParameterTypeOIDs) != 1 || parse.ParameterTypeOIDs[0] != 20 {
+		t.Fatalf("parameter oids = %#v, want [20]", parse.ParameterTypeOIDs)
+	}
+}
+
+func TestDecodeFrontendBind(t *testing.T) {
+	t.Parallel()
+
+	var payload bytes.Buffer
+	writeCString(&payload, "")
+	writeCString(&payload, "stmt1")
+	writeUint16(&payload, 1)
+	writeUint16(&payload, 0)
+	writeUint16(&payload, 2)
+	writeInt32(&payload, 1)
+	payload.WriteByte('7')
+	writeInt32(&payload, 5)
+	payload.WriteString("alice")
+	writeUint16(&payload, 1)
+	writeUint16(&payload, 0)
+
+	frame := append([]byte{'B'}, encodeLengthPrefixedPayload(payload.Bytes())...)
+	msg, err := DecodeFrontendMessage(bytes.NewReader(frame))
+	if err != nil {
+		t.Fatalf("decode bind: %v", err)
+	}
+	bind, ok := msg.(Bind)
+	if !ok {
+		t.Fatalf("frontend message type = %T, want Bind", msg)
+	}
+	if bind.StatementName != "stmt1" {
+		t.Fatalf("statement name = %q, want stmt1", bind.StatementName)
+	}
+	if len(bind.Parameters) != 2 || string(bind.Parameters[0].Value) != "7" || string(bind.Parameters[1].Value) != "alice" {
+		t.Fatalf("parameters = %#v", bind.Parameters)
+	}
+	if len(bind.ResultFormatCodes) != 1 || bind.ResultFormatCodes[0] != 0 {
+		t.Fatalf("result formats = %#v, want [0]", bind.ResultFormatCodes)
+	}
+}
+
 func TestEncodeDataRow(t *testing.T) {
 	t.Parallel()
 

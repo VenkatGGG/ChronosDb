@@ -700,9 +700,18 @@ Design constraints:
   - unit and end-to-end pgwire tests now cover `INSERT RETURNING`, `UPDATE
     RETURNING`, `DELETE RETURNING`, and `UPSERT RETURNING`, including returned
     column order and final visibility after delete
-- [ ] 14.6 Add prepared statements and extended pgwire execution
+- [x] 14.6 Add prepared statements and extended pgwire execution
   by implementing parse/bind/execute, typed parameters, statement/portal state,
   and the DML executor hooks required by real client libraries and ORMs
+  - the pgwire codec and session now support `Parse`, `Bind`, `Describe`,
+    `Execute`, `Close`, `Sync`, and `Flush`, including statement/portal state,
+    parameter description frames, and correct extended-query sync behavior
+  - the SQL front door now infers typed positional parameters, prepares sample
+    descriptions without concrete values, and renders bound queries safely back
+    through the live planner/executor path
+  - the runtime query handler, process-node wrapper, and internal pgclient now
+    execute real extended-protocol statements end-to-end against the live
+    runtime, with unit/session coverage plus process-node client tests
 - [ ] 14.7 Add catalog support for secondary index descriptors and uniqueness metadata
   so table descriptors can declare future unique and non-unique indexes even if
   the first executor slice only uses them for validation and conflict-planning

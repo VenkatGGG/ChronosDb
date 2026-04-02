@@ -16,3 +16,8 @@ func NewParser() *Parser {
 func (p *Parser) Parse(query string) (vsqlparser.Statement, error) {
 	return p.parser.Parse(query)
 }
+
+// Parse2 parses one SQL statement and returns the discovered bind-variable set.
+func (p *Parser) Parse2(query string) (vsqlparser.Statement, vsqlparser.BindVars, error) {
+	return p.parser.Parse2(query)
+}

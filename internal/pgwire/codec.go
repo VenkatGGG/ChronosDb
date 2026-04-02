@@ -42,10 +42,64 @@ type Query struct {
 	SQL string
 }
 
+// Parse registers a prepared statement definition.
+type Parse struct {
+	Name              string
+	Query             string
+	ParameterTypeOIDs []uint32
+}
+
+// BoundParameter is one raw bind value supplied through the extended protocol.
+type BoundParameter struct {
+	FormatCode uint16
+	Value      []byte
+	IsNull     bool
+}
+
+// Bind binds concrete parameters to a prepared statement and stores the result
+// in a named or unnamed portal.
+type Bind struct {
+	PortalName        string
+	StatementName     string
+	Parameters        []BoundParameter
+	ResultFormatCodes []uint16
+}
+
+// Describe asks for statement or portal metadata.
+type Describe struct {
+	ObjectType byte
+	Name       string
+}
+
+// Execute runs one named or unnamed portal.
+type Execute struct {
+	PortalName string
+	MaxRows    uint32
+}
+
+// Close drops one named or unnamed prepared statement or portal.
+type Close struct {
+	ObjectType byte
+	Name       string
+}
+
+// Sync ends one extended-query cycle and emits ReadyForQuery.
+type Sync struct{}
+
+// Flush requests that the backend flush any buffered responses.
+type Flush struct{}
+
 // Terminate requests session shutdown.
 type Terminate struct{}
 
 func (Query) isFrontendMessage()     {}
+func (Parse) isFrontendMessage()     {}
+func (Bind) isFrontendMessage()      {}
+func (Describe) isFrontendMessage()  {}
+func (Execute) isFrontendMessage()   {}
+func (Close) isFrontendMessage()     {}
+func (Sync) isFrontendMessage()      {}
+func (Flush) isFrontendMessage()     {}
 func (Terminate) isFrontendMessage() {}
 
 // FieldDescription is the row-description metadata for one output column.
@@ -105,6 +159,125 @@ func DecodeFrontendMessage(r io.Reader) (FrontendMessage, error) {
 			return nil, fmt.Errorf("pgwire: malformed Query message")
 		}
 		return Query{SQL: string(sql)}, nil
+	case 'P':
+		name, rest, err := decodeCString(payload)
+		if err != nil {
+			return nil, fmt.Errorf("pgwire: malformed Parse message: %w", err)
+		}
+		query, rest, err := decodeCString(rest)
+		if err != nil {
+			return nil, fmt.Errorf("pgwire: malformed Parse message: %w", err)
+		}
+		if len(rest) < 2 {
+			return nil, fmt.Errorf("pgwire: malformed Parse message")
+		}
+		count := int(binary.BigEndian.Uint16(rest[:2]))
+		rest = rest[2:]
+		if len(rest) != count*4 {
+			return nil, fmt.Errorf("pgwire: malformed Parse message parameter type list")
+		}
+		oids := make([]uint32, 0, count)
+		for i := 0; i < count; i++ {
+			oids = append(oids, binary.BigEndian.Uint32(rest[i*4:(i+1)*4]))
+		}
+		return Parse{Name: name, Query: query, ParameterTypeOIDs: oids}, nil
+	case 'B':
+		portalName, rest, err := decodeCString(payload)
+		if err != nil {
+			return nil, fmt.Errorf("pgwire: malformed Bind message: %w", err)
+		}
+		statementName, rest, err := decodeCString(rest)
+		if err != nil {
+			return nil, fmt.Errorf("pgwire: malformed Bind message: %w", err)
+		}
+		if len(rest) < 2 {
+			return nil, fmt.Errorf("pgwire: malformed Bind message")
+		}
+		formatCount := int(binary.BigEndian.Uint16(rest[:2]))
+		rest = rest[2:]
+		if len(rest) < formatCount*2+2 {
+			return nil, fmt.Errorf("pgwire: malformed Bind format codes")
+		}
+		paramFormats := make([]uint16, 0, formatCount)
+		for i := 0; i < formatCount; i++ {
+			paramFormats = append(paramFormats, binary.BigEndian.Uint16(rest[:2]))
+			rest = rest[2:]
+		}
+		paramCount := int(binary.BigEndian.Uint16(rest[:2]))
+		rest = rest[2:]
+		params := make([]BoundParameter, 0, paramCount)
+		for i := 0; i < paramCount; i++ {
+			if len(rest) < 4 {
+				return nil, fmt.Errorf("pgwire: malformed Bind parameter payload")
+			}
+			size := int(int32(binary.BigEndian.Uint32(rest[:4])))
+			rest = rest[4:]
+			param := BoundParameter{FormatCode: resolveFormatCode(paramFormats, i)}
+			if size < 0 {
+				param.IsNull = true
+				params = append(params, param)
+				continue
+			}
+			if len(rest) < size {
+				return nil, fmt.Errorf("pgwire: malformed Bind parameter value")
+			}
+			param.Value = append([]byte(nil), rest[:size]...)
+			rest = rest[size:]
+			params = append(params, param)
+		}
+		if len(rest) < 2 {
+			return nil, fmt.Errorf("pgwire: malformed Bind result formats")
+		}
+		resultFormatCount := int(binary.BigEndian.Uint16(rest[:2]))
+		rest = rest[2:]
+		if len(rest) != resultFormatCount*2 {
+			return nil, fmt.Errorf("pgwire: malformed Bind result format payload")
+		}
+		resultFormats := make([]uint16, 0, resultFormatCount)
+		for i := 0; i < resultFormatCount; i++ {
+			resultFormats = append(resultFormats, binary.BigEndian.Uint16(rest[:2]))
+			rest = rest[2:]
+		}
+		return Bind{
+			PortalName:        portalName,
+			StatementName:     statementName,
+			Parameters:        params,
+			ResultFormatCodes: resultFormats,
+		}, nil
+	case 'D':
+		if len(payload) < 2 {
+			return nil, fmt.Errorf("pgwire: malformed Describe message")
+		}
+		name, rest, err := decodeCString(payload[1:])
+		if err != nil || len(rest) != 0 {
+			return nil, fmt.Errorf("pgwire: malformed Describe message")
+		}
+		return Describe{ObjectType: payload[0], Name: name}, nil
+	case 'E':
+		portalName, rest, err := decodeCString(payload)
+		if err != nil || len(rest) != 4 {
+			return nil, fmt.Errorf("pgwire: malformed Execute message")
+		}
+		return Execute{PortalName: portalName, MaxRows: binary.BigEndian.Uint32(rest)}, nil
+	case 'C':
+		if len(payload) < 2 {
+			return nil, fmt.Errorf("pgwire: malformed Close message")
+		}
+		name, rest, err := decodeCString(payload[1:])
+		if err != nil || len(rest) != 0 {
+			return nil, fmt.Errorf("pgwire: malformed Close message")
+		}
+		return Close{ObjectType: payload[0], Name: name}, nil
+	case 'S':
+		if len(payload) != 0 {
+			return nil, fmt.Errorf("pgwire: Sync message must be empty")
+		}
+		return Sync{}, nil
+	case 'H':
+		if len(payload) != 0 {
+			return nil, fmt.Errorf("pgwire: Flush message must be empty")
+		}
+		return Flush{}, nil
 	case 'X':
 		if len(payload) != 0 {
 			return nil, fmt.Errorf("pgwire: Terminate message must be empty")
@@ -120,6 +293,21 @@ func EncodeAuthenticationOK() []byte {
 	var payload bytes.Buffer
 	writeInt32(&payload, 0)
 	return encodeTagged('R', payload.Bytes())
+}
+
+// EncodeParseComplete encodes the server ParseComplete response.
+func EncodeParseComplete() []byte {
+	return encodeTagged('1', nil)
+}
+
+// EncodeBindComplete encodes the server BindComplete response.
+func EncodeBindComplete() []byte {
+	return encodeTagged('2', nil)
+}
+
+// EncodeCloseComplete encodes the server CloseComplete response.
+func EncodeCloseComplete() []byte {
+	return encodeTagged('3', nil)
 }
 
 // EncodeParameterStatus announces one server parameter.
@@ -150,6 +338,21 @@ func EncodeErrorResponse(severity, code, message string) []byte {
 	writeField(&payload, 'M', message)
 	payload.WriteByte(0)
 	return encodeTagged('E', payload.Bytes())
+}
+
+// EncodeParameterDescription describes prepared-statement parameter OIDs.
+func EncodeParameterDescription(typeOIDs []uint32) []byte {
+	var payload bytes.Buffer
+	writeUint16(&payload, uint16(len(typeOIDs)))
+	for _, oid := range typeOIDs {
+		writeUint32(&payload, oid)
+	}
+	return encodeTagged('t', payload.Bytes())
+}
+
+// EncodeNoData signals that a statement or portal does not return row data.
+func EncodeNoData() []byte {
+	return encodeTagged('n', nil)
 }
 
 // EncodeRowDescription encodes output-column metadata.
@@ -232,6 +435,28 @@ func parseCStringFields(payload []byte) ([]string, error) {
 		start = i + 1
 	}
 	return nil, fmt.Errorf("pgwire: unterminated cstring field")
+}
+
+func decodeCString(payload []byte) (string, []byte, error) {
+	idx := bytes.IndexByte(payload, 0)
+	if idx < 0 {
+		return "", nil, fmt.Errorf("missing cstring terminator")
+	}
+	return string(payload[:idx]), payload[idx+1:], nil
+}
+
+func resolveFormatCode(formatCodes []uint16, index int) uint16 {
+	switch len(formatCodes) {
+	case 0:
+		return 0
+	case 1:
+		return formatCodes[0]
+	default:
+		if index < len(formatCodes) {
+			return formatCodes[index]
+		}
+		return 0
+	}
 }
 
 func encodeTagged(tag byte, payload []byte) []byte {

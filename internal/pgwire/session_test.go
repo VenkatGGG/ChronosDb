@@ -3,6 +3,8 @@ package pgwire
 import (
 	"context"
 	"testing"
+
+	chronossql "github.com/VenkatGGG/ChronosDb/internal/sql"
 )
 
 func TestSessionHandleStartup(t *testing.T) {
@@ -116,10 +118,81 @@ func TestSessionHandleTerminate(t *testing.T) {
 	}
 }
 
+func TestSessionHandleExtendedQueryCycle(t *testing.T) {
+	t.Parallel()
+
+	handler := staticHandler{
+		prepared: PreparedQueryDescription{
+			Query:             "select id, name from users where id = $1",
+			ParameterTypes:    []chronossql.ColumnType{chronossql.ColumnTypeInt},
+			ParameterTypeOIDs: []uint32{20},
+			Result: QueryResult{
+				Fields: []FieldDescription{
+					{Name: "id", DataTypeOID: 20, TypeSize: 8},
+					{Name: "name", DataTypeOID: 25, TypeSize: -1},
+				},
+			},
+		},
+		executed: QueryResult{
+			Rows:       [][][]byte{{[]byte("7"), []byte("alice")}},
+			CommandTag: "SELECT 1",
+		},
+	}
+	session := NewSession(handler)
+
+	frames, close, err := session.HandleFrontend(context.Background(), Parse{
+		Name:  "stmt1",
+		Query: "select id, name from users where id = $1",
+	})
+	if err != nil || close {
+		t.Fatalf("parse: err=%v close=%v", err, close)
+	}
+	if len(frames) != 1 || frames[0][0] != '1' {
+		t.Fatalf("unexpected parse frames")
+	}
+
+	frames, close, err = session.HandleFrontend(context.Background(), Bind{
+		StatementName: "stmt1",
+		Parameters:    []BoundParameter{{FormatCode: 0, Value: []byte("7")}},
+	})
+	if err != nil || close {
+		t.Fatalf("bind: err=%v close=%v", err, close)
+	}
+	if len(frames) != 1 || frames[0][0] != '2' {
+		t.Fatalf("unexpected bind frames")
+	}
+
+	frames, close, err = session.HandleFrontend(context.Background(), Describe{ObjectType: 'S', Name: "stmt1"})
+	if err != nil || close {
+		t.Fatalf("describe statement: err=%v close=%v", err, close)
+	}
+	if len(frames) != 2 || frames[0][0] != 't' || frames[1][0] != 'T' {
+		t.Fatalf("unexpected statement describe frames")
+	}
+
+	frames, close, err = session.HandleFrontend(context.Background(), Execute{})
+	if err != nil || close {
+		t.Fatalf("execute: err=%v close=%v", err, close)
+	}
+	if len(frames) != 2 || frames[0][0] != 'D' || frames[1][0] != 'C' {
+		t.Fatalf("unexpected execute frames")
+	}
+
+	frames, close, err = session.HandleFrontend(context.Background(), Sync{})
+	if err != nil || close {
+		t.Fatalf("sync: err=%v close=%v", err, close)
+	}
+	if len(frames) != 1 || frames[0][0] != 'Z' {
+		t.Fatalf("unexpected sync frames")
+	}
+}
+
 type staticHandler struct {
-	result QueryResult
-	err    error
-	setTx  TxStatus
+	result   QueryResult
+	err      error
+	setTx    TxStatus
+	prepared PreparedQueryDescription
+	executed QueryResult
 }
 
 func (h staticHandler) HandleSimpleQuery(_ context.Context, session *Session, _ string) (QueryResult, error) {
@@ -130,4 +203,18 @@ func (h staticHandler) HandleSimpleQuery(_ context.Context, session *Session, _ 
 		return QueryResult{}, h.err
 	}
 	return h.result, nil
+}
+
+func (h staticHandler) PrepareQuery(_ context.Context, _ *Session, _ string, _ []uint32) (PreparedQueryDescription, error) {
+	if h.err != nil {
+		return PreparedQueryDescription{}, h.err
+	}
+	return h.prepared, nil
+}
+
+func (h staticHandler) ExecutePreparedQuery(_ context.Context, _ *Session, _ PreparedQueryDescription, _ []BoundParameter) (QueryResult, error) {
+	if h.err != nil {
+		return QueryResult{}, h.err
+	}
+	return h.executed, nil
 }

@@ -13,6 +13,15 @@ type PlanningHandler struct {
 	flowPlanner *chronossql.FlowPlanner
 }
 
+// PreparedQueryDescription captures the wire-visible metadata for one prepared
+// statement before a Bind/Execute cycle supplies concrete values.
+type PreparedQueryDescription struct {
+	Query             string
+	ParameterTypes    []chronossql.ColumnType
+	ParameterTypeOIDs []uint32
+	Result            QueryResult
+}
+
 // NewPlanningHandler constructs a pgwire simple-query handler backed by the SQL layer.
 func NewPlanningHandler(planner *chronossql.Planner, flowPlanner *chronossql.FlowPlanner) *PlanningHandler {
 	return &PlanningHandler{
@@ -43,6 +52,42 @@ func (h *PlanningHandler) DescribeQuery(query string) (chronossql.OptimizedPlan,
 		return chronossql.OptimizedPlan{}, chronossql.FlowPlan{}, QueryResult{}, wrapPlannerError(err)
 	}
 	return optimized, flow, result, nil
+}
+
+// PrepareQuery validates one positional-parameter SQL statement and returns its
+// parameter contract plus the row/command metadata clients need during Parse
+// and Describe.
+func (h *PlanningHandler) PrepareQuery(query string) (PreparedQueryDescription, error) {
+	if h == nil || h.planner == nil || h.flowPlanner == nil {
+		return PreparedQueryDescription{}, Error{
+			Severity: "ERROR",
+			Code:     "08006",
+			Message:  "planning handler is not configured",
+		}
+	}
+	prepared, err := h.planner.Prepare(query)
+	if err != nil {
+		return PreparedQueryDescription{}, wrapPlannerError(err)
+	}
+	sampleQuery, err := chronossql.RenderPreparedQuery(query, chronossql.SamplePreparedValues(prepared.ParameterTypes))
+	if err != nil {
+		return PreparedQueryDescription{}, wrapPlannerError(err)
+	}
+	_, _, result, err := h.DescribeQuery(sampleQuery)
+	if err != nil {
+		return PreparedQueryDescription{}, err
+	}
+	oids := make([]uint32, 0, len(prepared.ParameterTypes))
+	for _, columnType := range prepared.ParameterTypes {
+		oid, _ := postgresType(columnType)
+		oids = append(oids, oid)
+	}
+	return PreparedQueryDescription{
+		Query:             prepared.OriginalQuery,
+		ParameterTypes:    prepared.ParameterTypes,
+		ParameterTypeOIDs: oids,
+		Result:            result,
+	}, nil
 }
 
 // HandleSimpleQuery validates the SQL statement, derives its flow plan, and
