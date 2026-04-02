@@ -217,6 +217,117 @@ func TestClientExtendedQueryAgainstProcessNode(t *testing.T) {
 	}
 }
 
+func TestClientExtendedQuerySupportsConflictAndDeleteReturning(t *testing.T) {
+	t.Parallel()
+
+	catalog, err := systemtest.DefaultCatalog()
+	if err != nil {
+		t.Fatalf("default catalog: %v", err)
+	}
+	rootDir := t.TempDir()
+	bootstrapPath := filepath.Join(rootDir, "bootstrap.json")
+	manifest, err := chronosruntime.BuildBootstrapManifest("pgclient-extended-conflict-test", []chronosruntime.BootstrapNode{
+		{NodeID: 1, StoreID: 1},
+	}, []meta.RangeDescriptor{
+		{
+			RangeID:    11,
+			Generation: 1,
+			StartKey:   storage.GlobalTablePrimaryPrefix(7),
+			EndKey:     storage.GlobalTablePrimaryPrefix(8),
+			Replicas: []meta.ReplicaDescriptor{
+				{ReplicaID: 1, NodeID: 1, Role: meta.ReplicaRoleVoter},
+			},
+			LeaseholderReplicaID: 1,
+		},
+	})
+	if err != nil {
+		t.Fatalf("build bootstrap manifest: %v", err)
+	}
+	if err := chronosruntime.WriteBootstrapManifest(bootstrapPath, manifest); err != nil {
+		t.Fatalf("write bootstrap manifest: %v", err)
+	}
+	node, err := systemtest.NewProcessNode(systemtest.ProcessNodeConfig{
+		NodeID:            1,
+		ClusterID:         manifest.ClusterID,
+		StoreID:           1,
+		BootstrapPath:     bootstrapPath,
+		DataDir:           filepath.Join(rootDir, "node-1"),
+		PGListenAddr:      "127.0.0.1:0",
+		ObservabilityAddr: "127.0.0.1:0",
+		ControlAddr:       "127.0.0.1:0",
+		Catalog:           catalog,
+	})
+	if err != nil {
+		t.Fatalf("new process node: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- node.Run(ctx)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case err := <-done:
+			if err != nil && err != context.Canceled {
+				t.Fatalf("node run: %v", err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for node shutdown")
+		}
+	})
+
+	state := waitForNodeState(t, node)
+	dialCtx, dialCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer dialCancel()
+	client, err := pgclient.Dial(dialCtx, state.PGAddr, "chronos")
+	if err != nil {
+		t.Fatalf("dial pgclient: %v", err)
+	}
+	defer client.Close()
+
+	queryCtx, queryCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer queryCancel()
+
+	insertResult, err := client.ExtendedQuery(queryCtx, "insert into users (id, name, email) values ($1, $2, $3)", int64(21), "alice", "shared@example.com")
+	if err != nil {
+		t.Fatalf("extended seed insert: %v", err)
+	}
+	if insertResult.CommandTag != "INSERT 0 1" {
+		t.Fatalf("seed insert tag = %q, want INSERT 0 1", insertResult.CommandTag)
+	}
+
+	conflictResult, err := client.ExtendedQuery(queryCtx, "insert into users (id, name, email) values ($1, $2, $3) on conflict (email) do update set name = excluded.name returning id, name, email", int64(22), "ally", "shared@example.com")
+	if err != nil {
+		t.Fatalf("extended on conflict: %v", err)
+	}
+	if conflictResult.CommandTag != "INSERT 0 1" {
+		t.Fatalf("on conflict tag = %q, want INSERT 0 1", conflictResult.CommandTag)
+	}
+	if len(conflictResult.Rows) != 1 || len(conflictResult.Rows[0]) != 3 || conflictResult.Rows[0][0] != "21" || conflictResult.Rows[0][1] != "ally" || conflictResult.Rows[0][2] != "shared@example.com" {
+		t.Fatalf("on conflict rows = %#v, want [[21 ally shared@example.com]]", conflictResult.Rows)
+	}
+
+	deleteResult, err := client.ExtendedQuery(queryCtx, "delete from users where id = $1 returning id, name", int64(21))
+	if err != nil {
+		t.Fatalf("extended delete: %v", err)
+	}
+	if deleteResult.CommandTag != "DELETE 1" {
+		t.Fatalf("delete tag = %q, want DELETE 1", deleteResult.CommandTag)
+	}
+	if len(deleteResult.Rows) != 1 || len(deleteResult.Rows[0]) != 2 || deleteResult.Rows[0][0] != "21" || deleteResult.Rows[0][1] != "ally" {
+		t.Fatalf("delete returning rows = %#v, want [[21 ally]]", deleteResult.Rows)
+	}
+
+	selectResult, err := client.ExtendedQuery(queryCtx, "select id, name from users where id = $1", int64(21))
+	if err != nil {
+		t.Fatalf("extended final select: %v", err)
+	}
+	if len(selectResult.Rows) != 0 {
+		t.Fatalf("final rows = %#v, want none", selectResult.Rows)
+	}
+}
+
 func waitForNodeState(t *testing.T, node *systemtest.ProcessNode) systemtest.ProcessNodeState {
 	t.Helper()
 

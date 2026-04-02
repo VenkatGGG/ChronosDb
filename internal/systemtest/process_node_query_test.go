@@ -3449,6 +3449,289 @@ func TestProcessNodeCommitsDeleteTombstoneInBackground(t *testing.T) {
 	waitForKeyAbsent(t, node1.kv, insertAlice.Key)
 }
 
+func TestProcessNodeRestartPersistsUpdateAndDeleteResults(t *testing.T) {
+	rootDir := t.TempDir()
+	bootstrapPath := filepath.Join(rootDir, "bootstrap.json")
+	usersRange := meta.RangeDescriptor{
+		RangeID:    98,
+		Generation: 1,
+		StartKey:   storage.GlobalTablePrimaryPrefix(7),
+		EndKey:     storage.GlobalTablePrimaryPrefix(8),
+		Replicas: []meta.ReplicaDescriptor{
+			{ReplicaID: 101, NodeID: 1, Role: meta.ReplicaRoleVoter},
+			{ReplicaID: 102, NodeID: 2, Role: meta.ReplicaRoleVoter},
+			{ReplicaID: 103, NodeID: 3, Role: meta.ReplicaRoleVoter},
+		},
+		LeaseholderReplicaID: 102,
+	}
+	manifest, err := chronosruntime.BuildBootstrapManifest("cluster-restart-update-delete", []chronosruntime.BootstrapNode{
+		{NodeID: 1, StoreID: 101},
+		{NodeID: 2, StoreID: 102},
+		{NodeID: 3, StoreID: 103},
+	}, []meta.RangeDescriptor{usersRange})
+	if err != nil {
+		t.Fatalf("build bootstrap manifest: %v", err)
+	}
+	if err := chronosruntime.WriteBootstrapManifest(bootstrapPath, manifest); err != nil {
+		t.Fatalf("write bootstrap manifest: %v", err)
+	}
+
+	node1, cancel1, done1 := startProcessNodeForTest(t, ProcessNodeConfig{
+		NodeID:            1,
+		DataDir:           filepath.Join(rootDir, "node-1"),
+		BootstrapPath:     bootstrapPath,
+		PGListenAddr:      "127.0.0.1:0",
+		ObservabilityAddr: "127.0.0.1:0",
+		ControlAddr:       "127.0.0.1:0",
+	})
+	t.Cleanup(func() {
+		cancel1()
+		waitProcessNodeDone(t, done1, "restart-update-delete-node1")
+	})
+	node2DataDir := filepath.Join(rootDir, "node-2")
+	node2, cancel2, done2 := startProcessNodeForTest(t, ProcessNodeConfig{
+		NodeID:            2,
+		DataDir:           node2DataDir,
+		BootstrapPath:     bootstrapPath,
+		PGListenAddr:      "127.0.0.1:0",
+		ObservabilityAddr: "127.0.0.1:0",
+		ControlAddr:       "127.0.0.1:0",
+	})
+	_, cancel3, done3 := startProcessNodeForTest(t, ProcessNodeConfig{
+		NodeID:            3,
+		DataDir:           filepath.Join(rootDir, "node-3"),
+		BootstrapPath:     bootstrapPath,
+		PGListenAddr:      "127.0.0.1:0",
+		ObservabilityAddr: "127.0.0.1:0",
+		ControlAddr:       "127.0.0.1:0",
+	})
+	t.Cleanup(func() {
+		cancel3()
+		waitProcessNodeDone(t, done3, "restart-update-delete-node3")
+	})
+
+	if err := node2.host.Campaign(context.Background(), usersRange.RangeID); err != nil {
+		t.Fatalf("campaign restart update/delete leaseholder: %v", err)
+	}
+	waitForRangeLeader(t, node2.host, usersRange.RangeID, 102)
+
+	conn := openPGConn(t, node1.state.PGAddr)
+	defer conn.Close()
+	if _, err := conn.Write(queryFrame("insert into users (id, name, email) values (121, 'alice', 'a@example.com')")); err != nil {
+		t.Fatalf("write seed insert: %v", err)
+	}
+	if got := frameTags(readFrames(t, conn, 2)); got != "CZ" {
+		t.Fatalf("seed insert frame tags = %q, want CZ", got)
+	}
+	if _, err := conn.Write(queryFrame("update users set name = 'ally', email = 'ally@example.com' where id = 121")); err != nil {
+		t.Fatalf("write update before restart: %v", err)
+	}
+	if got := frameTags(readFrames(t, conn, 2)); got != "CZ" {
+		t.Fatalf("update-before-restart frame tags = %q, want CZ", got)
+	}
+
+	cancel2()
+	waitProcessNodeDone(t, done2, "restart-update-delete-node2-initial")
+
+	restarted1, cancelRestart1, doneRestart1 := startProcessNodeForTest(t, ProcessNodeConfig{
+		NodeID:            2,
+		DataDir:           node2DataDir,
+		BootstrapPath:     bootstrapPath,
+		PGListenAddr:      "127.0.0.1:0",
+		ObservabilityAddr: "127.0.0.1:0",
+		ControlAddr:       "127.0.0.1:0",
+	})
+	waitForReplicatedUserRow(t, restarted1, usersPrimaryKey(121))
+	waitForAnyRangeLeader(t, restarted1.host, usersRange.RangeID)
+
+	selectConn := openPGConn(t, restarted1.state.PGAddr)
+	if _, err := selectConn.Write(queryFrame("select id, name, email from users where id = 121")); err != nil {
+		t.Fatalf("write updated-row select after restart: %v", err)
+	}
+	selectFrames := readFrames(t, selectConn, 4)
+	if got := frameTags(selectFrames); got != "TDCZ" {
+		t.Fatalf("updated-row restart frames = %q, want TDCZ", got)
+	}
+	selectRow, err := decodeDataRowFrame(selectFrames[1])
+	if err != nil {
+		t.Fatalf("decode updated-row restart row: %v", err)
+	}
+	if len(selectRow) != 3 || string(selectRow[0]) != "121" || string(selectRow[1]) != "ally" || string(selectRow[2]) != "ally@example.com" {
+		t.Fatalf("updated-row restart row = %q/%q/%q, want 121/ally/ally@example.com", selectRow[0], selectRow[1], selectRow[2])
+	}
+	selectConn.Close()
+
+	deleteConn := openPGConn(t, restarted1.state.PGAddr)
+	if _, err := deleteConn.Write(queryFrame("delete from users where id = 121")); err != nil {
+		t.Fatalf("write delete before second restart: %v", err)
+	}
+	if got := frameTags(readFrames(t, deleteConn, 2)); got != "CZ" {
+		t.Fatalf("delete-before-restart frame tags = %q, want CZ", got)
+	}
+	deleteConn.Close()
+
+	cancelRestart1()
+	waitProcessNodeDone(t, doneRestart1, "restart-update-delete-node2-first-restart")
+
+	restarted2, cancelRestart2, doneRestart2 := startProcessNodeForTest(t, ProcessNodeConfig{
+		NodeID:            2,
+		DataDir:           node2DataDir,
+		BootstrapPath:     bootstrapPath,
+		PGListenAddr:      "127.0.0.1:0",
+		ObservabilityAddr: "127.0.0.1:0",
+		ControlAddr:       "127.0.0.1:0",
+	})
+	t.Cleanup(func() {
+		cancelRestart2()
+		waitProcessNodeDone(t, doneRestart2, "restart-update-delete-node2-second-restart")
+	})
+	waitForAnyRangeLeader(t, restarted2.host, usersRange.RangeID)
+	waitForKeyAbsent(t, restarted2.kv, usersPrimaryKey(121))
+
+	finalConn := openPGConn(t, restarted2.state.PGAddr)
+	defer finalConn.Close()
+	if _, err := finalConn.Write(queryFrame("select id, name from users where id = 121")); err != nil {
+		t.Fatalf("write final absent select: %v", err)
+	}
+	finalFrames := readFrames(t, finalConn, 3)
+	if got := frameTags(finalFrames); got != "TCZ" {
+		t.Fatalf("final absent restart frames = %q, want TCZ", got)
+	}
+}
+
+func TestProcessNodePreservesReadsAcrossLeaseMovement(t *testing.T) {
+	rootDir := t.TempDir()
+	bootstrapPath := filepath.Join(rootDir, "bootstrap.json")
+	usersRange := meta.RangeDescriptor{
+		RangeID:    99,
+		Generation: 1,
+		StartKey:   storage.GlobalTablePrimaryPrefix(7),
+		EndKey:     storage.GlobalTablePrimaryPrefix(8),
+		Replicas: []meta.ReplicaDescriptor{
+			{ReplicaID: 111, NodeID: 1, Role: meta.ReplicaRoleVoter},
+			{ReplicaID: 112, NodeID: 2, Role: meta.ReplicaRoleVoter},
+			{ReplicaID: 113, NodeID: 3, Role: meta.ReplicaRoleVoter},
+		},
+		LeaseholderReplicaID: 112,
+	}
+	manifest, err := chronosruntime.BuildBootstrapManifest("cluster-lease-movement-read-visibility", []chronosruntime.BootstrapNode{
+		{NodeID: 1, StoreID: 111},
+		{NodeID: 2, StoreID: 112},
+		{NodeID: 3, StoreID: 113},
+	}, []meta.RangeDescriptor{usersRange})
+	if err != nil {
+		t.Fatalf("build bootstrap manifest: %v", err)
+	}
+	if err := chronosruntime.WriteBootstrapManifest(bootstrapPath, manifest); err != nil {
+		t.Fatalf("write bootstrap manifest: %v", err)
+	}
+
+	node1, cancel1, done1 := startProcessNodeForTest(t, ProcessNodeConfig{
+		NodeID:            1,
+		DataDir:           filepath.Join(rootDir, "node-1"),
+		BootstrapPath:     bootstrapPath,
+		PGListenAddr:      "127.0.0.1:0",
+		ObservabilityAddr: "127.0.0.1:0",
+		ControlAddr:       "127.0.0.1:0",
+	})
+	t.Cleanup(func() {
+		cancel1()
+		waitProcessNodeDone(t, done1, "lease-move-node1")
+	})
+	node2, cancel2, done2 := startProcessNodeForTest(t, ProcessNodeConfig{
+		NodeID:            2,
+		DataDir:           filepath.Join(rootDir, "node-2"),
+		BootstrapPath:     bootstrapPath,
+		PGListenAddr:      "127.0.0.1:0",
+		ObservabilityAddr: "127.0.0.1:0",
+		ControlAddr:       "127.0.0.1:0",
+	})
+	t.Cleanup(func() {
+		cancel2()
+		waitProcessNodeDone(t, done2, "lease-move-node2")
+	})
+	node3, cancel3, done3 := startProcessNodeForTest(t, ProcessNodeConfig{
+		NodeID:            3,
+		DataDir:           filepath.Join(rootDir, "node-3"),
+		BootstrapPath:     bootstrapPath,
+		PGListenAddr:      "127.0.0.1:0",
+		ObservabilityAddr: "127.0.0.1:0",
+		ControlAddr:       "127.0.0.1:0",
+	})
+	t.Cleanup(func() {
+		cancel3()
+		waitProcessNodeDone(t, done3, "lease-move-node3")
+	})
+
+	if err := node2.host.Campaign(context.Background(), usersRange.RangeID); err != nil {
+		t.Fatalf("campaign initial leaseholder: %v", err)
+	}
+	waitForRangeLeader(t, node2.host, usersRange.RangeID, 112)
+	waitForLeaseholderHint(t, node1.host, usersRange.RangeID, 112)
+
+	conn := openPGConn(t, node1.state.PGAddr)
+	defer conn.Close()
+	if _, err := conn.Write(queryFrame("insert into users (id, name, email) values (131, 'alice', 'a@example.com')")); err != nil {
+		t.Fatalf("write pre-move insert: %v", err)
+	}
+	if got := frameTags(readFrames(t, conn, 2)); got != "CZ" {
+		t.Fatalf("pre-move insert frames = %q, want CZ", got)
+	}
+
+	if err := node2.host.UpdateLeaseholderHint(context.Background(), usersRange.RangeID, 113); err != nil {
+		t.Fatalf("update leaseholder hint to replica 113: %v", err)
+	}
+	waitForLeaseholderHint(t, node1.host, usersRange.RangeID, 113)
+	if err := node2.host.TransferLeader(context.Background(), usersRange.RangeID, 113); err != nil {
+		t.Fatalf("transfer leader to replica 113: %v", err)
+	}
+	waitForRangeLeader(t, node1.host, usersRange.RangeID, 113)
+
+	if _, err := conn.Write(queryFrame("select id, name from users where id = 131")); err != nil {
+		t.Fatalf("write post-move select: %v", err)
+	}
+	selectFrames := readFrames(t, conn, 4)
+	if got := frameTags(selectFrames); got != "TDCZ" {
+		t.Fatalf("post-move select frames = %q, want TDCZ", got)
+	}
+	readRow, err := decodeDataRowFrame(selectFrames[1])
+	if err != nil {
+		t.Fatalf("decode post-move row: %v", err)
+	}
+	if len(readRow) != 2 || string(readRow[0]) != "131" || string(readRow[1]) != "alice" {
+		t.Fatalf("post-move row = %q/%q, want 131/alice", readRow[0], readRow[1])
+	}
+
+	if _, err := conn.Write(queryFrame("delete from users where id = 131")); err != nil {
+		t.Fatalf("write delete under moved leaseholder: %v", err)
+	}
+	if err := node3.host.UpdateLeaseholderHint(context.Background(), usersRange.RangeID, 112); err != nil {
+		t.Fatalf("update leaseholder hint back to replica 112: %v", err)
+	}
+	waitForLeaseholderHint(t, node1.host, usersRange.RangeID, 112)
+	if err := node3.host.TransferLeader(context.Background(), usersRange.RangeID, 112); err != nil {
+		t.Fatalf("transfer leader back to replica 112: %v", err)
+	}
+	waitForRangeLeader(t, node1.host, usersRange.RangeID, 112)
+
+	if _, err := conn.Write(queryFrame("delete from users where id = 131")); err != nil {
+		t.Fatalf("write delete after moving leaseholder back: %v", err)
+	}
+	if got := frameTags(readFrames(t, conn, 2)); got != "CZ" {
+		t.Fatalf("delete-after-move frames = %q, want CZ", got)
+	}
+
+	checkConn := openPGConn(t, node3.state.PGAddr)
+	defer checkConn.Close()
+	if _, err := checkConn.Write(queryFrame("select id, name from users where id = 131")); err != nil {
+		t.Fatalf("write final moved select: %v", err)
+	}
+	checkFrames := readFrames(t, checkConn, 3)
+	if got := frameTags(checkFrames); got != "TCZ" {
+		t.Fatalf("final moved select frames = %q, want TCZ", got)
+	}
+}
+
 func waitForRangeLeader(t *testing.T, host *chronosruntime.Host, rangeID, leaderReplicaID uint64) {
 	t.Helper()
 
@@ -3462,6 +3745,37 @@ func waitForRangeLeader(t *testing.T, host *chronosruntime.Host, rangeID, leader
 	}
 	leader, _ := host.Leader(rangeID)
 	t.Fatalf("range %d leader = %d, want %d", rangeID, leader, leaderReplicaID)
+}
+
+func waitForAnyRangeLeader(t *testing.T, host *chronosruntime.Host, rangeID uint64) uint64 {
+	t.Helper()
+
+	deadline := time.Now().Add(4 * time.Second)
+	for time.Now().Before(deadline) {
+		leader, err := host.Leader(rangeID)
+		if err == nil && leader != 0 {
+			return leader
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	leader, _ := host.Leader(rangeID)
+	t.Fatalf("range %d leader = %d, want non-zero leader", rangeID, leader)
+	return 0
+}
+
+func waitForLeaseholderHint(t *testing.T, host *chronosruntime.Host, rangeID, leaseholderReplicaID uint64) {
+	t.Helper()
+
+	deadline := time.Now().Add(4 * time.Second)
+	for time.Now().Before(deadline) {
+		status, err := host.RangeStatus(rangeID)
+		if err == nil && status.Descriptor.LeaseholderReplicaID == leaseholderReplicaID {
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	status, _ := host.RangeStatus(rangeID)
+	t.Fatalf("range %d leaseholder hint = %d, want %d", rangeID, status.Descriptor.LeaseholderReplicaID, leaseholderReplicaID)
 }
 
 func waitForReplicatedUserRow(t *testing.T, node *ProcessNode, key []byte) {

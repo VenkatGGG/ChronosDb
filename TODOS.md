@@ -766,10 +766,20 @@ Design constraints:
   - planner, prepared-parameter inference, pgclient extended-query tests, and
     multi-range process-node tests now cover non-primary-key filters plus
     `ORDER BY ... LIMIT ...` execution
-- [ ] 14.11 Add end-to-end correctness tests for CRUD semantics
+- [x] 14.11 Add end-to-end correctness tests for CRUD semantics
   covering crash/restart during delete and update, duplicate-key races, staged
   recovery with tombstones, prepared-statement execution, row-count/returning
   correctness, and cross-node reads after write/delete under lease movement
+  - process-node recovery coverage now proves updated rows survive restart,
+    deleted rows remain absent after restart, and tombstone-backed recovery
+    still converges through the live runtime instead of only in isolated
+    storage tests
+  - live lease-movement coverage now proves cross-node reads continue to see
+    the correct row before and after leadership movement, and that deletes are
+    observed correctly after the leaseholder moves back
+  - extended pgwire coverage now exercises prepared `ON CONFLICT ... DO
+    UPDATE ... RETURNING`, `DELETE ... RETURNING`, and the final visibility
+    checks a CRUD client actually depends on
 - [ ] 14.12 Add a realistic app-compatibility demo and benchmark harness
   that runs a seeded CRUD workload through prepared statements, reports command
   latency and error classes, and gives the project a repeatable "can my app do
