@@ -125,6 +125,55 @@ func TestPlannerUpsertMapsToKV(t *testing.T) {
 	}
 }
 
+func TestPlannerInsertOnConflictDoNothing(t *testing.T) {
+	t.Parallel()
+
+	planner := testPlanner(t)
+	plan, err := planner.Plan("insert into users (id, name, email) values (1, 'alice', 'a@example.com') on conflict (email) do nothing")
+	if err != nil {
+		t.Fatalf("plan insert on conflict do nothing: %v", err)
+	}
+	conflict, ok := plan.(OnConflictPlan)
+	if !ok {
+		t.Fatalf("plan type = %T, want OnConflictPlan", plan)
+	}
+	if conflict.Action != OnConflictDoNothing {
+		t.Fatalf("conflict action = %q, want %q", conflict.Action, OnConflictDoNothing)
+	}
+	if conflict.ConflictTarget.Name != "users_email_key" {
+		t.Fatalf("conflict target = %q, want users_email_key", conflict.ConflictTarget.Name)
+	}
+	if len(conflict.ConflictKey) == 0 {
+		t.Fatalf("conflict key should be populated for unique index target")
+	}
+}
+
+func TestPlannerInsertOnConflictDoUpdateBindsExcludedAssignments(t *testing.T) {
+	t.Parallel()
+
+	planner := testPlanner(t)
+	plan, err := planner.Plan("insert into users (id, name, email) values (1, 'alice', 'a@example.com') on conflict (email) do update set name = excluded.name, email = excluded.email returning id, name")
+	if err != nil {
+		t.Fatalf("plan insert on conflict do update: %v", err)
+	}
+	conflict, ok := plan.(OnConflictPlan)
+	if !ok {
+		t.Fatalf("plan type = %T, want OnConflictPlan", plan)
+	}
+	if conflict.Action != OnConflictDoUpdate {
+		t.Fatalf("conflict action = %q, want %q", conflict.Action, OnConflictDoUpdate)
+	}
+	if len(conflict.UpdateAssignments) != 2 {
+		t.Fatalf("assignment count = %d, want 2", len(conflict.UpdateAssignments))
+	}
+	if conflict.UpdateAssignments[0].Column.Name != "name" || conflict.UpdateAssignments[0].Value.String != "alice" {
+		t.Fatalf("first assignment = %+v, want name=alice", conflict.UpdateAssignments[0])
+	}
+	if len(conflict.Returning) != 2 || conflict.Returning[0].Name != "id" || conflict.Returning[1].Name != "name" {
+		t.Fatalf("returning = %+v, want [id name]", conflict.Returning)
+	}
+}
+
 func TestPlannerInsertReturningProjection(t *testing.T) {
 	t.Parallel()
 
@@ -537,6 +586,10 @@ func testPlanner(t *testing.T) *Planner {
 			{ID: 3, Name: "email", Type: ColumnTypeString, Nullable: true},
 		},
 		PrimaryKey: []string{"id"},
+		Indexes: []IndexDescriptor{
+			{ID: 1, Name: "users_name_idx", Columns: []string{"name"}},
+			{ID: 2, Name: "users_email_key", Columns: []string{"email"}, Unique: true},
+		},
 		Stats: TableStats{
 			EstimatedRows:   10000,
 			AverageRowBytes: 192,

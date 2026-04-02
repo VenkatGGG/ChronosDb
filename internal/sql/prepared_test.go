@@ -34,6 +34,22 @@ func TestPlannerPrepareInfersSelectFilterAndLimitParameters(t *testing.T) {
 	}
 }
 
+func TestPlannerPrepareInfersOnConflictParameters(t *testing.T) {
+	t.Parallel()
+
+	planner := testPlanner(t)
+	prepared, err := planner.Prepare("insert into users (id, name, email) values ($1, $2, $3) on conflict (email) do update set name = $4, email = excluded.email returning id")
+	if err != nil {
+		t.Fatalf("prepare on conflict query: %v", err)
+	}
+	if len(prepared.ParameterTypes) != 4 {
+		t.Fatalf("parameter count = %d, want 4", len(prepared.ParameterTypes))
+	}
+	if prepared.ParameterTypes[0] != ColumnTypeInt || prepared.ParameterTypes[1] != ColumnTypeString || prepared.ParameterTypes[2] != ColumnTypeString || prepared.ParameterTypes[3] != ColumnTypeString {
+		t.Fatalf("parameter types = %#v, want [INT STRING STRING STRING]", prepared.ParameterTypes)
+	}
+}
+
 func TestRenderPreparedQueryReplacesRepeatedParameters(t *testing.T) {
 	t.Parallel()
 

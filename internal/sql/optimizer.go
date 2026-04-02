@@ -311,6 +311,18 @@ func makeUpsertCandidate(o *Optimizer, table TableDescriptor, plan UpsertPlan) P
 	}
 }
 
+func makeOnConflictCandidate(o *Optimizer, table TableDescriptor, plan OnConflictPlan) PlanCandidate {
+	name := "insert_on_conflict_do_nothing"
+	if plan.Action == OnConflictDoUpdate {
+		name = "insert_on_conflict_do_update"
+	}
+	return PlanCandidate{
+		Name: name,
+		Plan: plan,
+		Cost: o.costInsert(table, len(plan.InsertValue)),
+	}
+}
+
 func makeDeleteCandidate(o *Optimizer, table TableDescriptor, predicate boundPredicate, singleton bool, plan DeletePlan) PlanCandidate {
 	name := "range_delete"
 	if singleton {

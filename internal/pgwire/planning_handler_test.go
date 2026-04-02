@@ -65,6 +65,22 @@ func TestPlanningHandlerDescribeUpsert(t *testing.T) {
 	}
 }
 
+func TestPlanningHandlerDescribeInsertOnConflictReturning(t *testing.T) {
+	t.Parallel()
+
+	handler := newPlanningHandler(t)
+	result, err := handler.HandleSimpleQuery(context.Background(), NewSession(handler), "insert into users (id, name, email) values (1, 'alice', 'a@example.com') on conflict (email) do update set name = excluded.name returning id, name")
+	if err != nil {
+		t.Fatalf("handle query: %v", err)
+	}
+	if result.CommandTag != "INSERT 0 1" {
+		t.Fatalf("command tag = %q, want INSERT 0 1", result.CommandTag)
+	}
+	if len(result.Fields) != 2 || result.Fields[0].Name != "id" || result.Fields[1].Name != "name" {
+		t.Fatalf("returning fields = %+v, want [id name]", result.Fields)
+	}
+}
+
 func TestPlanningHandlerDescribeInsertReturning(t *testing.T) {
 	t.Parallel()
 
@@ -194,6 +210,10 @@ func newPlanningHandler(t *testing.T) *PlanningHandler {
 			{ID: 3, Name: "email", Type: chronossql.ColumnTypeString, Nullable: true},
 		},
 		PrimaryKey: []string{"id"},
+		Indexes: []chronossql.IndexDescriptor{
+			{ID: 1, Name: "users_name_idx", Columns: []string{"name"}},
+			{ID: 2, Name: "users_email_key", Columns: []string{"email"}, Unique: true},
+		},
 		Stats: chronossql.TableStats{
 			EstimatedRows:   10000,
 			AverageRowBytes: 192,

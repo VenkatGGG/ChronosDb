@@ -738,14 +738,21 @@ Design constraints:
     stable `23505` errors naming the violated constraint, while process-node
     tests verify duplicate insert, duplicate update, and index rewrite/remove
     behavior across nodes
-- [ ] 14.9 Add `INSERT ... ON CONFLICT DO NOTHING/DO UPDATE`
+- [x] 14.9 Add `INSERT ... ON CONFLICT DO NOTHING/DO UPDATE`
   only after index metadata and uniqueness enforcement exist, including
   conflict-target resolution, `excluded` row semantics, and correct retry
   behavior under concurrent conflicting writes
-- [ ] 14.10 Widen `SELECT` for app compatibility
-  by adding `ORDER BY`, `LIMIT`, broader `WHERE` shapes, and the minimum
-  executor support needed so CRUD applications do not immediately fall off the
-  supported SQL surface after basic DML lands
+  - planner, optimizer, flow planning, prepared-parameter inference, and
+    pgwire row-description metadata now treat `ON CONFLICT` as a first-class
+    insert shape with explicit conflict-target resolution against unique
+    indexes or the primary key
+  - the live executor now supports `DO NOTHING` and `DO UPDATE` through the
+    same transaction/intents path as other DML, including `excluded` row
+    semantics, secondary-index maintenance, `RETURNING`, and explicit
+    transaction visibility before commit
+  - unit and end-to-end multi-node pgwire tests now cover planner binding,
+    prepared inference, flow/operator selection, `DO NOTHING`, `DO UPDATE`,
+    and explicit-transaction conflict updates across leaseholder-hosted ranges
 - [x] 14.10 Widen `SELECT` for app compatibility
   by adding `ORDER BY`, `LIMIT`, broader `WHERE` shapes, and the minimum
   executor support needed so CRUD applications do not immediately fall off the
@@ -782,7 +789,7 @@ Execution milestones:
   Complete `14.6` and `14.10` together so prepared statements arrive with a
   broad enough `SELECT` surface that normal application code does not
   immediately fall back to unsupported query shapes.
-- [ ] Milestone D: Conflict-aware write semantics
+- [x] Milestone D: Conflict-aware write semantics
   Complete `14.7`, `14.8`, and `14.9` together so full `ON CONFLICT` only
   ships after descriptor metadata, index maintenance, and uniqueness checks are
   already transactionally correct.
@@ -799,5 +806,5 @@ Phase gates:
   before it is considered complete
 - [ ] Gate 14C: no feature may be marked done until it has both unit coverage
   and end-to-end pgwire coverage against the seeded multi-node demo
-- [ ] Gate 14D: full `ON CONFLICT` must not begin implementation before unique
+- [x] Gate 14D: full `ON CONFLICT` must not begin implementation before unique
   index metadata and maintenance are already live

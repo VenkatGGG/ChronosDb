@@ -40,12 +40,19 @@ func (p *Planner) Prepare(query string) (PreparedQuery, error) {
 			return PreparedQuery{}, err
 		}
 	case *vsqlparser.Insert:
-		if features.Upsert {
-			if err := p.inferInsertParameters(typed, paramTypes); err != nil {
-				return PreparedQuery{}, err
+		if err := p.inferInsertParameters(typed, paramTypes); err != nil {
+			return PreparedQuery{}, err
+		}
+		if features.OnConflict != nil {
+			tableName, tableErr := typed.Table.TableName()
+			if tableErr != nil {
+				return PreparedQuery{}, tableErr
 			}
-		} else {
-			if err := p.inferInsertParameters(typed, paramTypes); err != nil {
+			table, tableErr := p.catalog.ResolveTable(tableName.Name.String())
+			if tableErr != nil {
+				return PreparedQuery{}, tableErr
+			}
+			if err := p.inferOnConflictParameters(table, *features.OnConflict, paramTypes); err != nil {
 				return PreparedQuery{}, err
 			}
 		}

@@ -54,6 +54,9 @@ func (p *Planner) Optimize(query string) (OptimizedPlan, error) {
 		if features.Upsert {
 			return p.optimizeUpsert(typed, features.ReturningClause)
 		}
+		if features.OnConflict != nil {
+			return p.optimizeInsertOnConflict(typed, features.ReturningClause, *features.OnConflict)
+		}
 		return p.optimizeInsert(typed, features.ReturningClause)
 	case *vsqlparser.Delete:
 		return p.optimizeDelete(typed, features.ReturningClause)
@@ -155,6 +158,36 @@ type UpsertPlan struct {
 	Returning []ColumnDescriptor
 }
 
+// OnConflictAction identifies the runtime behavior requested by an INSERT ...
+// ON CONFLICT clause.
+type OnConflictAction string
+
+const (
+	OnConflictDoNothing OnConflictAction = "do_nothing"
+	OnConflictDoUpdate  OnConflictAction = "do_update"
+)
+
+// ConflictTarget describes the unique key used to detect conflicts.
+type ConflictTarget struct {
+	Name       string
+	Columns    []string
+	PrimaryKey bool
+	Index      IndexDescriptor
+}
+
+// OnConflictPlan maps one INSERT ... ON CONFLICT statement onto one insert or
+// conflict-driven update against a unique key.
+type OnConflictPlan struct {
+	Table             TableDescriptor
+	InsertKey         []byte
+	InsertValue       []byte
+	ConflictTarget    ConflictTarget
+	ConflictKey       []byte
+	Action            OnConflictAction
+	UpdateAssignments []UpdateAssignment
+	Returning         []ColumnDescriptor
+}
+
 // DeletePlan maps one SQL delete onto one KV span of tombstone writes.
 type DeletePlan struct {
 	Table     TableDescriptor
@@ -212,6 +245,7 @@ func (PointLookupPlan) isPlan() {}
 func (RangeScanPlan) isPlan()   {}
 func (InsertPlan) isPlan()      {}
 func (UpsertPlan) isPlan()      {}
+func (OnConflictPlan) isPlan()  {}
 func (DeletePlan) isPlan()      {}
 func (UpdatePlan) isPlan()      {}
 func (AggregatePlan) isPlan()   {}
@@ -239,6 +273,7 @@ type Value struct {
 type queryFeatures struct {
 	BaseQuery       string
 	Upsert          bool
+	OnConflict      *conflictFeatures
 	ReturningClause string
 }
 
@@ -392,6 +427,62 @@ func (p *Planner) optimizeInsert(stmt *vsqlparser.Insert, returningClause string
 		Returning: returning,
 	}
 	return p.optimizer.Choose([]PlanCandidate{makeInsertCandidate(p.optimizer, table, plan)})
+}
+
+func (p *Planner) optimizeInsertOnConflict(stmt *vsqlparser.Insert, returningClause string, conflict conflictFeatures) (OptimizedPlan, error) {
+	if stmt.Ignore || len(stmt.OnDup) > 0 || stmt.Rows == nil {
+		return OptimizedPlan{}, fmt.Errorf("sql planner: unsupported INSERT ON CONFLICT shape")
+	}
+	tableName, err := stmt.Table.TableName()
+	if err != nil {
+		return OptimizedPlan{}, err
+	}
+	table, err := p.catalog.ResolveTable(tableName.Name.String())
+	if err != nil {
+		return OptimizedPlan{}, err
+	}
+	values, ok := stmt.Rows.(vsqlparser.Values)
+	if !ok {
+		return OptimizedPlan{}, fmt.Errorf("sql planner: only VALUES inserts are supported")
+	}
+	if len(values) != 1 {
+		return OptimizedPlan{}, fmt.Errorf("sql planner: only single-row inserts are supported")
+	}
+	row, err := bindInsertRow(table, stmt.Columns, values[0])
+	if err != nil {
+		return OptimizedPlan{}, err
+	}
+	key, value, err := encodeInsert(table, row)
+	if err != nil {
+		return OptimizedPlan{}, err
+	}
+	target, err := resolveConflictTarget(table, conflict.TargetColumns)
+	if err != nil {
+		return OptimizedPlan{}, err
+	}
+	conflictKey, err := buildConflictKey(table, target, row, key)
+	if err != nil {
+		return OptimizedPlan{}, err
+	}
+	assignments, err := p.bindOnConflictAssignments(table, row, conflict)
+	if err != nil {
+		return OptimizedPlan{}, err
+	}
+	returning, err := bindReturningProjection(table, returningClause)
+	if err != nil {
+		return OptimizedPlan{}, err
+	}
+	plan := OnConflictPlan{
+		Table:             table,
+		InsertKey:         key,
+		InsertValue:       value,
+		ConflictTarget:    target,
+		ConflictKey:       conflictKey,
+		Action:            conflict.Action,
+		UpdateAssignments: assignments,
+		Returning:         returning,
+	}
+	return p.optimizer.Choose([]PlanCandidate{makeOnConflictCandidate(p.optimizer, table, plan)})
 }
 
 func (p *Planner) optimizeUpsert(stmt *vsqlparser.Insert, returningClause string) (OptimizedPlan, error) {
@@ -1385,9 +1476,14 @@ func encodeRowValue(table TableDescriptor, row map[string]Value) ([]byte, error)
 func extractQueryFeatures(query string) (queryFeatures, error) {
 	baseQuery, returningClause := splitReturningClause(query)
 	baseQuery, upsert := normalizeUpsertQuery(baseQuery)
+	baseQuery, onConflict, err := splitOnConflictClause(baseQuery)
+	if err != nil {
+		return queryFeatures{}, err
+	}
 	return queryFeatures{
 		BaseQuery:       baseQuery,
 		Upsert:          upsert,
+		OnConflict:      onConflict,
 		ReturningClause: returningClause,
 	}, nil
 }

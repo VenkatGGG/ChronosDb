@@ -88,6 +88,8 @@ func (h *runtimeQueryHandler) HandleSimpleQuery(ctx context.Context, session *pg
 		result, execErr = h.executeInsert(ctx, session, result, plan)
 	case chronossql.UpsertPlan:
 		result, execErr = h.executeUpsert(ctx, session, result, plan)
+	case chronossql.OnConflictPlan:
+		result, execErr = h.executeOnConflict(ctx, session, result, plan)
 	case chronossql.DeletePlan:
 		result, execErr = h.executeDelete(ctx, session, result, plan)
 	case chronossql.UpdatePlan:
@@ -290,6 +292,70 @@ func (h *runtimeQueryHandler) executeUpsert(ctx context.Context, session *pgwire
 	return h.executeInsertLike(ctx, session, result, plan.Table, plan.Key, plan.Value, plan.Returning, true)
 }
 
+func (h *runtimeQueryHandler) executeOnConflict(ctx context.Context, session *pgwire.Session, result pgwire.QueryResult, plan chronossql.OnConflictPlan) (pgwire.QueryResult, error) {
+	state, autoCommit, err := h.statementTxnState(session)
+	if err != nil {
+		return pgwire.QueryResult{}, err
+	}
+	conflictKey, existingRow, found, err := h.lookupConflictRow(ctx, state, plan)
+	if err != nil {
+		if autoCommit {
+			_ = h.abortTxnState(ctx, state)
+		}
+		return pgwire.QueryResult{}, err
+	}
+	if !found {
+		return h.executeInsertLikeWithState(ctx, state, autoCommit, result, plan.Table, plan.InsertKey, plan.InsertValue, plan.Returning, false)
+	}
+	switch plan.Action {
+	case chronossql.OnConflictDoNothing:
+		result.CommandTag = "INSERT 0 0"
+		return result, nil
+	case chronossql.OnConflictDoUpdate:
+		updatedRow, updatedPayload, err := rewriteUpdatedRow(plan.Table, existingRow, plan.UpdateAssignments)
+		if err != nil {
+			if autoCommit {
+				_ = h.abortTxnState(ctx, state)
+			}
+			return pgwire.QueryResult{}, err
+		}
+		if len(plan.Returning) > 0 {
+			projected, err := chronossql.ProjectRowText(plan.Returning, updatedRow)
+			if err != nil {
+				if autoCommit {
+					_ = h.abortTxnState(ctx, state)
+				}
+				return pgwire.QueryResult{}, wrapExecutionError("project on conflict returning row", err)
+			}
+			result.Rows = [][][]byte{projected}
+		}
+		if err := h.stageIndexMutations(ctx, state, plan.Table, existingRow, updatedRow); err != nil {
+			if autoCommit {
+				_ = h.abortTxnState(ctx, state)
+			}
+			return pgwire.QueryResult{}, err
+		}
+		if err := h.stageWrite(ctx, state, conflictKey, updatedPayload, false); err != nil {
+			if autoCommit {
+				_ = h.abortTxnState(ctx, state)
+			}
+			return pgwire.QueryResult{}, err
+		}
+		if autoCommit {
+			if err := h.commitTxnState(ctx, state); err != nil {
+				return pgwire.QueryResult{}, err
+			}
+		}
+		result.CommandTag = "INSERT 0 1"
+		return result, nil
+	default:
+		if autoCommit {
+			_ = h.abortTxnState(ctx, state)
+		}
+		return pgwire.QueryResult{}, wrapExecutionError("on conflict", fmt.Errorf("unsupported ON CONFLICT action %q", plan.Action))
+	}
+}
+
 func (h *runtimeQueryHandler) executeDelete(ctx context.Context, session *pgwire.Session, result pgwire.QueryResult, plan chronossql.DeletePlan) (pgwire.QueryResult, error) {
 	targets, err := h.scanRowSet(ctx, session, plan.Input)
 	if err != nil {
@@ -398,6 +464,10 @@ func (h *runtimeQueryHandler) executeInsertLike(ctx context.Context, session *pg
 	if err != nil {
 		return pgwire.QueryResult{}, err
 	}
+	return h.executeInsertLikeWithState(ctx, state, autoCommit, result, table, key, value, returning, allowOverwrite)
+}
+
+func (h *runtimeQueryHandler) executeInsertLikeWithState(ctx context.Context, state *sessionTxnState, autoCommit bool, result pgwire.QueryResult, table chronossql.TableDescriptor, key, value []byte, returning []chronossql.ColumnDescriptor, allowOverwrite bool) (pgwire.QueryResult, error) {
 	existingRow, existingFound, err := h.visibleRowForKey(ctx, state, table, key)
 	if err != nil {
 		if autoCommit {
@@ -1182,6 +1252,46 @@ func (h *runtimeQueryHandler) visibleRowForKey(ctx context.Context, state *sessi
 		return nil, false, wrapExecutionError("decode visible row payload", err)
 	}
 	return row, true, nil
+}
+
+func (h *runtimeQueryHandler) lookupConflictRow(ctx context.Context, state *sessionTxnState, plan chronossql.OnConflictPlan) ([]byte, map[string]chronossql.Value, bool, error) {
+	if plan.ConflictTarget.PrimaryKey {
+		row, found, err := h.visibleRowForKey(ctx, state, plan.Table, plan.InsertKey)
+		if err != nil {
+			return nil, nil, false, err
+		}
+		return append([]byte(nil), plan.InsertKey...), row, found, nil
+	}
+	if len(plan.ConflictKey) == 0 {
+		return nil, nil, false, nil
+	}
+
+	var ownerPK []byte
+	if pending, ok := pendingWriteForState(state, plan.ConflictKey); ok {
+		if pending.tombstone {
+			return nil, nil, false, nil
+		}
+		ownerPK = append([]byte(nil), pending.value...)
+	} else {
+		value, found, err := h.kv.GetLatest(ctx, plan.ConflictKey)
+		if err != nil {
+			return nil, nil, false, err
+		}
+		if !found {
+			return nil, nil, false, nil
+		}
+		ownerPK = append([]byte(nil), value...)
+	}
+
+	rowKey := storage.GlobalTablePrimaryKey(plan.Table.ID, ownerPK)
+	row, found, err := h.visibleRowForKey(ctx, state, plan.Table, rowKey)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	if !found {
+		return nil, nil, false, wrapExecutionError("resolve on conflict target", fmt.Errorf("dangling unique index entry for constraint %q", plan.ConflictTarget.Name))
+	}
+	return rowKey, row, true, nil
 }
 
 func (h *runtimeQueryHandler) stageIndexMutations(ctx context.Context, state *sessionTxnState, table chronossql.TableDescriptor, oldRow, newRow map[string]chronossql.Value) error {

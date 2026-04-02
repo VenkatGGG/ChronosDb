@@ -18,6 +18,7 @@ const (
 	OperatorKVScan     OperatorKind = "kv_scan"
 	OperatorKVInsert   OperatorKind = "kv_insert"
 	OperatorKVUpsert   OperatorKind = "kv_upsert"
+	OperatorKVConflict OperatorKind = "kv_insert_on_conflict"
 	OperatorKVDelete   OperatorKind = "kv_delete"
 	OperatorKVUpdate   OperatorKind = "kv_update"
 	OperatorMerge      OperatorKind = "merge"
@@ -125,6 +126,8 @@ func (p *FlowPlanner) Build(plan Plan) (FlowPlan, error) {
 		return p.buildInsert(typed), nil
 	case UpsertPlan:
 		return p.buildUpsert(typed), nil
+	case OnConflictPlan:
+		return p.buildOnConflict(typed), nil
 	case DeletePlan:
 		return p.buildDelete(typed), nil
 	case UpdatePlan:
@@ -259,6 +262,34 @@ func (p *FlowPlanner) buildUpsert(plan UpsertPlan) FlowPlan {
 						{
 							StartKey:       append([]byte(nil), plan.Key...),
 							EndKey:         append([]byte(nil), plan.Key...),
+							StartInclusive: true,
+							EndInclusive:   true,
+						},
+					},
+				},
+			},
+			ResultSchema: resultSchema,
+		},
+	}, resultSchema)
+}
+
+func (p *FlowPlanner) buildOnConflict(plan OnConflictPlan) FlowPlan {
+	resultSchema := schemaFromColumns(plan.Returning)
+	return assembleFlowPlan(1, []FlowStage{
+		{
+			ID:               1,
+			Name:             "insert_on_conflict",
+			Distribution:     DistributionLeaseholderOnly,
+			PreferredRegions: leasePreferredRegions(plan.Table),
+			HomeRegion:       homeRegion(plan.Table),
+			Processors: []ProcessorSpec{
+				{
+					Kind:  OperatorKVConflict,
+					Table: &plan.Table,
+					Spans: []KeySpan{
+						{
+							StartKey:       append([]byte(nil), plan.InsertKey...),
+							EndKey:         append([]byte(nil), plan.InsertKey...),
 							StartInclusive: true,
 							EndInclusive:   true,
 						},

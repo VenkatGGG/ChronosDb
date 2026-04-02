@@ -1508,6 +1508,361 @@ func TestProcessNodeExecutesDMLReturning(t *testing.T) {
 	}
 }
 
+func TestProcessNodeExecutesOnConflictDoNothing(t *testing.T) {
+	rootDir := t.TempDir()
+	bootstrapPath := filepath.Join(rootDir, "bootstrap.json")
+	usersRange := meta.RangeDescriptor{
+		RangeID:    86,
+		Generation: 1,
+		StartKey:   storage.GlobalTablePrimaryPrefix(7),
+		EndKey:     storage.GlobalTablePrimaryPrefix(8),
+		Replicas: []meta.ReplicaDescriptor{
+			{ReplicaID: 87, NodeID: 1, Role: meta.ReplicaRoleVoter},
+			{ReplicaID: 88, NodeID: 2, Role: meta.ReplicaRoleVoter},
+			{ReplicaID: 89, NodeID: 3, Role: meta.ReplicaRoleVoter},
+		},
+		LeaseholderReplicaID: 88,
+	}
+	manifest, err := chronosruntime.BuildBootstrapManifest("cluster-on-conflict-do-nothing", []chronosruntime.BootstrapNode{
+		{NodeID: 1, StoreID: 87},
+		{NodeID: 2, StoreID: 88},
+		{NodeID: 3, StoreID: 89},
+	}, []meta.RangeDescriptor{usersRange})
+	if err != nil {
+		t.Fatalf("build bootstrap manifest: %v", err)
+	}
+	if err := chronosruntime.WriteBootstrapManifest(bootstrapPath, manifest); err != nil {
+		t.Fatalf("write bootstrap manifest: %v", err)
+	}
+
+	node1, cancel1, done1 := startProcessNodeForTest(t, ProcessNodeConfig{
+		NodeID:            1,
+		DataDir:           filepath.Join(rootDir, "node-1"),
+		BootstrapPath:     bootstrapPath,
+		PGListenAddr:      "127.0.0.1:0",
+		ObservabilityAddr: "127.0.0.1:0",
+		ControlAddr:       "127.0.0.1:0",
+	})
+	t.Cleanup(func() {
+		cancel1()
+		waitProcessNodeDone(t, done1, "on-conflict-nothing-node1")
+	})
+	node2, cancel2, done2 := startProcessNodeForTest(t, ProcessNodeConfig{
+		NodeID:            2,
+		DataDir:           filepath.Join(rootDir, "node-2"),
+		BootstrapPath:     bootstrapPath,
+		PGListenAddr:      "127.0.0.1:0",
+		ObservabilityAddr: "127.0.0.1:0",
+		ControlAddr:       "127.0.0.1:0",
+	})
+	t.Cleanup(func() {
+		cancel2()
+		waitProcessNodeDone(t, done2, "on-conflict-nothing-node2")
+	})
+	node3, cancel3, done3 := startProcessNodeForTest(t, ProcessNodeConfig{
+		NodeID:            3,
+		DataDir:           filepath.Join(rootDir, "node-3"),
+		BootstrapPath:     bootstrapPath,
+		PGListenAddr:      "127.0.0.1:0",
+		ObservabilityAddr: "127.0.0.1:0",
+		ControlAddr:       "127.0.0.1:0",
+	})
+	t.Cleanup(func() {
+		cancel3()
+		waitProcessNodeDone(t, done3, "on-conflict-nothing-node3")
+	})
+
+	if err := node2.host.Campaign(context.Background(), usersRange.RangeID); err != nil {
+		t.Fatalf("campaign on conflict do nothing leaseholder: %v", err)
+	}
+	waitForRangeLeader(t, node2.host, usersRange.RangeID, 88)
+
+	conn := openPGConn(t, node1.state.PGAddr)
+	defer conn.Close()
+	if _, err := conn.Write(queryFrame("insert into users (id, name, email) values (91, 'alice', 'shared@example.com')")); err != nil {
+		t.Fatalf("write seed insert: %v", err)
+	}
+	if got := frameTags(readFrames(t, conn, 2)); got != "CZ" {
+		t.Fatalf("seed insert frame tags = %q, want CZ", got)
+	}
+
+	if _, err := conn.Write(queryFrame("insert into users (id, name, email) values (92, 'ally', 'shared@example.com') on conflict (email) do nothing returning id, name")); err != nil {
+		t.Fatalf("write on conflict do nothing: %v", err)
+	}
+	frames := readFrames(t, conn, 3)
+	if got := frameTags(frames); got != "TCZ" {
+		t.Fatalf("on conflict do nothing frames = %q, want TCZ", got)
+	}
+	if tag := decodeCommandCompleteFrame(frames[1]); tag != "INSERT 0 0" {
+		t.Fatalf("on conflict do nothing tag = %q, want INSERT 0 0", tag)
+	}
+
+	table := usersTableDescriptor(t)
+	waitForDecodedUserRow(t, node3.kv, table, usersPrimaryKey(91), "91", "alice")
+	waitForKeyAbsent(t, node3.kv, usersPrimaryKey(92))
+}
+
+func TestProcessNodeExecutesOnConflictDoUpdateReturning(t *testing.T) {
+	rootDir := t.TempDir()
+	bootstrapPath := filepath.Join(rootDir, "bootstrap.json")
+	usersRange := meta.RangeDescriptor{
+		RangeID:    90,
+		Generation: 1,
+		StartKey:   storage.GlobalTablePrimaryPrefix(7),
+		EndKey:     storage.GlobalTablePrimaryPrefix(8),
+		Replicas: []meta.ReplicaDescriptor{
+			{ReplicaID: 91, NodeID: 1, Role: meta.ReplicaRoleVoter},
+			{ReplicaID: 92, NodeID: 2, Role: meta.ReplicaRoleVoter},
+			{ReplicaID: 93, NodeID: 3, Role: meta.ReplicaRoleVoter},
+		},
+		LeaseholderReplicaID: 92,
+	}
+	manifest, err := chronosruntime.BuildBootstrapManifest("cluster-on-conflict-do-update", []chronosruntime.BootstrapNode{
+		{NodeID: 1, StoreID: 91},
+		{NodeID: 2, StoreID: 92},
+		{NodeID: 3, StoreID: 93},
+	}, []meta.RangeDescriptor{usersRange})
+	if err != nil {
+		t.Fatalf("build bootstrap manifest: %v", err)
+	}
+	if err := chronosruntime.WriteBootstrapManifest(bootstrapPath, manifest); err != nil {
+		t.Fatalf("write bootstrap manifest: %v", err)
+	}
+
+	node1, cancel1, done1 := startProcessNodeForTest(t, ProcessNodeConfig{
+		NodeID:            1,
+		DataDir:           filepath.Join(rootDir, "node-1"),
+		BootstrapPath:     bootstrapPath,
+		PGListenAddr:      "127.0.0.1:0",
+		ObservabilityAddr: "127.0.0.1:0",
+		ControlAddr:       "127.0.0.1:0",
+	})
+	t.Cleanup(func() {
+		cancel1()
+		waitProcessNodeDone(t, done1, "on-conflict-update-node1")
+	})
+	node2, cancel2, done2 := startProcessNodeForTest(t, ProcessNodeConfig{
+		NodeID:            2,
+		DataDir:           filepath.Join(rootDir, "node-2"),
+		BootstrapPath:     bootstrapPath,
+		PGListenAddr:      "127.0.0.1:0",
+		ObservabilityAddr: "127.0.0.1:0",
+		ControlAddr:       "127.0.0.1:0",
+	})
+	t.Cleanup(func() {
+		cancel2()
+		waitProcessNodeDone(t, done2, "on-conflict-update-node2")
+	})
+	node3, cancel3, done3 := startProcessNodeForTest(t, ProcessNodeConfig{
+		NodeID:            3,
+		DataDir:           filepath.Join(rootDir, "node-3"),
+		BootstrapPath:     bootstrapPath,
+		PGListenAddr:      "127.0.0.1:0",
+		ObservabilityAddr: "127.0.0.1:0",
+		ControlAddr:       "127.0.0.1:0",
+	})
+	t.Cleanup(func() {
+		cancel3()
+		waitProcessNodeDone(t, done3, "on-conflict-update-node3")
+	})
+
+	if err := node2.host.Campaign(context.Background(), usersRange.RangeID); err != nil {
+		t.Fatalf("campaign on conflict do update leaseholder: %v", err)
+	}
+	waitForRangeLeader(t, node2.host, usersRange.RangeID, 92)
+
+	conn := openPGConn(t, node1.state.PGAddr)
+	defer conn.Close()
+	if _, err := conn.Write(queryFrame("insert into users (id, name, email) values (101, 'alice', 'shared@example.com')")); err != nil {
+		t.Fatalf("write seed insert: %v", err)
+	}
+	if got := frameTags(readFrames(t, conn, 2)); got != "CZ" {
+		t.Fatalf("seed insert frame tags = %q, want CZ", got)
+	}
+
+	if _, err := conn.Write(queryFrame("insert into users (id, name, email) values (102, 'ally', 'shared@example.com') on conflict (email) do update set name = excluded.name returning id, name, email")); err != nil {
+		t.Fatalf("write on conflict do update: %v", err)
+	}
+	frames := readFrames(t, conn, 4)
+	if got := frameTags(frames); got != "TDCZ" {
+		t.Fatalf("on conflict do update frames = %q, want TDCZ", got)
+	}
+	row, err := decodeDataRowFrame(frames[1])
+	if err != nil {
+		t.Fatalf("decode on conflict do update row: %v", err)
+	}
+	if len(row) != 3 || string(row[0]) != "101" || string(row[1]) != "ally" || string(row[2]) != "shared@example.com" {
+		t.Fatalf("on conflict do update row = %q/%q/%q, want 101/ally/shared@example.com", row[0], row[1], row[2])
+	}
+
+	table := usersTableDescriptor(t)
+	waitForDecodedUserRow(t, node3.kv, table, usersPrimaryKey(101), "101", "ally")
+	waitForKeyAbsent(t, node3.kv, usersPrimaryKey(102))
+}
+
+func TestProcessNodeExecutesOnConflictDoUpdateInExplicitTransaction(t *testing.T) {
+	rootDir := t.TempDir()
+	bootstrapPath := filepath.Join(rootDir, "bootstrap.json")
+	usersRange := meta.RangeDescriptor{
+		RangeID:    94,
+		Generation: 1,
+		StartKey:   storage.GlobalTablePrimaryPrefix(7),
+		EndKey:     storage.GlobalTablePrimaryPrefix(8),
+		Replicas: []meta.ReplicaDescriptor{
+			{ReplicaID: 95, NodeID: 1, Role: meta.ReplicaRoleVoter},
+			{ReplicaID: 96, NodeID: 2, Role: meta.ReplicaRoleVoter},
+			{ReplicaID: 97, NodeID: 3, Role: meta.ReplicaRoleVoter},
+		},
+		LeaseholderReplicaID: 96,
+	}
+	manifest, err := chronosruntime.BuildBootstrapManifest("cluster-on-conflict-explicit", []chronosruntime.BootstrapNode{
+		{NodeID: 1, StoreID: 95},
+		{NodeID: 2, StoreID: 96},
+		{NodeID: 3, StoreID: 97},
+	}, []meta.RangeDescriptor{usersRange})
+	if err != nil {
+		t.Fatalf("build bootstrap manifest: %v", err)
+	}
+	if err := chronosruntime.WriteBootstrapManifest(bootstrapPath, manifest); err != nil {
+		t.Fatalf("write bootstrap manifest: %v", err)
+	}
+
+	node1, cancel1, done1 := startProcessNodeForTest(t, ProcessNodeConfig{
+		NodeID:            1,
+		DataDir:           filepath.Join(rootDir, "node-1"),
+		BootstrapPath:     bootstrapPath,
+		PGListenAddr:      "127.0.0.1:0",
+		ObservabilityAddr: "127.0.0.1:0",
+		ControlAddr:       "127.0.0.1:0",
+	})
+	t.Cleanup(func() {
+		cancel1()
+		waitProcessNodeDone(t, done1, "on-conflict-explicit-node1")
+	})
+	node2, cancel2, done2 := startProcessNodeForTest(t, ProcessNodeConfig{
+		NodeID:            2,
+		DataDir:           filepath.Join(rootDir, "node-2"),
+		BootstrapPath:     bootstrapPath,
+		PGListenAddr:      "127.0.0.1:0",
+		ObservabilityAddr: "127.0.0.1:0",
+		ControlAddr:       "127.0.0.1:0",
+	})
+	t.Cleanup(func() {
+		cancel2()
+		waitProcessNodeDone(t, done2, "on-conflict-explicit-node2")
+	})
+	node3, cancel3, done3 := startProcessNodeForTest(t, ProcessNodeConfig{
+		NodeID:            3,
+		DataDir:           filepath.Join(rootDir, "node-3"),
+		BootstrapPath:     bootstrapPath,
+		PGListenAddr:      "127.0.0.1:0",
+		ObservabilityAddr: "127.0.0.1:0",
+		ControlAddr:       "127.0.0.1:0",
+	})
+	t.Cleanup(func() {
+		cancel3()
+		waitProcessNodeDone(t, done3, "on-conflict-explicit-node3")
+	})
+
+	if err := node2.host.Campaign(context.Background(), usersRange.RangeID); err != nil {
+		t.Fatalf("campaign on conflict explicit leaseholder: %v", err)
+	}
+	waitForRangeLeader(t, node2.host, usersRange.RangeID, 96)
+
+	seedConn := openPGConn(t, node1.state.PGAddr)
+	defer seedConn.Close()
+	if _, err := seedConn.Write(queryFrame("insert into users (id, name, email) values (111, 'alice', 'shared@example.com')")); err != nil {
+		t.Fatalf("seed row: %v", err)
+	}
+	if got := frameTags(readFrames(t, seedConn, 2)); got != "CZ" {
+		t.Fatalf("seed insert frames = %q, want CZ", got)
+	}
+
+	conn := openPGConn(t, node1.state.PGAddr)
+	defer conn.Close()
+	if _, err := conn.Write(queryFrame("begin")); err != nil {
+		t.Fatalf("write begin: %v", err)
+	}
+	beginFrames := readFrames(t, conn, 2)
+	if got := frameTags(beginFrames); got != "CZ" || readyStatus(beginFrames[1]) != byte(pgwire.TxInTransaction) {
+		t.Fatalf("begin frames = %q / %d, want CZ / in-transaction", got, readyStatus(beginFrames[1]))
+	}
+
+	if _, err := conn.Write(queryFrame("insert into users (id, name, email) values (112, 'ally', 'shared@example.com') on conflict (email) do update set name = excluded.name returning id, name")); err != nil {
+		t.Fatalf("write on conflict do update in txn: %v", err)
+	}
+	updateFrames := readFrames(t, conn, 4)
+	if got := frameTags(updateFrames); got != "TDCZ" || readyStatus(updateFrames[3]) != byte(pgwire.TxInTransaction) {
+		t.Fatalf("on conflict in-txn frames = %q / %d, want TDCZ / in-transaction", got, readyStatus(updateFrames[3]))
+	}
+	updateRow, err := decodeDataRowFrame(updateFrames[1])
+	if err != nil {
+		t.Fatalf("decode on conflict in-txn row: %v", err)
+	}
+	if len(updateRow) != 2 || string(updateRow[0]) != "111" || string(updateRow[1]) != "ally" {
+		t.Fatalf("on conflict in-txn row = %q/%q, want 111/ally", updateRow[0], updateRow[1])
+	}
+
+	if _, err := conn.Write(queryFrame("select id, name from users where id = 111")); err != nil {
+		t.Fatalf("write in-txn select: %v", err)
+	}
+	inTxnFrames := readFrames(t, conn, 4)
+	if got := frameTags(inTxnFrames); got != "TDCZ" || readyStatus(inTxnFrames[3]) != byte(pgwire.TxInTransaction) {
+		t.Fatalf("in-txn select frames = %q / %d, want TDCZ / in-transaction", got, readyStatus(inTxnFrames[3]))
+	}
+	inTxnRow, err := decodeDataRowFrame(inTxnFrames[1])
+	if err != nil {
+		t.Fatalf("decode in-txn select row: %v", err)
+	}
+	if len(inTxnRow) != 2 || string(inTxnRow[0]) != "111" || string(inTxnRow[1]) != "ally" {
+		t.Fatalf("in-txn row = %q/%q, want 111/ally", inTxnRow[0], inTxnRow[1])
+	}
+
+	otherConn := openPGConn(t, node3.state.PGAddr)
+	defer otherConn.Close()
+	if _, err := otherConn.Write(queryFrame("select id, name from users where id = 111")); err != nil {
+		t.Fatalf("write external select: %v", err)
+	}
+	otherFrames := readFrames(t, otherConn, 4)
+	if got := frameTags(otherFrames); got != "TDCZ" {
+		t.Fatalf("external select frames = %q, want TDCZ", got)
+	}
+	otherRow, err := decodeDataRowFrame(otherFrames[1])
+	if err != nil {
+		t.Fatalf("decode external row: %v", err)
+	}
+	if len(otherRow) != 2 || string(otherRow[0]) != "111" || string(otherRow[1]) != "alice" {
+		t.Fatalf("external row = %q/%q, want 111/alice", otherRow[0], otherRow[1])
+	}
+
+	if _, err := conn.Write(queryFrame("commit")); err != nil {
+		t.Fatalf("write commit: %v", err)
+	}
+	commitFrames := readFrames(t, conn, 2)
+	if got := frameTags(commitFrames); got != "CZ" || readyStatus(commitFrames[1]) != byte(pgwire.TxIdle) {
+		t.Fatalf("commit frames = %q / %d, want CZ / idle", got, readyStatus(commitFrames[1]))
+	}
+
+	finalConn := openPGConn(t, node2.state.PGAddr)
+	defer finalConn.Close()
+	if _, err := finalConn.Write(queryFrame("select id, name from users where id = 111")); err != nil {
+		t.Fatalf("write final select: %v", err)
+	}
+	finalFrames := readFrames(t, finalConn, 4)
+	if got := frameTags(finalFrames); got != "TDCZ" {
+		t.Fatalf("final select frames = %q, want TDCZ", got)
+	}
+	finalRow, err := decodeDataRowFrame(finalFrames[1])
+	if err != nil {
+		t.Fatalf("decode final row: %v", err)
+	}
+	if len(finalRow) != 2 || string(finalRow[0]) != "111" || string(finalRow[1]) != "ally" {
+		t.Fatalf("final row = %q/%q, want 111/ally", finalRow[0], finalRow[1])
+	}
+
+	waitForKeyAbsent(t, node3.kv, usersPrimaryKey(112))
+}
+
 func TestProcessNodeExecutesAggregateAndJoinQueries(t *testing.T) {
 	t.Parallel()
 

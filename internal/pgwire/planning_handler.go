@@ -130,6 +130,11 @@ func describeResult(plan chronossql.Plan, flow chronossql.FlowPlan) (QueryResult
 			Fields:     fields,
 			CommandTag: "UPSERT 1",
 		}, nil
+	case chronossql.OnConflictPlan:
+		return QueryResult{
+			Fields:     fields,
+			CommandTag: "INSERT 0 1",
+		}, nil
 	case chronossql.DeletePlan:
 		return QueryResult{
 			Fields:     fields,

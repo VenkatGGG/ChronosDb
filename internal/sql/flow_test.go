@@ -132,6 +132,30 @@ func TestFlowPlannerBuildUpsert(t *testing.T) {
 	}
 }
 
+func TestFlowPlannerBuildInsertOnConflict(t *testing.T) {
+	t.Parallel()
+
+	planner := testPlanner(t)
+	plan, err := planner.Plan("insert into users (id, name, email) values (1, 'alice', 'a@example.com') on conflict (email) do update set name = excluded.name returning id, name")
+	if err != nil {
+		t.Fatalf("plan query: %v", err)
+	}
+
+	flow, err := NewFlowPlanner().Build(plan)
+	if err != nil {
+		t.Fatalf("build flow: %v", err)
+	}
+	if flow.RootStageID != 1 || flow.RootFragmentID != 1 || len(flow.Stages) != 1 {
+		t.Fatalf("unexpected on-conflict flow shape: %+v", flow)
+	}
+	if flow.Stages[0].Processors[0].Kind != OperatorKVConflict {
+		t.Fatalf("on-conflict operator kind = %q, want %q", flow.Stages[0].Processors[0].Kind, OperatorKVConflict)
+	}
+	if len(flow.ResultSchema) != 2 || flow.ResultSchema[0].Name != "id" || flow.ResultSchema[1].Name != "name" {
+		t.Fatalf("on-conflict result schema = %+v, want [id name]", flow.ResultSchema)
+	}
+}
+
 func TestFlowPlannerBuildDeleteReturning(t *testing.T) {
 	t.Parallel()
 
