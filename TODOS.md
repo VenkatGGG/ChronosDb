@@ -589,7 +589,7 @@ intent sets.
     split ranges for `users` and `orders`, and runs a repeatable smoke sequence
     through pgwire
 
-### [ ] 14. Basic SQL CRUD and App Compatibility
+### [x] 14. Basic SQL CRUD and App Compatibility
 
 Deliver:
 
