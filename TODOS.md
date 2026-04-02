@@ -712,10 +712,18 @@ Design constraints:
   - the runtime query handler, process-node wrapper, and internal pgclient now
     execute real extended-protocol statements end-to-end against the live
     runtime, with unit/session coverage plus process-node client tests
-- [ ] 14.7 Add catalog support for secondary index descriptors and uniqueness metadata
+- [x] 14.7 Add catalog support for secondary index descriptors and uniqueness metadata
   so table descriptors can declare future unique and non-unique indexes even if
   the first executor slice only uses them for validation and conflict-planning
   scaffolding
+  - table descriptors now persist declared secondary indexes, including ordered
+    indexed columns and unique/non-unique metadata, through the catalog JSON
+    contract and runtime catalog seeding/loading path
+  - catalog validation now rejects malformed index metadata up front, and the
+    built-in demo catalog declares both non-unique and unique secondary indexes
+    for later executor work
+  - catalog and runtime tests now verify index validation, lookup helpers, and
+    persisted descriptor reload across host restart
 - [ ] 14.8 Add unique-key enforcement and index maintenance
   for insert/update/delete paths so secondary index rows are written and
   removed transactionally and uniqueness violations surface as stable SQL

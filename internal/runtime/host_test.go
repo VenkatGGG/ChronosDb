@@ -317,6 +317,9 @@ func TestHostSeedsAndLoadsSQLCatalog(t *testing.T) {
 			{ID: 2, Name: "name", Type: chronossql.ColumnTypeString},
 		},
 		PrimaryKey: []string{"id"},
+		Indexes: []chronossql.IndexDescriptor{
+			{ID: 1, Name: "widgets_name_idx", Columns: []string{"name"}},
+		},
 	}); err != nil {
 		t.Fatalf("add widgets table: %v", err)
 	}
@@ -327,8 +330,12 @@ func TestHostSeedsAndLoadsSQLCatalog(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load sql catalog: %v", err)
 	}
-	if _, err := loaded.ResolveTable("widgets"); err != nil {
+	table, err := loaded.ResolveTable("widgets")
+	if err != nil {
 		t.Fatalf("resolve persisted widgets table: %v", err)
+	}
+	if _, ok := table.IndexByName("widgets_name_idx"); !ok {
+		t.Fatalf("expected persisted index descriptor to be loaded")
 	}
 }
 

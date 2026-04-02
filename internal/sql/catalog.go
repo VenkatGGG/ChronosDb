@@ -26,6 +26,14 @@ type ColumnDescriptor struct {
 	Nullable bool
 }
 
+// IndexDescriptor describes one secondary index declared on a table.
+type IndexDescriptor struct {
+	ID      uint64   `json:"id"`
+	Name    string   `json:"name"`
+	Columns []string `json:"columns"`
+	Unique  bool     `json:"unique"`
+}
+
 // TableStats carries coarse planning statistics for the optimizer.
 type TableStats struct {
 	EstimatedRows   uint64
@@ -38,6 +46,7 @@ type TableDescriptor struct {
 	Name            string
 	Columns         []ColumnDescriptor
 	PrimaryKey      []string
+	Indexes         []IndexDescriptor
 	Stats           TableStats
 	PlacementPolicy *placement.Policy
 }
@@ -139,6 +148,39 @@ func (t TableDescriptor) Validate() error {
 			return fmt.Errorf("table descriptor: primary key column %q not found", pk)
 		}
 	}
+	indexIDs := make(map[uint64]struct{}, len(t.Indexes))
+	indexNames := make(map[string]struct{}, len(t.Indexes))
+	for _, index := range t.Indexes {
+		if index.ID == 0 {
+			return fmt.Errorf("table descriptor: index id must be non-zero")
+		}
+		if strings.TrimSpace(index.Name) == "" {
+			return fmt.Errorf("table descriptor: index name must be non-empty")
+		}
+		if len(index.Columns) == 0 {
+			return fmt.Errorf("table descriptor: index %q must reference at least one column", index.Name)
+		}
+		if _, ok := indexIDs[index.ID]; ok {
+			return fmt.Errorf("table descriptor: duplicate index id %d", index.ID)
+		}
+		indexIDs[index.ID] = struct{}{}
+		name := canonicalName(index.Name)
+		if _, ok := indexNames[name]; ok {
+			return fmt.Errorf("table descriptor: duplicate index name %q", index.Name)
+		}
+		indexNames[name] = struct{}{}
+		columnSet := make(map[string]struct{}, len(index.Columns))
+		for _, columnName := range index.Columns {
+			key := canonicalName(columnName)
+			if _, ok := seen[key]; !ok {
+				return fmt.Errorf("table descriptor: index %q column %q not found", index.Name, columnName)
+			}
+			if _, ok := columnSet[key]; ok {
+				return fmt.Errorf("table descriptor: index %q has duplicate column %q", index.Name, columnName)
+			}
+			columnSet[key] = struct{}{}
+		}
+	}
 	if _, _, err := t.CompiledPlacement(); err != nil {
 		return err
 	}
@@ -165,6 +207,36 @@ func (t TableDescriptor) PrimaryKeyColumn() (ColumnDescriptor, error) {
 		return ColumnDescriptor{}, fmt.Errorf("table descriptor: primary key column %q not found", t.PrimaryKey[0])
 	}
 	return column, nil
+}
+
+// IndexByName resolves one declared secondary index by name.
+func (t TableDescriptor) IndexByName(name string) (IndexDescriptor, bool) {
+	for _, index := range t.Indexes {
+		if canonicalName(index.Name) == canonicalName(name) {
+			return index, true
+		}
+	}
+	return IndexDescriptor{}, false
+}
+
+// IndexByColumns resolves one declared secondary index by its ordered column list.
+func (t TableDescriptor) IndexByColumns(columns []string) (IndexDescriptor, bool) {
+	for _, index := range t.Indexes {
+		if len(index.Columns) != len(columns) {
+			continue
+		}
+		match := true
+		for i := range columns {
+			if canonicalName(index.Columns[i]) != canonicalName(columns[i]) {
+				match = false
+				break
+			}
+		}
+		if match {
+			return index, true
+		}
+	}
+	return IndexDescriptor{}, false
 }
 
 // StatsOrDefaults returns usable planning stats even before the catalog is fully populated.

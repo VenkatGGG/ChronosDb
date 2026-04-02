@@ -148,6 +148,10 @@ func defaultSystemTestCatalog() (*chronossql.Catalog, error) {
 			{ID: 3, Name: "email", Type: chronossql.ColumnTypeString, Nullable: true},
 		},
 		PrimaryKey: []string{"id"},
+		Indexes: []chronossql.IndexDescriptor{
+			{ID: 1, Name: "users_name_idx", Columns: []string{"name"}},
+			{ID: 2, Name: "users_email_key", Columns: []string{"email"}, Unique: true},
+		},
 		Stats: chronossql.TableStats{
 			EstimatedRows:   10000,
 			AverageRowBytes: 192,

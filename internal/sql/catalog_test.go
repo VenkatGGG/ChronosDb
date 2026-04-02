@@ -73,3 +73,51 @@ func TestCatalogValidatesPlacementPolicy(t *testing.T) {
 		t.Fatalf("expected invalid placement policy to be rejected")
 	}
 }
+
+func TestCatalogValidatesSecondaryIndexes(t *testing.T) {
+	t.Parallel()
+
+	catalog := NewCatalog()
+	table := TableDescriptor{
+		ID:   11,
+		Name: "users",
+		Columns: []ColumnDescriptor{
+			{ID: 1, Name: "id", Type: ColumnTypeInt},
+			{ID: 2, Name: "name", Type: ColumnTypeString},
+			{ID: 3, Name: "email", Type: ColumnTypeString},
+		},
+		PrimaryKey: []string{"id"},
+		Indexes: []IndexDescriptor{
+			{ID: 1, Name: "users_name_idx", Columns: []string{"name"}},
+			{ID: 2, Name: "users_email_key", Columns: []string{"email"}, Unique: true},
+		},
+	}
+	if err := catalog.AddTable(table); err != nil {
+		t.Fatalf("add indexed table: %v", err)
+	}
+	resolved, err := catalog.ResolveTable("users")
+	if err != nil {
+		t.Fatalf("resolve indexed table: %v", err)
+	}
+	index, ok := resolved.IndexByName("users_email_key")
+	if !ok || !index.Unique {
+		t.Fatalf("email index = %+v, want unique users_email_key", index)
+	}
+	if _, ok := resolved.IndexByColumns([]string{"name"}); !ok {
+		t.Fatalf("expected name index to resolve by columns")
+	}
+	if err := catalog.AddTable(TableDescriptor{
+		ID:   12,
+		Name: "broken_users",
+		Columns: []ColumnDescriptor{
+			{ID: 1, Name: "id", Type: ColumnTypeInt},
+			{ID: 2, Name: "email", Type: ColumnTypeString},
+		},
+		PrimaryKey: []string{"id"},
+		Indexes: []IndexDescriptor{
+			{ID: 1, Name: "broken_email_idx", Columns: []string{"missing"}},
+		},
+	}); err == nil {
+		t.Fatalf("expected missing index column to be rejected")
+	}
+}
