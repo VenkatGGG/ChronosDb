@@ -828,3 +828,77 @@ Phase gates:
   and end-to-end pgwire coverage against the seeded multi-node demo
 - [x] Gate 14D: full `ON CONFLICT` must not begin implementation before unique
   index metadata and maintenance are already live
+
+### [ ] 15. Post-Phase-14 Hardening and Architecture Cleanup
+
+Deliver:
+
+- close the remaining high-signal architectural and contract gaps that keep the
+  codebase from feeling production-hardened even though the feature plan is
+  complete
+- replace ambiguous or drifted API contracts with sharper boundaries so future
+  work does not pile more coupling onto the current runtime and pgwire layers
+- make the external/admin/operator surfaces consistent about authentication,
+  error mapping, and request contracts without relying on stale review state
+
+Exit criteria:
+
+- pgwire startup no longer blindly trusts every client connection; the server
+  has a real authentication seam and an explicit session principal model
+- console and scenario APIs map caller and artifact errors to accurate HTTP
+  contracts instead of infrastructure-looking fallbacks
+- prepared-query, span-scan, and replica-preparation APIs use one coherent
+  contract shape instead of overlapping verbs and long positional argument
+  lists
+- the tracker can point to clear remaining cleanup items without mixing them
+  into completed feature phases
+
+Design constraints:
+
+- do not spend time on tool-only score infrastructure in this phase; ignore
+  `golangci-lint` installation and `PIL`/badge generation here
+- prefer code and contract improvements that remove real maintenance risk over
+  review-score cosmetics
+- keep commits scoped by concern area so auth, HTTP contracts, and API-shape
+  refactors can be reviewed independently
+
+### [ ] Phase 15 Planned Execution
+
+- [ ] 15.1 Add pgwire authentication and session-principal plumbing
+  by introducing an explicit startup authenticator seam, propagating the
+  authenticated principal into the session, and teaching the pgwire client/test
+  stack how to satisfy the new handshake
+- [ ] 15.2 Fix scenario run HTTP contracts
+  so missing retained runs map to `404` at the console API boundary instead of
+  surfacing as generic `502` backend failures
+- [ ] 15.3 Unify prepared-query API shape
+  by renaming or reshaping the planner-only helper so it no longer looks like
+  the live extended-protocol `PrepareQuery` contract while carrying fewer
+  inputs and guarantees
+- [ ] 15.4 Replace high-arity scan and replica-preparation APIs with request structs
+  so range spans, inclusivity flags, and replica/snapshot parameters are named
+  once instead of repeated across storage, runtime, and systemtest layers
+- [ ] 15.5 Make runtime cancellation contracts consistent
+  by choosing which exported runtime operations are actually cancellable and
+  removing unused `context.Context` parameters from synchronous helpers
+- [ ] 15.6 Reduce runtime/systemtest boundary bleed
+  by carving durable runtime-facing pieces out of `internal/systemtest` where
+  production/demo code currently depends on test-oriented package seams
+- [ ] 15.7 Trim narrating doc comments and signature-echo docs
+  where exported comments restate obvious code instead of documenting
+  constraints, invariants, or compatibility semantics
+
+Execution order:
+
+- [ ] Milestone 15A: contract correctness
+  Complete `15.2` and `15.3` first so HTTP and prepared-query callers stop
+  depending on misleading contracts before broader refactors begin.
+- [ ] Milestone 15B: auth and trust boundaries
+  Complete `15.1` before any further UI/runtime exposure work so pgwire no
+  longer remains the most obvious unauthenticated surface.
+- [ ] Milestone 15C: API-shape cleanup
+  Complete `15.4` and `15.5` together so request-shape and cancellation-policy
+  changes settle into one coherent exported contract set.
+- [ ] Milestone 15D: package and doc cleanup
+  Finish with `15.6` and `15.7` once the live contracts are stable enough to
+  extract and rename boundaries without churn.
