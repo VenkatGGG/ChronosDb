@@ -20,6 +20,7 @@ func main() {
 	flag.StringVar(&cfg.PGListenAddr, "pg-addr", "127.0.0.1:0", "pgwire listen address")
 	flag.StringVar(&cfg.ObservabilityAddr, "obs-addr", "127.0.0.1:0", "observability listen address")
 	flag.StringVar(&cfg.ControlAddr, "control-addr", "127.0.0.1:0", "control listen address")
+	flag.StringVar(&cfg.AdminBearerToken, "admin-bearer-token", "", "optional bearer token required for control and observability endpoints")
 	flag.Parse()
 
 	node, err := systemtest.NewProcessNode(cfg)

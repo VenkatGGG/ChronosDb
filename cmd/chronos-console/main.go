@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/VenkatGGG/ChronosDb/internal/adminapi"
+	"github.com/VenkatGGG/ChronosDb/internal/httpauth"
 )
 
 func main() {
@@ -23,6 +24,7 @@ func main() {
 	streamReplayLimit := flag.Int("event-replay-limit", 256, "recent events retained for SSE replay")
 	uiDir := flag.String("ui-dir", "", "optional built UI directory to serve alongside the console API")
 	artifactRoot := flag.String("artifact-root", "", "optional retained chaos artifact root to expose via the console API")
+	apiBearerToken := flag.String("api-bearer-token", "", "optional bearer token required for console API access")
 	flag.Parse()
 
 	rawTargets := splitAndTrim(*nodeURLs)
@@ -61,6 +63,11 @@ func main() {
 		Stream:    stream,
 		Scenarios: scenarios,
 	})
+	apiHandler = httpauth.Policy{
+		BearerToken:  *apiBearerToken,
+		LoopbackOnly: true,
+		Realm:        "chronos-console-api",
+	}.Wrap(apiHandler)
 	handler, err := buildHandler(apiHandler, *uiDir)
 	if err != nil {
 		log.Fatal(err)

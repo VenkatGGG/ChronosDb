@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/VenkatGGG/ChronosDb/internal/httpauth"
 )
 
 func TestHandlerServesMetricsHealthReadyOverviewAndPprof(t *testing.T) {
@@ -139,6 +141,33 @@ func TestHandlerPropagatesUnhealthyAndNotReady(t *testing.T) {
 	}
 	if !strings.Contains(string(body), notReady.Error()) {
 		t.Fatalf("readyz body = %q, want substring %q", string(body), notReady.Error())
+	}
+}
+
+func TestHandlerProtectsPrivilegedEndpoints(t *testing.T) {
+	t.Parallel()
+
+	handler := NewHandler(HandlerOptions{
+		AuthPolicy: httpauth.Policy{
+			LoopbackOnly: true,
+			PublicPaths:  []string{"/healthz", "/readyz"},
+		},
+	})
+
+	metricsReq := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	metricsReq.RemoteAddr = "10.0.0.8:4567"
+	metricsRec := httptest.NewRecorder()
+	handler.ServeHTTP(metricsRec, metricsReq)
+	if metricsRec.Code != http.StatusForbidden {
+		t.Fatalf("metrics status = %d, want %d", metricsRec.Code, http.StatusForbidden)
+	}
+
+	healthReq := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	healthReq.RemoteAddr = "10.0.0.8:4567"
+	healthRec := httptest.NewRecorder()
+	handler.ServeHTTP(healthRec, healthReq)
+	if healthRec.Code != http.StatusOK {
+		t.Fatalf("healthz status = %d, want %d", healthRec.Code, http.StatusOK)
 	}
 }
 

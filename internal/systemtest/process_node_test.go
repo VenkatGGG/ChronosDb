@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -136,6 +137,45 @@ func TestProcessNodeAdminEndpoints(t *testing.T) {
 	}
 	if snapshot.Events[0].Type != "partition_applied" {
 		t.Fatalf("snapshot latest event = %+v, want partition_applied", snapshot.Events[0])
+	}
+}
+
+func TestProcessNodeProtectsAdminAndControlHTTP(t *testing.T) {
+	t.Parallel()
+
+	node, err := NewProcessNode(ProcessNodeConfig{
+		NodeID:    1,
+		StoreID:   1,
+		ClusterID: "chronos-auth",
+		DataDir:   t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("new process node: %v", err)
+	}
+	defer node.host.Close()
+
+	controlReq := httptest.NewRequest(http.MethodGet, "/control/state", nil)
+	controlReq.RemoteAddr = "10.0.0.8:4567"
+	controlRec := httptest.NewRecorder()
+	node.controlMux().ServeHTTP(controlRec, controlReq)
+	if controlRec.Code != http.StatusForbidden {
+		t.Fatalf("control status = %d, want %d", controlRec.Code, http.StatusForbidden)
+	}
+
+	adminReq := httptest.NewRequest(http.MethodGet, "/admin/node", nil)
+	adminReq.RemoteAddr = "10.0.0.8:4567"
+	adminRec := httptest.NewRecorder()
+	node.observabilityMux().ServeHTTP(adminRec, adminReq)
+	if adminRec.Code != http.StatusForbidden {
+		t.Fatalf("admin status = %d, want %d", adminRec.Code, http.StatusForbidden)
+	}
+
+	healthReq := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	healthReq.RemoteAddr = "10.0.0.8:4567"
+	healthRec := httptest.NewRecorder()
+	node.observabilityMux().ServeHTTP(healthRec, healthReq)
+	if healthRec.Code != http.StatusOK {
+		t.Fatalf("healthz status = %d, want %d", healthRec.Code, http.StatusOK)
 	}
 }
 

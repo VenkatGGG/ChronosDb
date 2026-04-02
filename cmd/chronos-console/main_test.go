@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/VenkatGGG/ChronosDb/internal/httpauth"
 )
 
 func TestBuildHandlerServesAPIAndUI(t *testing.T) {
@@ -82,4 +84,39 @@ func TestBuildHandlerServesAPIAndUI(t *testing.T) {
 			t.Fatalf("asset body = %q", rec.Body.String())
 		}
 	})
+}
+
+func TestConsoleAPIHandlerCanBeProtected(t *testing.T) {
+	t.Parallel()
+
+	apiMux := http.NewServeMux()
+	apiMux.HandleFunc("/api/v1/cluster", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	})
+	protected := httpauth.Policy{
+		LoopbackOnly: true,
+		BearerToken:  "secret",
+		Realm:        "chronos-console-api",
+	}.Wrap(apiMux)
+	handler, err := buildHandler(protected, "")
+	if err != nil {
+		t.Fatalf("build handler: %v", err)
+	}
+
+	unauthorizedReq := httptest.NewRequest(http.MethodGet, "/api/v1/cluster", nil)
+	unauthorizedReq.RemoteAddr = "10.0.0.8:4567"
+	unauthorizedRec := httptest.NewRecorder()
+	handler.ServeHTTP(unauthorizedRec, unauthorizedReq)
+	if unauthorizedRec.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthorized status = %d, want %d", unauthorizedRec.Code, http.StatusUnauthorized)
+	}
+
+	authorizedReq := httptest.NewRequest(http.MethodGet, "/api/v1/cluster", nil)
+	authorizedReq.RemoteAddr = "10.0.0.8:4567"
+	authorizedReq.Header.Set("Authorization", "Bearer secret")
+	authorizedRec := httptest.NewRecorder()
+	handler.ServeHTTP(authorizedRec, authorizedReq)
+	if authorizedRec.Code != http.StatusOK {
+		t.Fatalf("authorized status = %d, want %d", authorizedRec.Code, http.StatusOK)
+	}
 }

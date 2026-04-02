@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/VenkatGGG/ChronosDb/internal/adminapi"
+	"github.com/VenkatGGG/ChronosDb/internal/httpauth"
 	"github.com/VenkatGGG/ChronosDb/internal/meta"
 	"github.com/VenkatGGG/ChronosDb/internal/observability"
 	"github.com/VenkatGGG/ChronosDb/internal/pgwire"
@@ -33,6 +34,7 @@ type ProcessNodeConfig struct {
 	PGListenAddr        string
 	ObservabilityAddr   string
 	ControlAddr         string
+	AdminBearerToken    string
 	Catalog             *chronossql.Catalog
 	Ranges              []meta.RangeDescriptor
 	EventBufferSize     int
@@ -380,45 +382,57 @@ func (n *ProcessNode) writeState() error {
 }
 
 func (n *ProcessNode) controlMux() http.Handler {
+	policy := n.adminPolicy()
 	mux := http.NewServeMux()
-	mux.HandleFunc("/control/state", n.handleState)
-	mux.HandleFunc("/control/partition", n.handlePartition)
-	mux.HandleFunc("/control/heal", n.handleHeal)
-	mux.HandleFunc("/control/raft/message", n.handleRaftMessage)
-	mux.HandleFunc("/control/range/prepare", n.handleRangePrepare)
-	mux.HandleFunc("/control/range/status", n.handleRangeStatus)
-	mux.HandleFunc("/control/kv/get", n.handleKVGet)
-	mux.HandleFunc("/control/kv/put", n.handleKVPut)
-	mux.HandleFunc("/control/kv/delete", n.handleKVDelete)
-	mux.HandleFunc("/control/kv/scan", n.handleKVScan)
-	mux.HandleFunc("/control/kv/intent/put", n.handleKVIntentPut)
-	mux.HandleFunc("/control/kv/intent/get", n.handleKVIntentGet)
-	mux.HandleFunc("/control/kv/intent/delete", n.handleKVIntentDelete)
-	mux.HandleFunc("/control/kv/txn-record/put", n.handleKVTxnRecordPut)
-	mux.HandleFunc("/control/kv/txn-record/get", n.handleKVTxnRecordGet)
-	mux.HandleFunc("/control/kv/txn-record/scan", n.handleKVTxnRecordScan)
-	mux.HandleFunc("/control/txn/lock/acquire", n.handleTxnLockAcquire)
-	mux.HandleFunc("/control/txn/lock/release", n.handleTxnLockRelease)
-	mux.HandleFunc("/control/ambiguous-commit", n.handleAmbiguousCommit)
-	mux.HandleFunc("/control/logs", n.handleLogs)
-	mux.HandleFunc("/control/log", n.handleLog)
+	mux.Handle("/control/state", policy.WrapFunc(n.handleState))
+	mux.Handle("/control/partition", policy.WrapFunc(n.handlePartition))
+	mux.Handle("/control/heal", policy.WrapFunc(n.handleHeal))
+	mux.Handle("/control/raft/message", policy.WrapFunc(n.handleRaftMessage))
+	mux.Handle("/control/range/prepare", policy.WrapFunc(n.handleRangePrepare))
+	mux.Handle("/control/range/status", policy.WrapFunc(n.handleRangeStatus))
+	mux.Handle("/control/kv/get", policy.WrapFunc(n.handleKVGet))
+	mux.Handle("/control/kv/put", policy.WrapFunc(n.handleKVPut))
+	mux.Handle("/control/kv/delete", policy.WrapFunc(n.handleKVDelete))
+	mux.Handle("/control/kv/scan", policy.WrapFunc(n.handleKVScan))
+	mux.Handle("/control/kv/intent/put", policy.WrapFunc(n.handleKVIntentPut))
+	mux.Handle("/control/kv/intent/get", policy.WrapFunc(n.handleKVIntentGet))
+	mux.Handle("/control/kv/intent/delete", policy.WrapFunc(n.handleKVIntentDelete))
+	mux.Handle("/control/kv/txn-record/put", policy.WrapFunc(n.handleKVTxnRecordPut))
+	mux.Handle("/control/kv/txn-record/get", policy.WrapFunc(n.handleKVTxnRecordGet))
+	mux.Handle("/control/kv/txn-record/scan", policy.WrapFunc(n.handleKVTxnRecordScan))
+	mux.Handle("/control/txn/lock/acquire", policy.WrapFunc(n.handleTxnLockAcquire))
+	mux.Handle("/control/txn/lock/release", policy.WrapFunc(n.handleTxnLockRelease))
+	mux.Handle("/control/ambiguous-commit", policy.WrapFunc(n.handleAmbiguousCommit))
+	mux.Handle("/control/logs", policy.WrapFunc(n.handleLogs))
+	mux.Handle("/control/log", policy.WrapFunc(n.handleLog))
 	return mux
 }
 
 func (n *ProcessNode) observabilityMux() http.Handler {
+	policy := n.adminPolicy()
 	base := observability.NewHandler(observability.HandlerOptions{
-		Metrics:  n.metrics,
-		Health:   n.probe(),
-		Ready:    n.probe(),
-		Overview: n.overview(),
+		Metrics:    n.metrics,
+		Health:     n.probe(),
+		Ready:      n.probe(),
+		Overview:   n.overview(),
+		AuthPolicy: policy,
 	})
 	mux := http.NewServeMux()
-	mux.HandleFunc("/admin/node", n.handleAdminNode)
-	mux.HandleFunc("/admin/ranges", n.handleAdminRanges)
-	mux.HandleFunc("/admin/events", n.handleAdminEvents)
-	mux.HandleFunc("/admin/snapshot", n.handleAdminSnapshot)
+	mux.Handle("/admin/node", policy.WrapFunc(n.handleAdminNode))
+	mux.Handle("/admin/ranges", policy.WrapFunc(n.handleAdminRanges))
+	mux.Handle("/admin/events", policy.WrapFunc(n.handleAdminEvents))
+	mux.Handle("/admin/snapshot", policy.WrapFunc(n.handleAdminSnapshot))
 	mux.Handle("/", base)
 	return mux
+}
+
+func (n *ProcessNode) adminPolicy() httpauth.Policy {
+	return httpauth.Policy{
+		BearerToken:  n.cfg.AdminBearerToken,
+		LoopbackOnly: true,
+		Realm:        "chronos-node-admin",
+		PublicPaths:  []string{"/healthz", "/readyz"},
+	}
 }
 
 func (n *ProcessNode) handleState(w http.ResponseWriter, r *http.Request) {

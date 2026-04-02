@@ -7,6 +7,7 @@ import (
 	"net/http/pprof"
 	"time"
 
+	"github.com/VenkatGGG/ChronosDb/internal/httpauth"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
@@ -27,11 +28,12 @@ type OverviewProvider func(context.Context) (Overview, error)
 
 // HandlerOptions controls the observability HTTP surface.
 type HandlerOptions struct {
-	Metrics  *Metrics
-	Registry *prometheus.Registry
-	Health   Probe
-	Ready    Probe
-	Overview OverviewProvider
+	Metrics    *Metrics
+	Registry   *prometheus.Registry
+	Health     Probe
+	Ready      Probe
+	Overview   OverviewProvider
+	AuthPolicy httpauth.Policy
 }
 
 // NewHandler builds the ChronosDB observability HTTP surface.
@@ -45,22 +47,23 @@ func NewHandler(opts HandlerOptions) http.Handler {
 	}
 
 	mux := http.NewServeMux()
-	mux.Handle("/metrics", promhttp.HandlerFor(registry, promhttp.HandlerOpts{}))
+	protected := opts.AuthPolicy
+	mux.Handle("/metrics", protected.Wrap(promhttp.HandlerFor(registry, promhttp.HandlerOpts{})))
 	mux.HandleFunc("/healthz", probeHandler(opts.Health))
 	mux.HandleFunc("/readyz", probeHandler(opts.Ready))
-	mux.HandleFunc("/debug/chronos/overview", overviewHandler(opts.Overview))
+	mux.Handle("/debug/chronos/overview", protected.Wrap(overviewHandler(opts.Overview)))
 
-	mux.HandleFunc("/debug/pprof/", pprof.Index)
-	mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
-	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
-	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
-	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
-	mux.Handle("/debug/pprof/allocs", pprof.Handler("allocs"))
-	mux.Handle("/debug/pprof/block", pprof.Handler("block"))
-	mux.Handle("/debug/pprof/goroutine", pprof.Handler("goroutine"))
-	mux.Handle("/debug/pprof/heap", pprof.Handler("heap"))
-	mux.Handle("/debug/pprof/mutex", pprof.Handler("mutex"))
-	mux.Handle("/debug/pprof/threadcreate", pprof.Handler("threadcreate"))
+	mux.Handle("/debug/pprof/", protected.Wrap(http.HandlerFunc(pprof.Index)))
+	mux.Handle("/debug/pprof/cmdline", protected.Wrap(http.HandlerFunc(pprof.Cmdline)))
+	mux.Handle("/debug/pprof/profile", protected.Wrap(http.HandlerFunc(pprof.Profile)))
+	mux.Handle("/debug/pprof/symbol", protected.Wrap(http.HandlerFunc(pprof.Symbol)))
+	mux.Handle("/debug/pprof/trace", protected.Wrap(http.HandlerFunc(pprof.Trace)))
+	mux.Handle("/debug/pprof/allocs", protected.Wrap(pprof.Handler("allocs")))
+	mux.Handle("/debug/pprof/block", protected.Wrap(pprof.Handler("block")))
+	mux.Handle("/debug/pprof/goroutine", protected.Wrap(pprof.Handler("goroutine")))
+	mux.Handle("/debug/pprof/heap", protected.Wrap(pprof.Handler("heap")))
+	mux.Handle("/debug/pprof/mutex", protected.Wrap(pprof.Handler("mutex")))
+	mux.Handle("/debug/pprof/threadcreate", protected.Wrap(pprof.Handler("threadcreate")))
 
 	return mux
 }
