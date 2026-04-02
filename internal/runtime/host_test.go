@@ -7,6 +7,7 @@ import (
 
 	"github.com/VenkatGGG/ChronosDb/internal/hlc"
 	"github.com/VenkatGGG/ChronosDb/internal/meta"
+	"github.com/VenkatGGG/ChronosDb/internal/routing"
 	chronossql "github.com/VenkatGGG/ChronosDb/internal/sql"
 	"github.com/VenkatGGG/ChronosDb/internal/storage"
 	"github.com/VenkatGGG/ChronosDb/internal/txn"
@@ -415,6 +416,78 @@ func TestHostBackgroundServicesPublishClosedTimestampsAndSplitRanges(t *testing.
 	}
 	if _, err := host.scheduler.Replica(lookup.RangeID); err != nil {
 		t.Fatalf("split range %d not loaded into scheduler: %v", lookup.RangeID, err)
+	}
+}
+
+func TestHostLookupRangeUsesResolverCacheAndRefreshesOnRoutingError(t *testing.T) {
+	t.Parallel()
+
+	dataDir := t.TempDir()
+	seed := meta.RangeDescriptor{
+		RangeID:    11,
+		Generation: 1,
+		StartKey:   []byte("a"),
+		EndKey:     []byte("z"),
+		Replicas: []meta.ReplicaDescriptor{
+			{ReplicaID: 1, NodeID: 1, Role: meta.ReplicaRoleVoter},
+			{ReplicaID: 2, NodeID: 2, Role: meta.ReplicaRoleVoter},
+		},
+		LeaseholderReplicaID: 1,
+	}
+
+	host, err := Open(context.Background(), Config{
+		NodeID:     1,
+		StoreID:    1,
+		ClusterID:  "cluster-runtime",
+		DataDir:    dataDir,
+		SeedRanges: []meta.RangeDescriptor{seed},
+	})
+	if err != nil {
+		t.Fatalf("open host: %v", err)
+	}
+	defer host.Close()
+
+	key := []byte("m")
+	first, err := host.LookupRange(context.Background(), key)
+	if err != nil {
+		t.Fatalf("initial lookup: %v", err)
+	}
+	if first.Generation != 1 {
+		t.Fatalf("initial generation = %d, want 1", first.Generation)
+	}
+
+	updated := seed
+	updated.Generation = 2
+	updated.LeaseholderReplicaID = 2
+	if err := host.catalog.Upsert(context.Background(), meta.LevelMeta2, updated); err != nil {
+		t.Fatalf("upsert updated descriptor: %v", err)
+	}
+
+	cached, err := host.LookupRange(context.Background(), key)
+	if err != nil {
+		t.Fatalf("cached lookup: %v", err)
+	}
+	if cached.Generation != 1 || cached.LeaseholderReplicaID != 1 {
+		t.Fatalf("cached descriptor = %+v, want generation 1 with original leaseholder", cached)
+	}
+
+	refreshed, err := host.ResolveRangeAfterRoutingError(context.Background(), key, routing.RoutingError{
+		Code:    routing.ErrorCodeDescriptorStale,
+		RangeID: seed.RangeID,
+	})
+	if err != nil {
+		t.Fatalf("refresh after routing error: %v", err)
+	}
+	if refreshed.Descriptor.Generation != 2 || refreshed.Descriptor.LeaseholderReplicaID != 2 {
+		t.Fatalf("refreshed descriptor = %+v, want generation 2 and leaseholder 2", refreshed.Descriptor)
+	}
+
+	latest, err := host.LookupRange(context.Background(), key)
+	if err != nil {
+		t.Fatalf("lookup after refresh: %v", err)
+	}
+	if latest.Generation != 2 || latest.LeaseholderReplicaID != 2 {
+		t.Fatalf("latest descriptor = %+v, want refreshed descriptor", latest)
 	}
 }
 

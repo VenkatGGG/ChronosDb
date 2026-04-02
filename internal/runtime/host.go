@@ -14,6 +14,7 @@ import (
 	"github.com/VenkatGGG/ChronosDb/internal/meta"
 	"github.com/VenkatGGG/ChronosDb/internal/multiraft"
 	"github.com/VenkatGGG/ChronosDb/internal/replica"
+	"github.com/VenkatGGG/ChronosDb/internal/routing"
 	chronossql "github.com/VenkatGGG/ChronosDb/internal/sql"
 	"github.com/VenkatGGG/ChronosDb/internal/storage"
 	"github.com/VenkatGGG/ChronosDb/internal/txn"
@@ -66,6 +67,7 @@ type Host struct {
 	mu                    sync.Mutex
 	engine                *storage.Engine
 	catalog               *meta.Catalog
+	rangeResolver         *routing.Resolver
 	scheduler             *multiraft.Scheduler
 	ident                 storage.StoreIdent
 	transport             Transport
@@ -156,6 +158,7 @@ func Open(ctx context.Context, cfg Config) (*Host, error) {
 		pendingReplicaTargets: make(map[uint64]map[uint64]uint64),
 		preparedDescriptors:   make(map[uint64]meta.RangeDescriptor),
 	}
+	host.rangeResolver = routing.NewResolver(routing.NewRangeCache(routing.Config{}), host.catalog)
 	host.applyBackgroundDefaults()
 	if manifest != nil {
 		if err := host.seedBootstrapManifest(ctx, *manifest); err != nil {
@@ -209,9 +212,23 @@ func (h *Host) NodeID() uint64 {
 	return h.ident.NodeID
 }
 
+// ResolveRange returns the authoritative routing result for one logical key.
+func (h *Host) ResolveRange(ctx context.Context, key []byte) (routing.ResolvedRange, error) {
+	return h.rangeResolver.Resolve(ctx, key)
+}
+
+// ResolveRangeAfterRoutingError invalidates the stale cache entry and refreshes it.
+func (h *Host) ResolveRangeAfterRoutingError(ctx context.Context, key []byte, routingErr routing.RoutingError) (routing.ResolvedRange, error) {
+	return h.rangeResolver.ResolveAfterRoutingError(ctx, key, routingErr)
+}
+
 // LookupRange resolves the authoritative descriptor for one logical key.
 func (h *Host) LookupRange(ctx context.Context, key []byte) (meta.RangeDescriptor, error) {
-	return h.catalog.Lookup(ctx, key)
+	resolved, err := h.ResolveRange(ctx, key)
+	if err != nil {
+		return meta.RangeDescriptor{}, err
+	}
+	return resolved.Descriptor, nil
 }
 
 // ReadLatestLocal returns the latest committed value for a key hosted on the local store.
