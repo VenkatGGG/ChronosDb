@@ -53,6 +53,7 @@ type SessionTerminationError interface {
 type Session struct {
 	serverParameters map[string]string
 	handler          QueryHandler
+	principal        Principal
 	txStatus         TxStatus
 	prepared         map[string]PreparedQueryDescription
 	portals          map[string]boundPortal
@@ -66,17 +67,30 @@ type boundPortal struct {
 }
 
 // NewSession constructs a session with default PostgreSQL bootstrap parameters.
-func NewSession(handler QueryHandler) *Session {
-	return &Session{
-		handler:  handler,
-		txStatus: TxIdle,
-		prepared: make(map[string]PreparedQueryDescription),
-		portals:  make(map[string]boundPortal),
+func NewSession(handler QueryHandler, principal Principal) *Session {
+	session := &Session{
+		handler:   handler,
+		principal: principal,
+		txStatus:  TxIdle,
+		prepared:  make(map[string]PreparedQueryDescription),
+		portals:   make(map[string]boundPortal),
 		serverParameters: map[string]string{
 			"client_encoding": "UTF8",
 			"server_version":  "ChronosDB dev",
 		},
 	}
+	if principal.User != "" {
+		session.serverParameters["session_authorization"] = principal.User
+	}
+	return session
+}
+
+// Principal returns the authenticated principal for the current session.
+func (s *Session) Principal() Principal {
+	if s == nil {
+		return Principal{}
+	}
+	return s.principal
 }
 
 // HandleStartup validates the startup frame and returns bootstrap responses.
@@ -84,8 +98,14 @@ func (s *Session) HandleStartup(msg StartupMessage) ([][]byte, error) {
 	if msg.ProtocolVersion != ProtocolVersion30 {
 		return nil, fmt.Errorf("pgwire: unsupported protocol version %d", msg.ProtocolVersion)
 	}
-	frames := make([][]byte, 0, len(s.serverParameters)+2)
-	frames = append(frames, EncodeAuthenticationOK())
+	if _, ok := msg.Parameters["user"]; !ok {
+		return nil, Error{
+			Severity: "FATAL",
+			Code:     "28000",
+			Message:  "startup user is required",
+		}
+	}
+	frames := make([][]byte, 0, len(s.serverParameters)+1)
 	frames = append(frames, StartupParameterFrames(s.serverParameters)...)
 	frames = append(frames, EncodeReadyForQuery(s.txStatus))
 	return frames, nil

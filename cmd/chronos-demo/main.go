@@ -15,12 +15,12 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/VenkatGGG/ChronosDb/internal/appcompat"
 	"github.com/VenkatGGG/ChronosDb/internal/adminapi"
+	"github.com/VenkatGGG/ChronosDb/internal/appcompat"
 	"github.com/VenkatGGG/ChronosDb/internal/demo"
+	"github.com/VenkatGGG/ChronosDb/internal/node"
 	"github.com/VenkatGGG/ChronosDb/internal/pgclient"
 	chronosruntime "github.com/VenkatGGG/ChronosDb/internal/runtime"
-	"github.com/VenkatGGG/ChronosDb/internal/systemtest"
 )
 
 func main() {
@@ -71,12 +71,11 @@ func main() {
 		log.Fatal(err)
 	}
 
-	catalog, err := systemtest.DefaultCatalog()
+	catalog, err := node.DefaultCatalog()
 	if err != nil {
 		log.Fatal(err)
 	}
 	nodeConfigs := demo.DefaultNodeConfigs(dataRoot, clusterID)
-	nodes := make([]*systemtest.ProcessNode, 0, len(nodeConfigs))
 	doneChans := make([]chan error, 0, len(nodeConfigs))
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -84,11 +83,10 @@ func main() {
 
 	for _, cfg := range nodeConfigs {
 		cfg.Catalog = catalog
-		node, done, err := startNode(ctx, cfg)
+		_, done, err := startNode(ctx, cfg)
 		if err != nil {
 			log.Fatal(err)
 		}
-		nodes = append(nodes, node)
 		doneChans = append(doneChans, done)
 	}
 	if err := demo.WaitForSeededClusterReady(ctx, manifest, nodeConfigs); err != nil {
@@ -163,6 +161,8 @@ func main() {
 		workloadCtx, cancel := context.WithTimeout(ctx, time.Duration(appCompatIters+10)*time.Second)
 		report, err := appcompat.Run(workloadCtx, appcompat.Config{
 			Addr:       nodeConfigs[0].PGListenAddr,
+			User:       node.DefaultPGWireUser,
+			Password:   node.DefaultPGWirePassword,
 			Iterations: appCompatIters,
 		})
 		cancel()
@@ -188,9 +188,9 @@ func main() {
 	for _, cfg := range nodeConfigs {
 		log.Printf("node %d pgwire=%s observability=http://%s control=http://%s", cfg.NodeID, cfg.PGListenAddr, cfg.ObservabilityAddr, cfg.ControlAddr)
 	}
-	log.Printf("psql: psql \"postgresql://chronos@%s/postgres?sslmode=disable\"", nodeConfigs[0].PGListenAddr)
+	log.Printf("psql: PGPASSWORD=%s psql \"postgresql://%s@%s/postgres?sslmode=disable\"", node.DefaultPGWirePassword, node.DefaultPGWireUser, nodeConfigs[0].PGListenAddr)
 	log.Printf("seeded smoke queries are loaded across split users/orders ranges")
-	log.Printf("app compatibility: ./bin/chronos-appcompat -pg-addr %s -iterations 10", nodeConfigs[0].PGListenAddr)
+	log.Printf("app compatibility: ./bin/chronos-appcompat -pg-addr %s -user %s -password %s -iterations 10", nodeConfigs[0].PGListenAddr, node.DefaultPGWireUser, node.DefaultPGWirePassword)
 
 	<-ctx.Done()
 
@@ -201,20 +201,24 @@ func main() {
 	}
 }
 
-func startNode(ctx context.Context, cfg systemtest.ProcessNodeConfig) (*systemtest.ProcessNode, chan error, error) {
-	node, err := systemtest.NewProcessNode(cfg)
+func startNode(ctx context.Context, cfg node.Config) (*node.Process, chan error, error) {
+	nodeProcess, err := node.New(cfg)
 	if err != nil {
 		return nil, nil, err
 	}
 	done := make(chan error, 1)
 	go func() {
-		done <- node.Run(ctx)
+		done <- nodeProcess.Run(ctx)
 	}()
-	return node, done, nil
+	return nodeProcess, done, nil
 }
 
 func runSmoke(ctx context.Context, addr string) error {
-	client, err := pgclient.Dial(ctx, addr, "chronos")
+	client, err := pgclient.Dial(ctx, pgclient.DialConfig{
+		Addr:     addr,
+		User:     node.DefaultPGWireUser,
+		Password: node.DefaultPGWirePassword,
+	})
 	if err != nil {
 		return err
 	}

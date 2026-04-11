@@ -62,7 +62,7 @@ func TestPlanningHandlerDescribeInsert(t *testing.T) {
 	t.Parallel()
 
 	handler := newPlanningHandler(t)
-	result, err := handler.HandleSimpleQuery(context.Background(), NewSession(handler), "insert into users (id, name, email) values (1, 'alice', 'a@example.com')")
+	result, err := handler.HandleSimpleQuery(context.Background(), NewSession(handler, Principal{}), "insert into users (id, name, email) values (1, 'alice', 'a@example.com')")
 	if err != nil {
 		t.Fatalf("handle query: %v", err)
 	}
@@ -78,7 +78,7 @@ func TestPlanningHandlerDescribeUpsert(t *testing.T) {
 	t.Parallel()
 
 	handler := newPlanningHandler(t)
-	result, err := handler.HandleSimpleQuery(context.Background(), NewSession(handler), "upsert into users (id, name, email) values (1, 'alice', 'a@example.com')")
+	result, err := handler.HandleSimpleQuery(context.Background(), NewSession(handler, Principal{}), "upsert into users (id, name, email) values (1, 'alice', 'a@example.com')")
 	if err != nil {
 		t.Fatalf("handle query: %v", err)
 	}
@@ -94,7 +94,7 @@ func TestPlanningHandlerDescribeInsertOnConflictReturning(t *testing.T) {
 	t.Parallel()
 
 	handler := newPlanningHandler(t)
-	result, err := handler.HandleSimpleQuery(context.Background(), NewSession(handler), "insert into users (id, name, email) values (1, 'alice', 'a@example.com') on conflict (email) do update set name = excluded.name returning id, name")
+	result, err := handler.HandleSimpleQuery(context.Background(), NewSession(handler, Principal{}), "insert into users (id, name, email) values (1, 'alice', 'a@example.com') on conflict (email) do update set name = excluded.name returning id, name")
 	if err != nil {
 		t.Fatalf("handle query: %v", err)
 	}
@@ -110,7 +110,7 @@ func TestPlanningHandlerDescribeInsertReturning(t *testing.T) {
 	t.Parallel()
 
 	handler := newPlanningHandler(t)
-	result, err := handler.HandleSimpleQuery(context.Background(), NewSession(handler), "insert into users (id, name, email) values (1, 'alice', 'a@example.com') returning id, name")
+	result, err := handler.HandleSimpleQuery(context.Background(), NewSession(handler, Principal{}), "insert into users (id, name, email) values (1, 'alice', 'a@example.com') returning id, name")
 	if err != nil {
 		t.Fatalf("handle query: %v", err)
 	}
@@ -126,7 +126,7 @@ func TestPlanningHandlerDescribeUpdateReturning(t *testing.T) {
 	t.Parallel()
 
 	handler := newPlanningHandler(t)
-	result, err := handler.HandleSimpleQuery(context.Background(), NewSession(handler), "update users set name = 'ally' where id = 7 returning id, name")
+	result, err := handler.HandleSimpleQuery(context.Background(), NewSession(handler, Principal{}), "update users set name = 'ally' where id = 7 returning id, name")
 	if err != nil {
 		t.Fatalf("handle query: %v", err)
 	}
@@ -142,7 +142,7 @@ func TestPlanningHandlerDescribeDelete(t *testing.T) {
 	t.Parallel()
 
 	handler := newPlanningHandler(t)
-	result, err := handler.HandleSimpleQuery(context.Background(), NewSession(handler), "delete from users where id = 7")
+	result, err := handler.HandleSimpleQuery(context.Background(), NewSession(handler, Principal{}), "delete from users where id = 7")
 	if err != nil {
 		t.Fatalf("handle query: %v", err)
 	}
@@ -158,7 +158,7 @@ func TestPlanningHandlerDescribeUpdate(t *testing.T) {
 	t.Parallel()
 
 	handler := newPlanningHandler(t)
-	result, err := handler.HandleSimpleQuery(context.Background(), NewSession(handler), "update users set name = 'ally' where id = 7")
+	result, err := handler.HandleSimpleQuery(context.Background(), NewSession(handler, Principal{}), "update users set name = 'ally' where id = 7")
 	if err != nil {
 		t.Fatalf("handle query: %v", err)
 	}
@@ -209,7 +209,7 @@ func TestPlanningHandlerMapsPlannerErrors(t *testing.T) {
 	t.Parallel()
 
 	handler := newPlanningHandler(t)
-	_, err := handler.HandleSimpleQuery(context.Background(), NewSession(handler), "select distinct id from users")
+	_, err := handler.HandleSimpleQuery(context.Background(), NewSession(handler, Principal{}), "select distinct id from users")
 	if err == nil {
 		t.Fatalf("expected planner error")
 	}

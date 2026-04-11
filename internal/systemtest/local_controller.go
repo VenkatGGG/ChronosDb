@@ -340,7 +340,14 @@ func (c *LocalController) stopNode(node *localNode) error {
 }
 
 func (c *LocalController) servePG(ctx context.Context, nodeID uint64, handler pgwire.QueryHandler, listener net.Listener) {
-	server := pgwire.NewServer(handler)
+	authenticator, err := pgwire.NewStaticPasswordAuthenticator(map[string]string{
+		DefaultPGWireUser: DefaultPGWirePassword,
+	})
+	if err != nil {
+		c.recordServeError(nodeID, "pgwire", err)
+		return
+	}
+	server := pgwire.NewServer(handler, authenticator)
 	if err := server.ServeListener(ctx, listener); err != nil && !errors.Is(err, context.Canceled) {
 		c.recordServeError(nodeID, "pgwire", err)
 	}

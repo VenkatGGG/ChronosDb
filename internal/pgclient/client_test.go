@@ -77,7 +77,11 @@ func TestClientSimpleQueryAgainstProcessNode(t *testing.T) {
 
 	dialCtx, dialCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer dialCancel()
-	client, err := pgclient.Dial(dialCtx, state.PGAddr, "chronos")
+	client, err := pgclient.Dial(dialCtx, pgclient.DialConfig{
+		Addr:     state.PGAddr,
+		User:     systemtest.DefaultPGWireUser,
+		Password: systemtest.DefaultPGWirePassword,
+	})
 	if err != nil {
 		t.Fatalf("dial pgclient: %v", err)
 	}
@@ -169,7 +173,11 @@ func TestClientExtendedQueryAgainstProcessNode(t *testing.T) {
 
 	dialCtx, dialCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer dialCancel()
-	client, err := pgclient.Dial(dialCtx, state.PGAddr, "chronos")
+	client, err := pgclient.Dial(dialCtx, pgclient.DialConfig{
+		Addr:     state.PGAddr,
+		User:     systemtest.DefaultPGWireUser,
+		Password: systemtest.DefaultPGWirePassword,
+	})
 	if err != nil {
 		t.Fatalf("dial pgclient: %v", err)
 	}
@@ -280,7 +288,11 @@ func TestClientExtendedQuerySupportsConflictAndDeleteReturning(t *testing.T) {
 	state := waitForNodeState(t, node)
 	dialCtx, dialCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer dialCancel()
-	client, err := pgclient.Dial(dialCtx, state.PGAddr, "chronos")
+	client, err := pgclient.Dial(dialCtx, pgclient.DialConfig{
+		Addr:     state.PGAddr,
+		User:     systemtest.DefaultPGWireUser,
+		Password: systemtest.DefaultPGWirePassword,
+	})
 	if err != nil {
 		t.Fatalf("dial pgclient: %v", err)
 	}

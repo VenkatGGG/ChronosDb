@@ -23,18 +23,15 @@ func TestServerServeConnStartupQueryTerminate(t *testing.T) {
 			},
 			CommandTag: "SELECT 0",
 		},
-	})
+	}, mustStaticAuthenticator(t))
 	serverErr := make(chan error, 1)
 	go func() {
 		serverErr <- server.ServeConn(context.Background(), serverConn)
 	}()
 
-	if _, err := clientConn.Write(startupFrame(ProtocolVersion30, map[string]string{"user": "chronos"})); err != nil {
-		t.Fatalf("write startup: %v", err)
-	}
-	frames := readFrames(t, clientConn, 4)
-	if got := frameTags(frames); got != "RSSZ" {
-		t.Fatalf("startup frame tags = %q, want RSSZ", got)
+	frames := performStartup(t, clientConn, "chronos", "chronos")
+	if got := frameTags(frames); got != "RRSSSZ" {
+		t.Fatalf("startup frame tags = %q, want RRSSSZ", got)
 	}
 
 	if _, err := clientConn.Write(queryFrame("select id from users")); err != nil {
@@ -59,7 +56,7 @@ func TestServerServeConnRejectsSSLAndContinues(t *testing.T) {
 	serverConn, clientConn := net.Pipe()
 	defer clientConn.Close()
 
-	server := NewServer(staticHandler{result: QueryResult{CommandTag: "SELECT 0"}})
+	server := NewServer(staticHandler{result: QueryResult{CommandTag: "SELECT 0"}}, mustStaticAuthenticator(t))
 	serverErr := make(chan error, 1)
 	go func() {
 		serverErr <- server.ServeConn(context.Background(), serverConn)
@@ -76,12 +73,9 @@ func TestServerServeConnRejectsSSLAndContinues(t *testing.T) {
 		t.Fatalf("ssl response = %q, want 'N'", response[0])
 	}
 
-	if _, err := clientConn.Write(startupFrame(ProtocolVersion30, map[string]string{"user": "chronos"})); err != nil {
-		t.Fatalf("write startup: %v", err)
-	}
-	frames := readFrames(t, clientConn, 4)
-	if got := frameTags(frames); got != "RSSZ" {
-		t.Fatalf("startup frame tags = %q, want RSSZ", got)
+	frames := performStartup(t, clientConn, "chronos", "chronos")
+	if got := frameTags(frames); got != "RRSSSZ" {
+		t.Fatalf("startup frame tags = %q, want RRSSSZ", got)
 	}
 
 	if _, err := clientConn.Write(terminateFrame()); err != nil {
@@ -104,7 +98,7 @@ func TestServerServeListenerAcceptsTCPConnections(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	server := NewServer(staticHandler{result: QueryResult{CommandTag: "SELECT 0"}})
+	server := NewServer(staticHandler{result: QueryResult{CommandTag: "SELECT 0"}}, mustStaticAuthenticator(t))
 	serverErr := make(chan error, 1)
 	go func() {
 		serverErr <- server.ServeListener(ctx, listener)
@@ -116,12 +110,9 @@ func TestServerServeListenerAcceptsTCPConnections(t *testing.T) {
 	}
 	defer conn.Close()
 
-	if _, err := conn.Write(startupFrame(ProtocolVersion30, map[string]string{"user": "chronos"})); err != nil {
-		t.Fatalf("write startup: %v", err)
-	}
-	frames := readFrames(t, conn, 4)
-	if got := frameTags(frames); got != "RSSZ" {
-		t.Fatalf("startup frame tags = %q, want RSSZ", got)
+	frames := performStartup(t, conn, "chronos", "chronos")
+	if got := frameTags(frames); got != "RRSSSZ" {
+		t.Fatalf("startup frame tags = %q, want RRSSSZ", got)
 	}
 
 	cancel()
@@ -132,6 +123,37 @@ func TestServerServeListenerAcceptsTCPConnections(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatalf("timed out waiting for listener shutdown")
+	}
+}
+
+func TestServerServeConnRejectsWrongPassword(t *testing.T) {
+	t.Parallel()
+
+	serverConn, clientConn := net.Pipe()
+	defer clientConn.Close()
+
+	server := NewServer(staticHandler{result: QueryResult{CommandTag: "SELECT 0"}}, mustStaticAuthenticator(t))
+	serverErr := make(chan error, 1)
+	go func() {
+		serverErr <- server.ServeConn(context.Background(), serverConn)
+	}()
+
+	if _, err := clientConn.Write(startupFrame(ProtocolVersion30, map[string]string{"user": "chronos"})); err != nil {
+		t.Fatalf("write startup: %v", err)
+	}
+	frames := readFrames(t, clientConn, 1)
+	if got := frameTags(frames); got != "R" {
+		t.Fatalf("challenge frame tags = %q, want R", got)
+	}
+	if _, err := clientConn.Write(passwordFrame("wrong")); err != nil {
+		t.Fatalf("write password: %v", err)
+	}
+	frames = readFrames(t, clientConn, 1)
+	if got := frameTags(frames); got != "E" {
+		t.Fatalf("error frame tags = %q, want E", got)
+	}
+	if err := <-serverErr; err == nil || !strings.Contains(err.Error(), "password authentication failed") {
+		t.Fatalf("serve conn error = %v, want auth failure", err)
 	}
 }
 
@@ -159,6 +181,10 @@ func queryFrame(sql string) []byte {
 
 func terminateFrame() []byte {
 	return append([]byte{'X'}, encodeLengthPrefixedPayload(nil)...)
+}
+
+func passwordFrame(password string) []byte {
+	return append([]byte{'p'}, encodeLengthPrefixedPayload(append([]byte(password), 0))...)
 }
 
 func readFrames(t *testing.T, conn net.Conn, count int) [][]byte {
@@ -195,4 +221,30 @@ func frameTags(frames [][]byte) string {
 		builder.WriteByte(frame[0])
 	}
 	return builder.String()
+}
+
+func performStartup(t *testing.T, conn net.Conn, user, password string) [][]byte {
+	t.Helper()
+
+	if _, err := conn.Write(startupFrame(ProtocolVersion30, map[string]string{"user": user})); err != nil {
+		t.Fatalf("write startup: %v", err)
+	}
+	challenge := readFrames(t, conn, 1)
+	if got := frameTags(challenge); got != "R" {
+		t.Fatalf("challenge frame tags = %q, want R", got)
+	}
+	if _, err := conn.Write(passwordFrame(password)); err != nil {
+		t.Fatalf("write password: %v", err)
+	}
+	return append(challenge, readFrames(t, conn, 5)...)
+}
+
+func mustStaticAuthenticator(t *testing.T) Authenticator {
+	t.Helper()
+
+	authenticator, err := NewStaticPasswordAuthenticator(map[string]string{"chronos": "chronos"})
+	if err != nil {
+		t.Fatalf("new authenticator: %v", err)
+	}
+	return authenticator
 }

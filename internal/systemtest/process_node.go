@@ -32,6 +32,8 @@ type ProcessNodeConfig struct {
 	BootstrapPath       string
 	DataDir             string
 	PGListenAddr        string
+	PGWireUser          string
+	PGWirePassword      string
 	ObservabilityAddr   string
 	ControlAddr         string
 	AdminBearerToken    string
@@ -104,6 +106,12 @@ func NewProcessNode(cfg ProcessNodeConfig) (*ProcessNode, error) {
 	}
 	if cfg.ObservabilityAddr == "" {
 		cfg.ObservabilityAddr = "127.0.0.1:0"
+	}
+	if cfg.PGWireUser == "" {
+		cfg.PGWireUser = DefaultPGWireUser
+	}
+	if cfg.PGWirePassword == "" {
+		cfg.PGWirePassword = DefaultPGWirePassword
 	}
 	if cfg.ControlAddr == "" {
 		cfg.ControlAddr = "127.0.0.1:0"
@@ -277,7 +285,14 @@ func (n *ProcessNode) Run(ctx context.Context) error {
 }
 
 func (n *ProcessNode) servePG(ctx context.Context) {
-	server := pgwire.NewServer(n.handler)
+	authenticator, err := pgwire.NewStaticPasswordAuthenticator(map[string]string{
+		n.cfg.PGWireUser: n.cfg.PGWirePassword,
+	})
+	if err != nil {
+		n.recordServeError("pgwire", err)
+		return
+	}
+	server := pgwire.NewServer(n.handler, authenticator)
 	if err := server.ServeListener(ctx, n.pgListener); err != nil && !errors.Is(err, context.Canceled) {
 		n.recordServeError("pgwire", err)
 	}

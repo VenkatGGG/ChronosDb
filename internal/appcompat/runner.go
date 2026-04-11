@@ -12,11 +12,12 @@ import (
 )
 
 const (
-	defaultUser             = "chronos"
-	defaultIterations       = 10
-	defaultStatementTimeout = 5 * time.Second
-	defaultBaseUserID int64 = 200000
-	defaultConflictID int64 = 1200000
+	defaultUser                   = "chronos"
+	defaultPassword               = "chronos"
+	defaultIterations             = 10
+	defaultStatementTimeout       = 5 * time.Second
+	defaultBaseUserID       int64 = 200000
+	defaultConflictID       int64 = 1200000
 )
 
 var operationOrder = []string{
@@ -35,6 +36,7 @@ var operationOrder = []string{
 type Config struct {
 	Addr             string
 	User             string
+	Password         string
 	Iterations       int
 	StatementTimeout time.Duration
 	BaseUserID       int64
@@ -57,17 +59,17 @@ type Report struct {
 // OperationSummary captures latency, command-tag, and error-class aggregates
 // for one logical CRUD workload step.
 type OperationSummary struct {
-	Name           string         `json:"name"`
-	Count          int            `json:"count"`
-	Successes      int            `json:"successes"`
-	Failures       int            `json:"failures"`
-	CommandTags    map[string]int `json:"command_tags,omitempty"`
-	ErrorClasses   map[string]int `json:"error_classes,omitempty"`
-	LastError      string         `json:"last_error,omitempty"`
-	AverageMs      float64        `json:"average_ms"`
-	P50Ms          float64        `json:"p50_ms"`
-	P95Ms          float64        `json:"p95_ms"`
-	MaxMs          float64        `json:"max_ms"`
+	Name         string         `json:"name"`
+	Count        int            `json:"count"`
+	Successes    int            `json:"successes"`
+	Failures     int            `json:"failures"`
+	CommandTags  map[string]int `json:"command_tags,omitempty"`
+	ErrorClasses map[string]int `json:"error_classes,omitempty"`
+	LastError    string         `json:"last_error,omitempty"`
+	AverageMs    float64        `json:"average_ms"`
+	P50Ms        float64        `json:"p50_ms"`
+	P95Ms        float64        `json:"p95_ms"`
+	MaxMs        float64        `json:"max_ms"`
 }
 
 type workloadSample struct {
@@ -102,7 +104,11 @@ func Run(ctx context.Context, cfg Config) (Report, error) {
 
 	dialCtx, cancelDial := context.WithTimeout(ctx, cfg.StatementTimeout)
 	defer cancelDial()
-	client, err := pgclient.Dial(dialCtx, cfg.Addr, cfg.User)
+	client, err := pgclient.Dial(dialCtx, pgclient.DialConfig{
+		Addr:     cfg.Addr,
+		User:     cfg.User,
+		Password: cfg.Password,
+	})
 	if err != nil {
 		return Report{}, err
 	}
@@ -256,6 +262,9 @@ func SummaryString(report Report) string {
 func applyDefaults(cfg Config) Config {
 	if cfg.User == "" {
 		cfg.User = defaultUser
+	}
+	if cfg.Password == "" {
+		cfg.Password = defaultPassword
 	}
 	if cfg.Iterations <= 0 {
 		cfg.Iterations = defaultIterations

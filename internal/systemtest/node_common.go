@@ -20,6 +20,11 @@ type faultInjectingHandler struct {
 	record   func(string)
 }
 
+const (
+	DefaultPGWireUser     = "chronos"
+	DefaultPGWirePassword = "chronos"
+)
+
 type terminateSessionError struct {
 	message string
 }

@@ -10,8 +10,8 @@ import (
 	"time"
 
 	"github.com/VenkatGGG/ChronosDb/internal/meta"
+	"github.com/VenkatGGG/ChronosDb/internal/node"
 	chronosruntime "github.com/VenkatGGG/ChronosDb/internal/runtime"
-	"github.com/VenkatGGG/ChronosDb/internal/systemtest"
 )
 
 type rangeStatusResponse struct {
@@ -22,7 +22,7 @@ type rangeStatusResponse struct {
 // WaitForSeededClusterReady waits for all configured node admin surfaces to be
 // reachable and for each bootstrap-designated leaseholder range to have an
 // elected leader on the expected node before callers start issuing workloads.
-func WaitForSeededClusterReady(ctx context.Context, manifest chronosruntime.BootstrapManifest, configs []systemtest.ProcessNodeConfig) error {
+func WaitForSeededClusterReady(ctx context.Context, manifest chronosruntime.BootstrapManifest, configs []node.Config) error {
 	controlURLs := make(map[uint64]string, len(configs))
 	for _, cfg := range configs {
 		if cfg.NodeID == 0 {

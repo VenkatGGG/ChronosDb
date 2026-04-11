@@ -16,6 +16,7 @@ func main() {
 	var (
 		addr             string
 		user             string
+		password         string
 		iterations       int
 		statementTimeout time.Duration
 		reportPath       string
@@ -23,6 +24,7 @@ func main() {
 	)
 	flag.StringVar(&addr, "pg-addr", "", "ChronosDB pgwire address (host:port)")
 	flag.StringVar(&user, "user", "chronos", "pgwire user")
+	flag.StringVar(&password, "password", "chronos", "pgwire password")
 	flag.IntVar(&iterations, "iterations", 10, "number of CRUD workload iterations")
 	flag.DurationVar(&statementTimeout, "statement-timeout", 5*time.Second, "per-statement timeout")
 	flag.StringVar(&reportPath, "report-json", "", "optional JSON report output path")
@@ -32,6 +34,7 @@ func main() {
 	report, err := appcompat.Run(context.Background(), appcompat.Config{
 		Addr:             addr,
 		User:             user,
+		Password:         password,
 		Iterations:       iterations,
 		StatementTimeout: statementTimeout,
 	})

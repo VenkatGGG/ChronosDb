@@ -92,15 +92,21 @@ type Flush struct{}
 // Terminate requests session shutdown.
 type Terminate struct{}
 
-func (Query) isFrontendMessage()     {}
-func (Parse) isFrontendMessage()     {}
-func (Bind) isFrontendMessage()      {}
-func (Describe) isFrontendMessage()  {}
-func (Execute) isFrontendMessage()   {}
-func (Close) isFrontendMessage()     {}
-func (Sync) isFrontendMessage()      {}
-func (Flush) isFrontendMessage()     {}
-func (Terminate) isFrontendMessage() {}
+// PasswordMessage carries the password response to an authentication challenge.
+type PasswordMessage struct {
+	Password string
+}
+
+func (Query) isFrontendMessage()           {}
+func (Parse) isFrontendMessage()           {}
+func (Bind) isFrontendMessage()            {}
+func (Describe) isFrontendMessage()        {}
+func (Execute) isFrontendMessage()         {}
+func (Close) isFrontendMessage()           {}
+func (Sync) isFrontendMessage()            {}
+func (Flush) isFrontendMessage()           {}
+func (Terminate) isFrontendMessage()       {}
+func (PasswordMessage) isFrontendMessage() {}
 
 // FieldDescription is the row-description metadata for one output column.
 type FieldDescription struct {
@@ -283,6 +289,12 @@ func DecodeFrontendMessage(r io.Reader) (FrontendMessage, error) {
 			return nil, fmt.Errorf("pgwire: Terminate message must be empty")
 		}
 		return Terminate{}, nil
+	case 'p':
+		password, rest, err := decodeCString(payload)
+		if err != nil || len(rest) != 0 {
+			return nil, fmt.Errorf("pgwire: malformed PasswordMessage")
+		}
+		return PasswordMessage{Password: password}, nil
 	default:
 		return nil, fmt.Errorf("pgwire: unsupported frontend message tag %q", tag[0])
 	}
@@ -292,6 +304,13 @@ func DecodeFrontendMessage(r io.Reader) (FrontendMessage, error) {
 func EncodeAuthenticationOK() []byte {
 	var payload bytes.Buffer
 	writeInt32(&payload, 0)
+	return encodeTagged('R', payload.Bytes())
+}
+
+// EncodeAuthenticationCleartextPassword requests one cleartext password response.
+func EncodeAuthenticationCleartextPassword() []byte {
+	var payload bytes.Buffer
+	writeInt32(&payload, 3)
 	return encodeTagged('R', payload.Bytes())
 }
 

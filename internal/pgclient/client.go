@@ -25,22 +25,29 @@ type Client struct {
 	conn net.Conn
 }
 
+// DialConfig configures one pgwire client startup/authentication sequence.
+type DialConfig struct {
+	Addr     string
+	User     string
+	Password string
+}
+
 // Dial opens a simple pgwire session and completes startup/authentication.
-func Dial(ctx context.Context, addr, user string) (*Client, error) {
+func Dial(ctx context.Context, cfg DialConfig) (*Client, error) {
 	dialer := net.Dialer{}
-	conn, err := dialer.DialContext(ctx, "tcp", addr)
+	conn, err := dialer.DialContext(ctx, "tcp", cfg.Addr)
 	if err != nil {
 		return nil, err
 	}
 	if deadline, ok := ctx.Deadline(); ok {
 		_ = conn.SetDeadline(deadline)
 	}
-	if _, err := conn.Write(startupFrame(pgwire.ProtocolVersion30, map[string]string{"user": user})); err != nil {
+	if _, err := conn.Write(startupFrame(pgwire.ProtocolVersion30, map[string]string{"user": cfg.User})); err != nil {
 		_ = conn.Close()
 		return nil, err
 	}
 	client := &Client{conn: conn}
-	if err := client.waitForReady(); err != nil {
+	if err := client.waitForReady(cfg.Password); err != nil {
 		_ = conn.Close()
 		return nil, err
 	}
@@ -97,7 +104,7 @@ func (c *Client) SimpleQuery(ctx context.Context, sql string) (Result, error) {
 	}
 }
 
-func (c *Client) waitForReady() error {
+func (c *Client) waitForReady(password string) error {
 	sawReady := false
 	for !sawReady {
 		frame, err := readBackendFrame(c.conn)
@@ -105,6 +112,22 @@ func (c *Client) waitForReady() error {
 			return err
 		}
 		switch frame[0] {
+		case 'R':
+			if len(frame) < 9 {
+				return fmt.Errorf("pgclient: malformed authentication frame")
+			}
+			authCode := binary.BigEndian.Uint32(frame[5:9])
+			switch authCode {
+			case 0:
+				continue
+			case 3:
+				if _, err := c.conn.Write(passwordFrame(password)); err != nil {
+					return err
+				}
+				continue
+			default:
+				return fmt.Errorf("pgclient: unsupported authentication request %d", authCode)
+			}
 		case 'E':
 			return decodeError(frame)
 		case 'Z':
@@ -131,6 +154,12 @@ func startupFrame(version uint32, params map[string]string) []byte {
 	_ = binary.Write(&payloadPrefix{target: &frame}, binary.BigEndian, int32(payload.Len()+4))
 	frame = append(frame, payload.Bytes()...)
 	return frame
+}
+
+func passwordFrame(password string) []byte {
+	payload := append([]byte(password), 0)
+	frame := []byte{'p'}
+	return append(frame, encodePayload(payload)...)
 }
 
 func queryFrame(sql string) []byte {

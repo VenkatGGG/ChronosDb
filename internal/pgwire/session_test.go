@@ -10,7 +10,7 @@ import (
 func TestSessionHandleStartup(t *testing.T) {
 	t.Parallel()
 
-	session := NewSession(nil)
+	session := NewSession(nil, Principal{User: "chronos"})
 	frames, err := session.HandleStartup(StartupMessage{
 		ProtocolVersion: ProtocolVersion30,
 		Parameters: map[string]string{
@@ -20,14 +20,17 @@ func TestSessionHandleStartup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("handle startup: %v", err)
 	}
-	if len(frames) < 3 {
-		t.Fatalf("startup frame count = %d, want at least 3", len(frames))
+	if len(frames) < 2 {
+		t.Fatalf("startup frame count = %d, want at least 2", len(frames))
 	}
-	if got := frames[0][0]; got != 'R' {
-		t.Fatalf("first frame tag = %q, want 'R'", got)
+	if got := frames[0][0]; got != 'S' {
+		t.Fatalf("first frame tag = %q, want 'S'", got)
 	}
 	if got := frames[len(frames)-1][0]; got != 'Z' {
 		t.Fatalf("last frame tag = %q, want 'Z'", got)
+	}
+	if got := session.Principal().User; got != "chronos" {
+		t.Fatalf("principal user = %q, want chronos", got)
 	}
 }
 
@@ -45,7 +48,7 @@ func TestSessionHandleQuery(t *testing.T) {
 			},
 			CommandTag: "SELECT 2",
 		},
-	})
+	}, Principal{})
 	frames, close, err := session.HandleFrontend(context.Background(), Query{SQL: "select id from users"})
 	if err != nil {
 		t.Fatalf("handle query: %v", err)
@@ -67,7 +70,7 @@ func TestSessionCarriesTransactionStatus(t *testing.T) {
 	session := NewSession(staticHandler{
 		result: QueryResult{CommandTag: "BEGIN"},
 		setTx:  TxInTransaction,
-	})
+	}, Principal{})
 	frames, close, err := session.HandleFrontend(context.Background(), Query{SQL: "begin"})
 	if err != nil {
 		t.Fatalf("handle begin: %v", err)
@@ -89,7 +92,7 @@ func TestSessionHandleHandlerError(t *testing.T) {
 			Code:     "42P01",
 			Message:  "relation does not exist",
 		},
-	})
+	}, Principal{})
 	frames, close, err := session.HandleFrontend(context.Background(), Query{SQL: "select * from missing"})
 	if err != nil {
 		t.Fatalf("handle query: %v", err)
@@ -108,7 +111,7 @@ func TestSessionHandleHandlerError(t *testing.T) {
 func TestSessionHandleTerminate(t *testing.T) {
 	t.Parallel()
 
-	session := NewSession(nil)
+	session := NewSession(nil, Principal{})
 	frames, close, err := session.HandleFrontend(context.Background(), Terminate{})
 	if err != nil {
 		t.Fatalf("handle terminate: %v", err)
@@ -138,7 +141,7 @@ func TestSessionHandleExtendedQueryCycle(t *testing.T) {
 			CommandTag: "SELECT 1",
 		},
 	}
-	session := NewSession(handler)
+	session := NewSession(handler, Principal{})
 
 	frames, close, err := session.HandleFrontend(context.Background(), Parse{
 		Name:  "stmt1",

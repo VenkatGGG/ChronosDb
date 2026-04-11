@@ -6,9 +6,9 @@ import (
 	"path/filepath"
 
 	"github.com/VenkatGGG/ChronosDb/internal/meta"
+	"github.com/VenkatGGG/ChronosDb/internal/node"
 	chronosruntime "github.com/VenkatGGG/ChronosDb/internal/runtime"
 	"github.com/VenkatGGG/ChronosDb/internal/storage"
-	"github.com/VenkatGGG/ChronosDb/internal/systemtest"
 )
 
 const (
@@ -34,19 +34,19 @@ func BootstrapPath(rootDir string) string {
 }
 
 // DefaultNodeConfigs returns deterministic process-node configs for the seeded demo cluster.
-func DefaultNodeConfigs(rootDir, clusterID string) []systemtest.ProcessNodeConfig {
+func DefaultNodeConfigs(rootDir, clusterID string) []node.Config {
 	bootstrapPath := BootstrapPath(rootDir)
-	configs := make([]systemtest.ProcessNodeConfig, 0, len(defaultNodePorts))
-	for _, node := range defaultNodePorts {
-		configs = append(configs, systemtest.ProcessNodeConfig{
-			NodeID:            node.NodeID,
+	configs := make([]node.Config, 0, len(defaultNodePorts))
+	for _, spec := range defaultNodePorts {
+		configs = append(configs, node.Config{
+			NodeID:            spec.NodeID,
 			ClusterID:         clusterID,
-			StoreID:           node.StoreID,
+			StoreID:           spec.StoreID,
 			BootstrapPath:     bootstrapPath,
-			DataDir:           filepath.Join(rootDir, fmt.Sprintf("node-%d", node.NodeID)),
-			PGListenAddr:      node.PGAddr,
-			ObservabilityAddr: node.ObsAddr,
-			ControlAddr:       node.ControlAddr,
+			DataDir:           filepath.Join(rootDir, fmt.Sprintf("node-%d", spec.NodeID)),
+			PGListenAddr:      spec.PGAddr,
+			ObservabilityAddr: spec.ObsAddr,
+			ControlAddr:       spec.ControlAddr,
 		})
 	}
 	return configs

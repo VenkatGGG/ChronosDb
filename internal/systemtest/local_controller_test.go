@@ -242,9 +242,17 @@ func openPGConn(t *testing.T, addr string) net.Conn {
 		_ = conn.Close()
 		t.Fatalf("write startup: %v", err)
 	}
-	if got := frameTags(readFrames(t, conn, 4)); got != "RSSZ" {
+	if got := frameTags(readFrames(t, conn, 1)); got != "R" {
 		_ = conn.Close()
-		t.Fatalf("startup frame tags = %q, want RSSZ", got)
+		t.Fatalf("startup challenge tags = %q, want R", got)
+	}
+	if _, err := conn.Write(passwordFrame(DefaultPGWirePassword)); err != nil {
+		_ = conn.Close()
+		t.Fatalf("write password: %v", err)
+	}
+	if got := frameTags(readFrames(t, conn, 5)); got != "RSSSZ" {
+		_ = conn.Close()
+		t.Fatalf("startup frame tags = %q, want RSSSZ", got)
 	}
 	return conn
 }
@@ -268,6 +276,12 @@ func queryFrame(sql string) []byte {
 	frame := []byte{'Q'}
 	frame = append(frame, encodePayload(payload)...)
 	return frame
+}
+
+func passwordFrame(password string) []byte {
+	payload := append([]byte(password), 0)
+	frame := []byte{'p'}
+	return append(frame, encodePayload(payload)...)
 }
 
 func readFrames(t *testing.T, conn net.Conn, count int) [][]byte {
