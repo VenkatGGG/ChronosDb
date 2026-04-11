@@ -183,25 +183,27 @@ func (p *Planner) inferInsertParameters(stmt *vsqlparser.Insert, paramTypes []Co
 	if !ok {
 		return fmt.Errorf("sql planner: only VALUES inserts are supported")
 	}
-	if len(values) != 1 {
-		return fmt.Errorf("sql planner: only single-row inserts are supported")
+	if len(values) == 0 {
+		return fmt.Errorf("sql planner: INSERT requires at least one VALUES tuple")
 	}
-	if len(stmt.Columns) != len(values[0]) {
-		return fmt.Errorf("sql planner: INSERT column/value count mismatch")
-	}
-	for i, identifier := range stmt.Columns {
-		column, ok := table.ColumnByName(identifier.String())
-		if !ok {
-			return fmt.Errorf("sql planner: unknown column %q", identifier.String())
+	for _, tuple := range values {
+		if len(stmt.Columns) != len(tuple) {
+			return fmt.Errorf("sql planner: INSERT column/value count mismatch")
 		}
-		switch typed := values[0][i].(type) {
-		case *vsqlparser.Argument:
-			if err := assignArgumentType(paramTypes, typed, column.Type); err != nil {
-				return err
+		for i, identifier := range stmt.Columns {
+			column, ok := table.ColumnByName(identifier.String())
+			if !ok {
+				return fmt.Errorf("sql planner: unknown column %q", identifier.String())
 			}
-		case *vsqlparser.Literal:
-		default:
-			return fmt.Errorf("sql planner: only literal or parameter INSERT values are supported")
+			switch typed := tuple[i].(type) {
+			case *vsqlparser.Argument:
+				if err := assignArgumentType(paramTypes, typed, column.Type); err != nil {
+					return err
+				}
+			case *vsqlparser.Literal:
+			default:
+				return fmt.Errorf("sql planner: only literal or parameter INSERT values are supported")
+			}
 		}
 	}
 	return nil

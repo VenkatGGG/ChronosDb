@@ -219,6 +219,15 @@ func (p *FlowPlanner) buildRangeScan(plan RangeScanPlan) FlowPlan {
 
 func (p *FlowPlanner) buildInsert(plan InsertPlan) FlowPlan {
 	resultSchema := schemaFromColumns(plan.Returning)
+	spans := make([]KeySpan, 0, plan.RowCount())
+	for _, row := range plan.Mutations() {
+		spans = append(spans, KeySpan{
+			StartKey:       append([]byte(nil), row.Key...),
+			EndKey:         append([]byte(nil), row.Key...),
+			StartInclusive: true,
+			EndInclusive:   true,
+		})
+	}
 	return assembleFlowPlan(1, []FlowStage{
 		{
 			ID:               1,
@@ -230,14 +239,7 @@ func (p *FlowPlanner) buildInsert(plan InsertPlan) FlowPlan {
 				{
 					Kind:  OperatorKVInsert,
 					Table: &plan.Table,
-					Spans: []KeySpan{
-						{
-							StartKey:       append([]byte(nil), plan.Key...),
-							EndKey:         append([]byte(nil), plan.Key...),
-							StartInclusive: true,
-							EndInclusive:   true,
-						},
-					},
+					Spans: spans,
 				},
 			},
 			ResultSchema: resultSchema,

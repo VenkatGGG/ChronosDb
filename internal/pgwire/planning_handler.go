@@ -99,7 +99,7 @@ func (h *PlanningHandler) HandleSimpleQuery(ctx context.Context, session *Sessio
 
 func describeResult(plan chronossql.Plan, flow chronossql.FlowPlan) (QueryResult, error) {
 	fields := describeResultSchema(flow.ResultSchema)
-	switch plan.(type) {
+	switch typed := plan.(type) {
 	case chronossql.PointLookupPlan:
 		return QueryResult{
 			Fields:     fields,
@@ -121,9 +121,13 @@ func describeResult(plan chronossql.Plan, flow chronossql.FlowPlan) (QueryResult
 			CommandTag: "SELECT 0",
 		}, nil
 	case chronossql.InsertPlan:
+		rows := typed.RowCount()
+		if rows == 0 {
+			rows = 1
+		}
 		return QueryResult{
 			Fields:     fields,
-			CommandTag: "INSERT 0 1",
+			CommandTag: fmt.Sprintf("INSERT 0 %d", rows),
 		}, nil
 	case chronossql.UpsertPlan:
 		return QueryResult{

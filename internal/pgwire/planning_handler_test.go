@@ -58,6 +58,35 @@ func TestPlanningHandlerDescribePreparedQuery(t *testing.T) {
 	}
 }
 
+func TestPlanningHandlerDescribePreparedMultiRowInsert(t *testing.T) {
+	t.Parallel()
+
+	handler := newPlanningHandler(t)
+	prepared, err := handler.DescribePreparedQuery("insert into users (id, name, email) values ($1, $2, $3), ($4, $5, $6)")
+	if err != nil {
+		t.Fatalf("describe prepared insert: %v", err)
+	}
+	wantTypes := []chronossql.ColumnType{
+		chronossql.ColumnTypeInt,
+		chronossql.ColumnTypeString,
+		chronossql.ColumnTypeString,
+		chronossql.ColumnTypeInt,
+		chronossql.ColumnTypeString,
+		chronossql.ColumnTypeString,
+	}
+	if len(prepared.ParameterTypes) != len(wantTypes) {
+		t.Fatalf("parameter type count = %d, want %d", len(prepared.ParameterTypes), len(wantTypes))
+	}
+	for i, want := range wantTypes {
+		if prepared.ParameterTypes[i] != want {
+			t.Fatalf("parameter type %d = %v, want %v", i, prepared.ParameterTypes[i], want)
+		}
+	}
+	if prepared.Result.CommandTag != "INSERT 0 2" {
+		t.Fatalf("prepared command tag = %q, want INSERT 0 2", prepared.Result.CommandTag)
+	}
+}
+
 func TestPlanningHandlerDescribeInsert(t *testing.T) {
 	t.Parallel()
 
@@ -71,6 +100,22 @@ func TestPlanningHandlerDescribeInsert(t *testing.T) {
 	}
 	if len(result.Fields) != 0 {
 		t.Fatalf("insert should not expose row-description fields")
+	}
+}
+
+func TestPlanningHandlerDescribeMultiRowInsert(t *testing.T) {
+	t.Parallel()
+
+	handler := newPlanningHandler(t)
+	result, err := handler.HandleSimpleQuery(context.Background(), NewSession(handler, Principal{}), "insert into users (id, name, email) values (1, 'alice', 'a@example.com'), (70, 'bob', 'b@example.com')")
+	if err != nil {
+		t.Fatalf("handle query: %v", err)
+	}
+	if result.CommandTag != "INSERT 0 2" {
+		t.Fatalf("command tag = %q, want INSERT 0 2", result.CommandTag)
+	}
+	if len(result.Fields) != 0 {
+		t.Fatalf("multi-row insert should not expose row-description fields")
 	}
 }
 

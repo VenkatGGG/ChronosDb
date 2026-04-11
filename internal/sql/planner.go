@@ -141,11 +141,12 @@ type OrderBySpec struct {
 	Descending bool
 }
 
-// InsertPlan maps one SQL insert to one KV put.
+// InsertPlan maps one SQL insert statement onto one or more KV puts.
 type InsertPlan struct {
 	Table     TableDescriptor
 	Key       []byte
 	Value     []byte
+	Rows      []InsertMutation
 	Returning []ColumnDescriptor
 }
 
@@ -156,6 +157,12 @@ type UpsertPlan struct {
 	Key       []byte
 	Value     []byte
 	Returning []ColumnDescriptor
+}
+
+// InsertMutation is one encoded KV row write derived from an INSERT tuple.
+type InsertMutation struct {
+	Key   []byte
+	Value []byte
 }
 
 // OnConflictAction identifies the runtime behavior requested by an INSERT ...
@@ -250,6 +257,50 @@ func (DeletePlan) isPlan()      {}
 func (UpdatePlan) isPlan()      {}
 func (AggregatePlan) isPlan()   {}
 func (HashJoinPlan) isPlan()    {}
+
+// Mutations returns the encoded row writes in input order.
+func (p InsertPlan) Mutations() []InsertMutation {
+	if len(p.Rows) > 0 {
+		out := make([]InsertMutation, 0, len(p.Rows))
+		for _, row := range p.Rows {
+			out = append(out, InsertMutation{
+				Key:   append([]byte(nil), row.Key...),
+				Value: append([]byte(nil), row.Value...),
+			})
+		}
+		return out
+	}
+	if len(p.Key) == 0 {
+		return nil
+	}
+	return []InsertMutation{{
+		Key:   append([]byte(nil), p.Key...),
+		Value: append([]byte(nil), p.Value...),
+	}}
+}
+
+// RowCount reports how many tuples the insert will attempt to write.
+func (p InsertPlan) RowCount() int {
+	switch {
+	case len(p.Rows) > 0:
+		return len(p.Rows)
+	case len(p.Key) > 0:
+		return 1
+	default:
+		return 0
+	}
+}
+
+func (p InsertPlan) totalValueBytes() int {
+	if len(p.Rows) > 0 {
+		total := 0
+		for _, row := range p.Rows {
+			total += len(row.Value)
+		}
+		return total
+	}
+	return len(p.Value)
+}
 
 type boundPredicate struct {
 	equality *Value
@@ -405,16 +456,23 @@ func (p *Planner) optimizeInsert(stmt *vsqlparser.Insert, returningClause string
 	if !ok {
 		return OptimizedPlan{}, fmt.Errorf("sql planner: only VALUES inserts are supported")
 	}
-	if len(values) != 1 {
-		return OptimizedPlan{}, fmt.Errorf("sql planner: only single-row inserts are supported")
+	if len(values) == 0 {
+		return OptimizedPlan{}, fmt.Errorf("sql planner: INSERT requires at least one VALUES tuple")
 	}
-	row, err := bindInsertRow(table, stmt.Columns, values[0])
-	if err != nil {
-		return OptimizedPlan{}, err
-	}
-	key, value, err := encodeInsert(table, row)
-	if err != nil {
-		return OptimizedPlan{}, err
+	rows := make([]InsertMutation, 0, len(values))
+	for _, tuple := range values {
+		row, err := bindInsertRow(table, stmt.Columns, tuple)
+		if err != nil {
+			return OptimizedPlan{}, err
+		}
+		key, value, err := encodeInsert(table, row)
+		if err != nil {
+			return OptimizedPlan{}, err
+		}
+		rows = append(rows, InsertMutation{
+			Key:   key,
+			Value: value,
+		})
 	}
 	returning, err := bindReturningProjection(table, returningClause)
 	if err != nil {
@@ -422,8 +480,9 @@ func (p *Planner) optimizeInsert(stmt *vsqlparser.Insert, returningClause string
 	}
 	plan := InsertPlan{
 		Table:     table,
-		Key:       key,
-		Value:     value,
+		Key:       append([]byte(nil), rows[0].Key...),
+		Value:     append([]byte(nil), rows[0].Value...),
+		Rows:      rows,
 		Returning: returning,
 	}
 	return p.optimizer.Choose([]PlanCandidate{makeInsertCandidate(p.optimizer, table, plan)})

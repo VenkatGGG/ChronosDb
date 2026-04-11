@@ -122,6 +122,114 @@ func TestProcessNodeExecutesPointInsertAndSelectAcrossNodes(t *testing.T) {
 	}
 }
 
+func TestProcessNodeExecutesMultiRowInsertAcrossLeaseholders(t *testing.T) {
+	t.Parallel()
+
+	rootDir := t.TempDir()
+	bootstrapPath := filepath.Join(rootDir, "bootstrap.json")
+	splitKey := usersPrimaryKey(50)
+	firstRange := meta.RangeDescriptor{
+		RangeID:    47,
+		Generation: 1,
+		StartKey:   storage.GlobalTablePrimaryPrefix(7),
+		EndKey:     splitKey,
+		Replicas: []meta.ReplicaDescriptor{
+			{ReplicaID: 48, NodeID: 1, Role: meta.ReplicaRoleVoter},
+			{ReplicaID: 49, NodeID: 2, Role: meta.ReplicaRoleVoter},
+			{ReplicaID: 50, NodeID: 3, Role: meta.ReplicaRoleVoter},
+		},
+		LeaseholderReplicaID: 49,
+	}
+	secondRange := meta.RangeDescriptor{
+		RangeID:    48,
+		Generation: 1,
+		StartKey:   splitKey,
+		EndKey:     storage.GlobalTablePrimaryPrefix(8),
+		Replicas: []meta.ReplicaDescriptor{
+			{ReplicaID: 51, NodeID: 1, Role: meta.ReplicaRoleVoter},
+			{ReplicaID: 52, NodeID: 2, Role: meta.ReplicaRoleVoter},
+			{ReplicaID: 53, NodeID: 3, Role: meta.ReplicaRoleVoter},
+		},
+		LeaseholderReplicaID: 53,
+	}
+	manifest, err := chronosruntime.BuildBootstrapManifest("cluster-live-multi-row-insert", []chronosruntime.BootstrapNode{
+		{NodeID: 1, StoreID: 11},
+		{NodeID: 2, StoreID: 12},
+		{NodeID: 3, StoreID: 13},
+	}, []meta.RangeDescriptor{firstRange, secondRange})
+	if err != nil {
+		t.Fatalf("build bootstrap manifest: %v", err)
+	}
+	if err := chronosruntime.WriteBootstrapManifest(bootstrapPath, manifest); err != nil {
+		t.Fatalf("write bootstrap manifest: %v", err)
+	}
+
+	node1, cancel1, done1 := startProcessNodeForTest(t, ProcessNodeConfig{
+		NodeID:            1,
+		DataDir:           filepath.Join(rootDir, "node-1"),
+		BootstrapPath:     bootstrapPath,
+		PGListenAddr:      "127.0.0.1:0",
+		ObservabilityAddr: "127.0.0.1:0",
+		ControlAddr:       "127.0.0.1:0",
+	})
+	t.Cleanup(func() {
+		cancel1()
+		waitProcessNodeDone(t, done1, "multi-row-node1")
+	})
+	node2, cancel2, done2 := startProcessNodeForTest(t, ProcessNodeConfig{
+		NodeID:            2,
+		DataDir:           filepath.Join(rootDir, "node-2"),
+		BootstrapPath:     bootstrapPath,
+		PGListenAddr:      "127.0.0.1:0",
+		ObservabilityAddr: "127.0.0.1:0",
+		ControlAddr:       "127.0.0.1:0",
+	})
+	t.Cleanup(func() {
+		cancel2()
+		waitProcessNodeDone(t, done2, "multi-row-node2")
+	})
+	node3, cancel3, done3 := startProcessNodeForTest(t, ProcessNodeConfig{
+		NodeID:            3,
+		DataDir:           filepath.Join(rootDir, "node-3"),
+		BootstrapPath:     bootstrapPath,
+		PGListenAddr:      "127.0.0.1:0",
+		ObservabilityAddr: "127.0.0.1:0",
+		ControlAddr:       "127.0.0.1:0",
+	})
+	t.Cleanup(func() {
+		cancel3()
+		waitProcessNodeDone(t, done3, "multi-row-node3")
+	})
+
+	if err := node2.host.Campaign(context.Background(), firstRange.RangeID); err != nil {
+		t.Fatalf("campaign first range leaseholder: %v", err)
+	}
+	if err := node3.host.Campaign(context.Background(), secondRange.RangeID); err != nil {
+		t.Fatalf("campaign second range leaseholder: %v", err)
+	}
+	waitForRangeLeader(t, node2.host, firstRange.RangeID, 49)
+	waitForRangeLeader(t, node3.host, secondRange.RangeID, 53)
+
+	conn := openPGConn(t, node1.state.PGAddr)
+	defer conn.Close()
+	if _, err := conn.Write(queryFrame("insert into users (id, name, email) values (7, 'alice', 'a@example.com'), (70, 'bob', 'b@example.com')")); err != nil {
+		t.Fatalf("write multi-row insert: %v", err)
+	}
+	frames := readFrames(t, conn, 2)
+	if got := frameTags(frames); got != "CZ" {
+		t.Fatalf("multi-row insert frame tags = %q, want CZ", got)
+	}
+	if tag := decodeCommandCompleteFrame(frames[0]); tag != "INSERT 0 2" {
+		t.Fatalf("multi-row insert command tag = %q, want INSERT 0 2", tag)
+	}
+
+	table := usersTableDescriptor(t)
+	waitForDecodedUserRow(t, node1.kv, table, usersPrimaryKey(7), "7", "alice")
+	waitForDecodedUserRow(t, node1.kv, table, usersPrimaryKey(70), "70", "bob")
+	waitForDecodedUserRow(t, node2.kv, table, usersPrimaryKey(7), "7", "alice")
+	waitForDecodedUserRow(t, node3.kv, table, usersPrimaryKey(70), "70", "bob")
+}
+
 func TestProcessNodeExecutesRangeScanAcrossLeaseholders(t *testing.T) {
 	t.Parallel()
 

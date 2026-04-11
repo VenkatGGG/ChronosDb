@@ -98,9 +98,39 @@ func TestPlannerInsertMapsToKV(t *testing.T) {
 	if !bytes.Equal(insert.Key, storage.GlobalTablePrimaryKey(7, encodedIntKey(1))) {
 		t.Fatalf("insert key = %q, want %q", insert.Key, storage.GlobalTablePrimaryKey(7, encodedIntKey(1)))
 	}
+	if got := insert.RowCount(); got != 1 {
+		t.Fatalf("insert row count = %d, want 1", got)
+	}
 	payload := string(insert.Value)
 	if !strings.Contains(payload, "\"name\"") || !strings.Contains(payload, "\"alice\"") {
 		t.Fatalf("unexpected insert payload: %s", payload)
+	}
+}
+
+func TestPlannerMultiRowInsertMapsToMultipleKVWrites(t *testing.T) {
+	t.Parallel()
+
+	planner := testPlanner(t)
+	plan, err := planner.Plan("insert into users (id, name, email) values (1, 'alice', 'a@example.com'), (70, 'bob', 'b@example.com')")
+	if err != nil {
+		t.Fatalf("plan multi-row insert: %v", err)
+	}
+	insert, ok := plan.(InsertPlan)
+	if !ok {
+		t.Fatalf("plan type = %T, want InsertPlan", plan)
+	}
+	if got := insert.RowCount(); got != 2 {
+		t.Fatalf("insert row count = %d, want 2", got)
+	}
+	rows := insert.Mutations()
+	if len(rows) != 2 {
+		t.Fatalf("mutation count = %d, want 2", len(rows))
+	}
+	if !bytes.Equal(rows[0].Key, storage.GlobalTablePrimaryKey(7, encodedIntKey(1))) {
+		t.Fatalf("first insert key = %q, want %q", rows[0].Key, storage.GlobalTablePrimaryKey(7, encodedIntKey(1)))
+	}
+	if !bytes.Equal(rows[1].Key, storage.GlobalTablePrimaryKey(7, encodedIntKey(70))) {
+		t.Fatalf("second insert key = %q, want %q", rows[1].Key, storage.GlobalTablePrimaryKey(7, encodedIntKey(70)))
 	}
 }
 

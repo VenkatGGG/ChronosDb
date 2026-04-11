@@ -285,7 +285,30 @@ func (h *runtimeQueryHandler) executeRangeScan(ctx context.Context, session *pgw
 }
 
 func (h *runtimeQueryHandler) executeInsert(ctx context.Context, session *pgwire.Session, result pgwire.QueryResult, plan chronossql.InsertPlan) (pgwire.QueryResult, error) {
-	return h.executeInsertLike(ctx, session, result, plan.Table, plan.Key, plan.Value, plan.Returning, false)
+	mutations := plan.Mutations()
+	if len(mutations) == 0 {
+		return result, nil
+	}
+	state, autoCommit, err := h.statementTxnState(session)
+	if err != nil {
+		return pgwire.QueryResult{}, err
+	}
+	for _, row := range mutations {
+		result, err = h.executeInsertLikeWithState(ctx, state, false, result, plan.Table, row.Key, row.Value, plan.Returning, false)
+		if err != nil {
+			if autoCommit {
+				_ = h.abortTxnState(ctx, state)
+			}
+			return pgwire.QueryResult{}, err
+		}
+	}
+	if autoCommit {
+		if err := h.commitTxnState(ctx, state); err != nil {
+			return pgwire.QueryResult{}, err
+		}
+	}
+	result.CommandTag = fmt.Sprintf("INSERT 0 %d", len(mutations))
+	return result, nil
 }
 
 func (h *runtimeQueryHandler) executeUpsert(ctx context.Context, session *pgwire.Session, result pgwire.QueryResult, plan chronossql.UpsertPlan) (pgwire.QueryResult, error) {
@@ -502,7 +525,7 @@ func (h *runtimeQueryHandler) executeInsertLikeWithState(ctx context.Context, st
 			}
 			return pgwire.QueryResult{}, wrapExecutionError("project returning row", err)
 		}
-		result.Rows = [][][]byte{projected}
+		result.Rows = append(result.Rows, projected)
 	}
 	if err := h.stageWrite(ctx, state, key, value, false); err != nil {
 		if autoCommit {

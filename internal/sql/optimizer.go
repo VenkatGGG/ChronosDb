@@ -98,18 +98,22 @@ func (o *Optimizer) costFilteredScan(table TableDescriptor, projection []ColumnD
 	return cost
 }
 
-func (o *Optimizer) costInsert(table TableDescriptor, valueSize int) CostEstimate {
+func (o *Optimizer) costInsert(table TableDescriptor, rowCount int, valueSize int) CostEstimate {
 	stats := table.StatsOrDefaults()
+	if rowCount <= 0 {
+		rowCount = 1
+	}
+	rows := uint64(rowCount)
 	bytes := uint64(valueSize)
 	if bytes == 0 {
-		bytes = stats.AverageRowBytes
+		bytes = stats.AverageRowBytes * rows
 	}
-	score := 2.0 + float64(bytes)/2048.0
+	score := 2.0 + float64(rows) + float64(bytes)/2048.0
 	return CostEstimate{
-		KVWrites:       1,
-		EstimatedRows:  1,
+		KVWrites:       rows,
+		EstimatedRows:  rows,
 		EstimatedBytes: bytes,
-		CPUCost:        1,
+		CPUCost:        float64(rows),
 		Score:          score,
 	}
 }
@@ -299,7 +303,7 @@ func makeInsertCandidate(o *Optimizer, table TableDescriptor, plan InsertPlan) P
 	return PlanCandidate{
 		Name: "insert_put",
 		Plan: plan,
-		Cost: o.costInsert(table, len(plan.Value)),
+		Cost: o.costInsert(table, plan.RowCount(), plan.totalValueBytes()),
 	}
 }
 
@@ -307,7 +311,7 @@ func makeUpsertCandidate(o *Optimizer, table TableDescriptor, plan UpsertPlan) P
 	return PlanCandidate{
 		Name: "upsert_put",
 		Plan: plan,
-		Cost: o.costInsert(table, len(plan.Value)),
+		Cost: o.costInsert(table, 1, len(plan.Value)),
 	}
 }
 
@@ -319,7 +323,7 @@ func makeOnConflictCandidate(o *Optimizer, table TableDescriptor, plan OnConflic
 	return PlanCandidate{
 		Name: name,
 		Plan: plan,
-		Cost: o.costInsert(table, len(plan.InsertValue)),
+		Cost: o.costInsert(table, 1, len(plan.InsertValue)),
 	}
 }
 
