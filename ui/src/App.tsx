@@ -1,19 +1,11 @@
 import { startTransition, useDeferredValue, useEffect, useEffectEvent, useState } from "react";
 import { BrowserRouter, Link, NavLink, Navigate, Route, Routes, useParams } from "react-router-dom";
-import {
-  fetchKeyLocation,
-  fetchNodeDetail,
-  fetchRangeDetail,
-  fetchScenarioRun,
-  fetchScenarioRuns,
-  fetchTopology,
-} from "./lib/api";
+import { fetchKeyLocation, fetchNodeDetail, fetchRangeDetail, fetchScenarioRun, fetchScenarioRuns } from "./lib/api";
 import { useClusterSnapshot } from "./hooks/useClusterSnapshot";
 import { useEventStream } from "./hooks/useEventStream";
 import type {
   ClusterEvent,
   ClusterSnapshot,
-  ClusterTopologyView,
   KeyLocationView,
   NodeDetailView,
   NodeView,
@@ -37,17 +29,17 @@ export function App() {
         <div className="background-orbit background-orbit-right" />
         <aside className="console-rail">
           <div>
-            <p className="eyebrow">Chronos Console</p>
-            <h1>Distributed Operations</h1>
+            <p className="eyebrow">ChronosDB Console</p>
+            <h1>Cluster Fabric</h1>
             <p className="rail-copy">
-              Live cluster topology, placement, and event visibility for ChronosDB.
+              Real-time shard layout, live row totals, and leaseholder placement across the cluster.
             </p>
           </div>
           <nav className="console-nav" aria-label="Primary">
-            <NavItem to="/overview" label="Overview" subtitle="State and signals" />
-            <NavItem to="/topology" label="Topology" subtitle="Replica graph and edges" />
-            <NavItem to="/nodes" label="Nodes" subtitle="Health and residency" />
-            <NavItem to="/ranges" label="Ranges" subtitle="Descriptors and placement" />
+            <NavItem to="/overview" label="Overview" subtitle="Rows, shards, and signal" />
+            <NavItem to="/topology" label="Topology" subtitle="Replica fabric" />
+            <NavItem to="/nodes" label="Nodes" subtitle="Health and hosting" />
+            <NavItem to="/ranges" label="Ranges" subtitle="Shard inventory" />
             <NavItem to="/events" label="Events" subtitle="Live operations stream" />
             <NavItem to="/scenarios" label="Scenarios" subtitle="Retained chaos runs" />
           </nav>
@@ -65,7 +57,7 @@ export function App() {
         <main className="console-main">
           <header className="console-header">
             <div>
-              <p className="eyebrow">Cluster Surface</p>
+              <p className="eyebrow">Live Cluster Surface</p>
               <h2>{snapshot ? clusterHeadline(snapshot) : "Waiting for Chronos cluster state"}</h2>
             </div>
             <div className="header-actions">
@@ -105,8 +97,19 @@ export function App() {
                 />
               }
             />
-            <Route path="/topology" element={<TopologyPage />} />
-            <Route path="/nodes" element={<NodesPage nodes={snapshot?.nodes ?? []} />} />
+            <Route
+              path="/topology"
+              element={
+                <TopologyPage
+                  loading={snapshotState.loading}
+                  snapshot={snapshot}
+                  events={streamState.events}
+                  error={snapshotState.error}
+                  onRefresh={snapshotState.refresh}
+                />
+              }
+            />
+            <Route path="/nodes" element={<NodesPage nodes={snapshot?.nodes ?? []} ranges={snapshot?.ranges ?? []} />} />
             <Route path="/nodes/:nodeId" element={<NodeDetailPage />} />
             <Route path="/ranges" element={<RangesPage nodes={snapshot?.nodes ?? []} ranges={snapshot?.ranges ?? []} />} />
             <Route path="/ranges/:rangeId" element={<RangeDetailPage />} />
@@ -143,86 +146,135 @@ function OverviewPage(props: {
   }
 
   const degradedNodes = snapshot.nodes.filter((node) => node.status !== "ok");
-  const leaseholderSpread = new Set(
-    snapshot.ranges
-      .map((range) => range.leaseholder_node_id)
-      .filter((nodeID): nodeID is number => typeof nodeID === "number" && nodeID > 0),
-  );
-  const recentEvents = props.events.slice(Math.max(props.events.length - 6, 0)).reverse();
+  const recentEvents = props.events.slice(Math.max(props.events.length - 8, 0)).reverse();
+  const tableStats = snapshot.stats.tables ?? [];
 
   return (
     <div className="page-grid">
-      <section className="stats-grid">
-        <MetricCard label="Nodes" value={snapshot.nodes.length} hint={`${degradedNodes.length} degraded`} />
-        <MetricCard label="Ranges" value={snapshot.ranges.length} hint="authoritative descriptors" />
-        <MetricCard label="Leaseholder spread" value={leaseholderSpread.size} hint="nodes currently owning leases" />
-        <MetricCard label="Recent events" value={props.events.length} hint="retained stream window" />
-      </section>
-
-      <section className="panel">
-        <div className="panel-header">
-          <div>
-            <p className="eyebrow">Cluster posture</p>
-            <h3>Node operating surface</h3>
-          </div>
+      <section className="hero-panel">
+        <div>
+          <p className="eyebrow">Overview</p>
+          <h3>Live rows, shards, and leaseholder flow</h3>
+          <p className="hero-copy">
+            Watch the cluster as a connected fabric instead of isolated cards. Each shard below maps replicas onto live
+            nodes and shows its current logical row count.
+          </p>
         </div>
-        <div className="node-summary-grid">
-          {snapshot.nodes.map((node) => (
-            <article className="node-summary-card" key={node.node_id}>
-              <div className="node-summary-header">
-                <strong>node {node.node_id}</strong>
-                <StatusPill tone={node.status === "ok" ? "good" : "warn"} label={node.status} />
-              </div>
-              <dl className="metric-list">
-                <div>
-                  <dt>replicas</dt>
-                  <dd>{node.replica_count}</dd>
-                </div>
-                <div>
-                  <dt>leases</dt>
-                  <dd>{node.lease_count}</dd>
-                </div>
-                <div>
-                  <dt>started</dt>
-                  <dd>{formatInstant(node.started_at)}</dd>
-                </div>
-              </dl>
-            </article>
-          ))}
+        <div className="stats-grid">
+          <MetricCard label="Logical rows" value={snapshot.stats.total_rows} hint={`${tableStats.length} live tables`} />
+          <MetricCard label="Ranges" value={snapshot.stats.total_ranges} hint={`${snapshot.stats.data_ranges} data shards`} />
+          <MetricCard label="Replicas" value={snapshot.stats.total_replicas} hint={`${degradedNodes.length} degraded nodes`} />
+          <MetricCard label="Events" value={props.events.length} hint="retained stream window" />
         </div>
       </section>
 
       <section className="panel">
         <div className="panel-header">
           <div>
-            <p className="eyebrow">Recent activity</p>
-            <h3>Live operations window</h3>
+            <p className="eyebrow">Live shard fabric</p>
+            <h3>Database shards connected to live nodes</h3>
           </div>
         </div>
-        <div className="event-stack">
-          {recentEvents.length === 0 ? <EmptyState label="No events received yet." /> : null}
-          {recentEvents.map((event) => (
-            <EventRow event={event} key={event.id ?? `${event.timestamp}-${event.type}-${event.message}`} />
-          ))}
+        <div className="fabric-shell">
+          <ClusterFabric nodes={snapshot.nodes} ranges={snapshot.ranges} />
+        </div>
+      </section>
+
+      <section className="overview-secondary-grid">
+        <div className="panel">
+          <div>
+            <p className="eyebrow">Tables</p>
+            <h3>Logical data distribution</h3>
+          </div>
+          <div className="ledger-stack">
+            {tableStats.length === 0 ? <EmptyState label="No table row stats available." /> : null}
+            {tableStats.map((table) => (
+              <article className="ledger-row" key={table.table_id || table.table_name}>
+                <div>
+                  <p className="ledger-title">{table.table_name}</p>
+                  <p className="subtle-copy">
+                    {table.range_count} shard{table.range_count === 1 ? "" : "s"}
+                  </p>
+                </div>
+                <strong>{formatNumber(table.row_count)}</strong>
+              </article>
+            ))}
+          </div>
+        </div>
+
+        <div className="panel">
+          <div className="panel-header">
+            <div>
+              <p className="eyebrow">Nodes</p>
+              <h3>Replica and row residency</h3>
+            </div>
+          </div>
+          <div className="node-summary-grid">
+            {buildNodeResidency(snapshot.nodes, snapshot.ranges).map((entry) => (
+              <article className="node-summary-card" key={entry.node.node_id}>
+                <div className="node-summary-header">
+                  <div>
+                    <strong>node {entry.node.node_id}</strong>
+                    <p className="subtle-copy">{entry.dataShards} data shards hosted</p>
+                  </div>
+                  <StatusPill tone={entry.node.status === "ok" ? "good" : "warn"} label={entry.node.status} />
+                </div>
+                <dl className="metric-list">
+                  <div>
+                    <dt>logical rows</dt>
+                    <dd>{formatNumber(entry.hostedRows)}</dd>
+                  </div>
+                  <div>
+                    <dt>replicas</dt>
+                    <dd>{entry.node.replica_count}</dd>
+                  </div>
+                  <div>
+                    <dt>leases</dt>
+                    <dd>{entry.node.lease_count}</dd>
+                  </div>
+                  <div>
+                    <dt>network</dt>
+                    <dd>{entry.node.partitioned_from?.length ? `isolated from ${entry.node.partitioned_from.join(", ")}` : "healthy"}</dd>
+                  </div>
+                </dl>
+              </article>
+            ))}
+          </div>
+        </div>
+
+        <div className="panel">
+          <div className="panel-header">
+            <div>
+              <p className="eyebrow">Recent activity</p>
+              <h3>Live operations window</h3>
+            </div>
+          </div>
+          <div className="event-stack">
+            {recentEvents.length === 0 ? <EmptyState label="No events received yet." /> : null}
+            {recentEvents.map((event) => (
+              <EventRow event={event} key={event.id ?? `${event.timestamp}-${event.type}-${event.message}`} />
+            ))}
+          </div>
         </div>
       </section>
     </div>
   );
 }
 
-function NodesPage(props: { nodes: NodeView[] }) {
+function NodesPage(props: { nodes: NodeView[]; ranges: RangeView[] }) {
+  const residency = buildNodeResidency(props.nodes, props.ranges);
   return (
     <section className="page-grid">
       <div className="panel">
         <div className="panel-header">
           <div>
             <p className="eyebrow">Nodes</p>
-            <h3>Health, endpoints, and residency counts</h3>
+            <h3>Health, endpoints, and hosting posture</h3>
           </div>
         </div>
         <div className="node-card-grid">
           {props.nodes.length === 0 ? <EmptyState label="No nodes surfaced by the console API." /> : null}
-          {props.nodes.map((node) => (
+          {residency.map(({ node, hostedRows, dataShards }) => (
             <article className="node-card" key={node.node_id}>
               <div className="node-card-header">
                 <div>
@@ -248,8 +300,16 @@ function NodesPage(props: { nodes: NodeView[] }) {
                   <dd>{node.lease_count}</dd>
                 </div>
                 <div>
-                  <dt>partitions</dt>
-                  <dd>{node.partitioned_from?.length ? node.partitioned_from.join(", ") : "none"}</dd>
+                  <dt>hosted rows</dt>
+                  <dd>{formatNumber(hostedRows)}</dd>
+                </div>
+                <div>
+                  <dt>data shards</dt>
+                  <dd>{dataShards}</dd>
+                </div>
+                <div>
+                  <dt>network</dt>
+                  <dd>{node.partitioned_from?.length ? `isolated from ${node.partitioned_from.join(", ")}` : "healthy"}</dd>
                 </div>
                 <div>
                   <dt>started</dt>
@@ -290,7 +350,7 @@ function RangesPage(props: { nodes: NodeView[]; ranges: RangeView[] }) {
           <div className="panel-header panel-header-with-control">
             <div>
               <p className="eyebrow">Ranges</p>
-              <h3>Descriptors, replicas, and leaseholders</h3>
+              <h3>Shard inventory, replica spread, and live row counts</h3>
             </div>
             <label className="filter-box">
               <span>Filter</span>
@@ -309,7 +369,9 @@ function RangesPage(props: { nodes: NodeView[]; ranges: RangeView[] }) {
                 <thead>
                   <tr>
                     <th>range</th>
+                    <th>shard</th>
                     <th>keys</th>
+                    <th>rows</th>
                     <th>leaseholder</th>
                     <th>replicas</th>
                     <th>placement</th>
@@ -331,9 +393,16 @@ function RangesPage(props: { nodes: NodeView[]; ranges: RangeView[] }) {
                         </strong>
                         <span className="subtle-mono">gen {range.generation}</span>
                       </td>
+                      <td>
+                        <strong>{range.shard_label ?? `${range.keyspace ?? "range"} shard`}</strong>
+                        <span className="subtle-copy">
+                          {range.tables?.map((table) => table.table_name).join(", ") || range.keyspace || "unclassified"}
+                        </span>
+                      </td>
                       <td className="subtle-mono">
                         {range.start_key || "∅"} .. {range.end_key || "∞"}
                       </td>
+                      <td>{formatNumber(range.row_count ?? 0)}</td>
                       <td>{range.leaseholder_node_id ? `node ${range.leaseholder_node_id}` : "unknown"}</td>
                       <td>
                         <div className="replica-chip-row">
@@ -432,22 +501,30 @@ function RangesPage(props: { nodes: NodeView[]; ranges: RangeView[] }) {
               <div className="placement-detail-stack">
                 <dl className="metric-list">
                   <div>
+                    <dt>shard</dt>
+                    <dd>{selectedRange.shard_label ?? "range shard"}</dd>
+                  </div>
+                  <div>
                     <dt>keys</dt>
                     <dd className="subtle-mono">
                       {selectedRange.start_key || "∅"} .. {selectedRange.end_key || "∞"}
                     </dd>
                   </div>
                   <div>
+                    <dt>rows</dt>
+                    <dd>{formatNumber(selectedRange.row_count ?? 0)}</dd>
+                  </div>
+                  <div>
                     <dt>leaseholder</dt>
                     <dd>{selectedRange.leaseholder_node_id ? `node ${selectedRange.leaseholder_node_id}` : "unknown"}</dd>
                   </div>
                   <div>
-                    <dt>placement</dt>
-                    <dd>{selectedRange.placement_mode ?? "unplaced"}</dd>
+                    <dt>tables</dt>
+                    <dd>{selectedRange.tables?.map((table) => table.table_name).join(", ") || "none"}</dd>
                   </div>
                   <div>
-                    <dt>regions</dt>
-                    <dd>{selectedRange.preferred_regions?.join(", ") || "none declared"}</dd>
+                    <dt>placement</dt>
+                    <dd>{selectedRange.placement_mode ?? "unplaced"}</dd>
                   </div>
                   <div>
                     <dt>lookup</dt>
@@ -491,84 +568,113 @@ function RangesPage(props: { nodes: NodeView[]; ranges: RangeView[] }) {
   );
 }
 
-export function TopologyPage() {
-  const [topology, setTopology] = useState<ClusterTopologyView | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-
-  const loadTopology = useEffectEvent(async () => {
-    setLoading(true);
-    try {
-      const nextTopology = await fetchTopology();
-      startTransition(() => {
-        setTopology(nextTopology);
-        setError(null);
-        setLoading(false);
-      });
-    } catch (loadError) {
-      const message = loadError instanceof Error ? loadError.message : "failed to load topology";
-      startTransition(() => {
-        setTopology(null);
-        setError(message);
-        setLoading(false);
-      });
-    }
-  });
-
-  useEffect(() => {
-    void loadTopology();
-  }, []);
-
-  const edgesByNode = new Map<number, ClusterTopologyView["edges"]>();
-  for (const edge of topology?.edges ?? []) {
-    const current = edgesByNode.get(edge.node_id) ?? [];
-    current.push(edge);
-    edgesByNode.set(edge.node_id, current);
-  }
-
+export function TopologyPage(props: {
+  snapshot?: ClusterSnapshot | null;
+  events?: ClusterEvent[];
+  loading?: boolean;
+  error?: string | null;
+  onRefresh?: () => void;
+}) {
+  const snapshot = props.snapshot ?? null;
+  const events = props.events ?? [];
+  const hottestTables = (snapshot?.stats.tables ?? []).slice(0, 5);
+  const highlightedRanges = (snapshot?.ranges ?? [])
+    .slice()
+    .sort((left, right) => {
+      const rowDelta = (right.row_count ?? 0) - (left.row_count ?? 0);
+      if (rowDelta !== 0) {
+        return rowDelta;
+      }
+      return left.range_id - right.range_id;
+    })
+    .slice(0, 6);
   return (
     <section className="page-grid">
       <div className="panel">
         <div className="panel-header">
           <div>
             <p className="eyebrow">Topology</p>
-            <h3>Replica graph and leaseholder spread</h3>
+            <h3>Connected shard fabric and residency map</h3>
           </div>
-          <button className="refresh-button" onClick={() => void loadTopology()} type="button">
-            Refresh topology
+          <button className="refresh-button" onClick={() => props.onRefresh?.()} type="button">
+            Refresh
           </button>
         </div>
-        {loading ? <EmptyState label="Loading topology graph…" /> : null}
-        {!loading && error ? <p className="lookup-error">{error}</p> : null}
-        {!loading && topology ? (
-          <div className="topology-grid">
-            {topology.nodes.map((node) => {
-              const edges = edgesByNode.get(node.node_id) ?? [];
-              return (
-                <article className="topology-node" key={node.node_id}>
-                  <div className="topology-node-header">
-                    <div>
-                      <p className="node-id">
-                        <Link className="detail-link" to={`/nodes/${node.node_id}`}>
-                          node {node.node_id}
-                        </Link>
-                      </p>
-                      <p className="subtle-copy">{edges.length} hosted replicas</p>
-                    </div>
-                    <StatusPill tone={node.status === "ok" ? "good" : "warn"} label={node.status} />
+        {props.loading && !snapshot ? <EmptyState label="Loading topology graph…" /> : null}
+        {!props.loading && props.error ? <p className="lookup-error">{props.error}</p> : null}
+        {snapshot ? (
+          <div className="page-grid">
+            <div className="stats-grid">
+              <MetricCard label="Nodes" value={snapshot.nodes.length} hint="live cluster members" />
+              <MetricCard label="Rows" value={snapshot.stats.total_rows} hint="logical primary rows" />
+              <MetricCard label="Ranges" value={snapshot.stats.total_ranges} hint={`${snapshot.stats.data_ranges} data-facing shards`} />
+              <MetricCard label="Replicas" value={snapshot.stats.total_replicas} hint="total residency slots" />
+            </div>
+
+            <div className="panel topology-hero-panel">
+              <ClusterFabric nodes={snapshot.nodes} ranges={snapshot.ranges} />
+            </div>
+
+            <div className="topology-secondary-grid">
+              <div className="panel">
+                <div className="panel-header">
+                  <div>
+                    <p className="eyebrow">Tables</p>
+                    <h3>Row density by table</h3>
                   </div>
-                  <div className="field-chip-row">
-                    {edges.length === 0 ? <span className="field-chip">no visible replicas</span> : null}
-                    {edges.map((edge) => (
-                      <Link className="field-chip field-chip-link" key={`${edge.range_id}-${edge.replica_id}`} to={`/ranges/${edge.range_id}`}>
-                        r{edge.range_id} n{edge.node_id}:{edge.role}
-                        {edge.leaseholder ? " leaseholder" : ""}
-                      </Link>
-                    ))}
+                </div>
+                <div className="ledger-stack">
+                  {hottestTables.length === 0 ? <EmptyState label="No table stats available." /> : null}
+                  {hottestTables.map((table) => (
+                    <article className="ledger-row" key={table.table_id || table.table_name}>
+                      <div>
+                        <p className="ledger-title">{table.table_name}</p>
+                        <p className="subtle-copy">{table.range_count} shards</p>
+                      </div>
+                      <strong>{formatNumber(table.row_count)}</strong>
+                    </article>
+                  ))}
+                </div>
+              </div>
+
+              <div className="panel">
+                <div className="panel-header">
+                  <div>
+                    <p className="eyebrow">Hot shards</p>
+                    <h3>Largest row-bearing ranges</h3>
                   </div>
-                </article>
-              );
-            })}
+                </div>
+                <div className="ledger-stack">
+                  {highlightedRanges.length === 0 ? <EmptyState label="No ranges available." /> : null}
+                  {highlightedRanges.map((range) => (
+                    <Link className="ledger-row ledger-row-link" key={range.range_id} to={`/ranges/${range.range_id}`}>
+                      <div>
+                        <p className="ledger-title">{range.shard_label ?? `range ${range.range_id}`}</p>
+                        <p className="subtle-copy">
+                          range {range.range_id} · leaseholder node {range.leaseholder_node_id ?? "?"}
+                        </p>
+                      </div>
+                      <strong>{formatNumber(range.row_count ?? 0)}</strong>
+                    </Link>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            <div className="panel">
+              <div className="panel-header">
+                <div>
+                  <p className="eyebrow">Recent topology events</p>
+                  <h3>Movements, splits, and lease changes</h3>
+                </div>
+              </div>
+              <div className="event-stack">
+                {events.length === 0 ? <EmptyState label="No topology events received." /> : null}
+                {events.slice(Math.max(events.length - 8, 0)).reverse().map((event) => (
+                  <EventRow event={event} key={event.id ?? `${event.timestamp}-${event.type}-${event.message}`} />
+                ))}
+              </div>
+            </div>
           </div>
         ) : null}
       </div>
@@ -653,7 +759,8 @@ export function NodeDetailPage() {
               <div className="field-chip-row">
                 {detail.hosted_ranges.map((range) => (
                   <Link className="field-chip field-chip-link" key={`${range.range_id}-${range.replica_id}`} to={`/ranges/${range.range_id}`}>
-                    r{range.range_id} {range.replica_role}
+                    r{range.range_id} {range.shard_label ?? range.replica_role}
+                    {range.row_count ? ` · ${formatNumber(range.row_count)} rows` : ""}
                     {range.leaseholder ? " leaseholder" : ""}
                   </Link>
                 ))}
@@ -730,8 +837,16 @@ export function RangeDetailPage() {
               <h4>Descriptor</h4>
               <dl className="metric-list">
                 <div>
+                  <dt>shard</dt>
+                  <dd>{detail.range.shard_label ?? "range shard"}</dd>
+                </div>
+                <div>
                   <dt>generation</dt>
                   <dd>{detail.range.generation}</dd>
+                </div>
+                <div>
+                  <dt>rows</dt>
+                  <dd>{formatNumber(detail.range.row_count ?? 0)}</dd>
                 </div>
                 <div>
                   <dt>keys</dt>
@@ -1057,11 +1172,103 @@ export function ScenariosPage() {
   );
 }
 
+function ClusterFabric(props: { nodes: NodeView[]; ranges: RangeView[] }) {
+  const sortedNodes = props.nodes.slice().sort((left, right) => left.node_id - right.node_id);
+  const sortedRanges = props.ranges
+    .slice()
+    .sort((left, right) => {
+      const leftRows = left.row_count ?? 0;
+      const rightRows = right.row_count ?? 0;
+      if (leftRows !== rightRows) {
+        return rightRows - leftRows;
+      }
+      return left.range_id - right.range_id;
+    });
+
+  if (sortedNodes.length === 0) {
+    return <EmptyState label="No nodes available for the shard fabric." />;
+  }
+
+  return (
+    <div className="fabric-board">
+      <div className="fabric-node-strip" style={{ gridTemplateColumns: `repeat(${sortedNodes.length}, minmax(0, 1fr))` }}>
+        {sortedNodes.map((node) => (
+          <article className="fabric-node-card" key={node.node_id}>
+            <div className="fabric-node-card-header">
+              <strong>
+                <Link className="detail-link" to={`/nodes/${node.node_id}`}>
+                  node {node.node_id}
+                </Link>
+              </strong>
+              <StatusPill tone={node.status === "ok" ? "good" : "warn"} label={node.status} />
+            </div>
+            <dl className="fabric-node-metrics">
+              <div>
+                <dt>replicas</dt>
+                <dd>{node.replica_count}</dd>
+              </div>
+              <div>
+                <dt>leases</dt>
+                <dd>{node.lease_count}</dd>
+              </div>
+            </dl>
+          </article>
+        ))}
+      </div>
+
+      <div className="fabric-range-stack">
+        {sortedRanges.map((range) => (
+          <article className="fabric-range-row" key={range.range_id}>
+            <div className="fabric-range-header">
+              <div>
+                <p className="fabric-range-title">
+                  <Link className="detail-link" to={`/ranges/${range.range_id}`}>
+                    {range.shard_label ?? `range ${range.range_id}`}
+                  </Link>
+                </p>
+                <p className="subtle-copy">
+                  range {range.range_id} · {range.tables?.map((table) => table.table_name).join(", ") || range.keyspace || "range"} ·{" "}
+                  {formatNumber(range.row_count ?? 0)} rows
+                </p>
+              </div>
+              <div className="field-chip-row">
+                <span className="field-chip">gen {range.generation}</span>
+                <span className="field-chip">
+                  leaseholder node {range.leaseholder_node_id ?? "?"}
+                </span>
+              </div>
+            </div>
+
+            <div className="fabric-lane-grid" style={{ gridTemplateColumns: `repeat(${sortedNodes.length}, minmax(0, 1fr))` }}>
+              {sortedNodes.map((node) => {
+                const replica = range.replicas.find((entry) => entry.node_id === node.node_id);
+                const leaseholder = range.leaseholder_node_id === node.node_id;
+                return (
+                  <div
+                    className={`fabric-lane-cell${replica ? " fabric-lane-cell-hosting" : ""}${leaseholder ? " fabric-lane-cell-leaseholder" : ""}`}
+                    key={`${range.range_id}-${node.node_id}`}
+                  >
+                    <span className="fabric-lane-rail" />
+                    <span className="fabric-lane-dot" />
+                    <span className="fabric-lane-caption">
+                      {replica ? `${replica.role}${leaseholder ? " · leaseholder" : ""}` : "no replica"}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          </article>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function MetricCard(props: { label: string; value: number; hint: string }) {
   return (
     <article className="metric-card">
       <p className="eyebrow">{props.label}</p>
-      <strong>{props.value}</strong>
+      <strong>{formatNumber(props.value)}</strong>
       <span>{props.hint}</span>
     </article>
   );
@@ -1107,9 +1314,9 @@ function EmptyState(props: { label: string }) {
 function clusterHeadline(snapshot: ClusterSnapshot) {
   const degraded = snapshot.nodes.filter((node) => node.status !== "ok").length;
   if (degraded === 0) {
-    return `${snapshot.nodes.length} nodes healthy, ${snapshot.ranges.length} authoritative ranges visible`;
+    return `${snapshot.nodes.length} nodes healthy, ${formatNumber(snapshot.stats.total_rows)} rows across ${snapshot.stats.total_ranges} live ranges`;
   }
-  return `${degraded} degraded node${degraded === 1 ? "" : "s"} across ${snapshot.nodes.length} visible nodes`;
+  return `${degraded} degraded node${degraded === 1 ? "" : "s"} while ${formatNumber(snapshot.stats.total_rows)} rows remain visible`;
 }
 
 function matchesRange(range: RangeView, filter: string) {
@@ -1122,8 +1329,12 @@ function matchesRange(range: RangeView, filter: string) {
     range.start_key,
     range.end_key,
     range.leaseholder_node_id,
+    range.keyspace,
+    range.shard_label,
+    range.row_count,
     range.placement_mode,
     range.source,
+    range.tables?.map((table) => `${table.table_name} ${table.row_count}`).join(" "),
     range.preferred_regions?.join(" "),
     range.lease_preferences?.join(" "),
     range.replicas.map((replica) => `${replica.node_id} ${replica.role}`).join(" "),
@@ -1180,6 +1391,25 @@ function placementNodesForRange(nodes: NodeView[], range: RangeView | null) {
     }));
 }
 
+function buildNodeResidency(nodes: NodeView[], ranges: RangeView[]) {
+  return nodes
+    .slice()
+    .sort((left, right) => left.node_id - right.node_id)
+    .map((node) => {
+      let hostedRows = 0;
+      let dataShards = 0;
+      for (const range of ranges) {
+        if (range.replicas.some((replica) => replica.node_id === node.node_id)) {
+          hostedRows += range.row_count ?? 0;
+          if (range.tables?.length) {
+            dataShards++
+          }
+        }
+      }
+      return { node, hostedRows, dataShards };
+    });
+}
+
 function severityTone(severity?: string): "good" | "warn" | "bad" | "neutral" {
   switch (severity) {
     case "error":
@@ -1191,6 +1421,10 @@ function severityTone(severity?: string): "good" | "warn" | "bad" | "neutral" {
     default:
       return "good";
   }
+}
+
+function formatNumber(value: number) {
+  return new Intl.NumberFormat().format(value);
 }
 
 function formatInstant(value?: string | null) {

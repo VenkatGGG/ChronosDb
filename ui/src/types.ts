@@ -4,6 +4,12 @@ export interface ReplicaView {
   role: string;
 }
 
+export interface RangeTableStatView {
+  table_id: number;
+  table_name: string;
+  row_count: number;
+}
+
 export interface RangeView {
   range_id: number;
   generation: number;
@@ -12,6 +18,10 @@ export interface RangeView {
   replicas: ReplicaView[];
   leaseholder_replica_id?: number;
   leaseholder_node_id?: number;
+  keyspace?: string;
+  shard_label?: string;
+  row_count?: number;
+  tables?: RangeTableStatView[];
   placement_mode?: string;
   preferred_regions?: string[];
   lease_preferences?: string[];
@@ -42,11 +52,27 @@ export interface ClusterEvent {
   fields?: Record<string, string>;
 }
 
+export interface ClusterTableStatView {
+  table_id: number;
+  table_name: string;
+  row_count: number;
+  range_count: number;
+}
+
+export interface ClusterStatsView {
+  total_rows: number;
+  total_ranges: number;
+  data_ranges: number;
+  total_replicas: number;
+  tables?: ClusterTableStatView[];
+}
+
 export interface ClusterSnapshot {
   generated_at: string;
   nodes: NodeView[];
   ranges: RangeView[];
   events?: ClusterEvent[];
+  stats: ClusterStatsView;
 }
 
 export interface TopologyEdgeView {
@@ -62,6 +88,7 @@ export interface ClusterTopologyView {
   nodes: NodeView[];
   ranges: RangeView[];
   edges: TopologyEdgeView[];
+  stats: ClusterStatsView;
 }
 
 export interface NodeHostedRangeView {
@@ -72,6 +99,9 @@ export interface NodeHostedRangeView {
   replica_id: number;
   replica_role: string;
   leaseholder: boolean;
+  keyspace?: string;
+  shard_label?: string;
+  row_count?: number;
   placement_mode?: string;
 }
 

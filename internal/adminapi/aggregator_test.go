@@ -35,7 +35,15 @@ func TestAggregatorSnapshotMergesNodesRangesAndEvents(t *testing.T) {
 				Replicas:             []ReplicaView{{ReplicaID: 1, NodeID: 1, Role: "voter"}},
 				LeaseholderReplicaID: 1,
 				LeaseholderNodeID:    1,
-				Source:               "local_node_state",
+				Keyspace:             "table",
+				ShardLabel:           "users shard",
+				RowCount:             3,
+				Tables: []RangeTableStatView{{
+					TableID:   7,
+					TableName: "users",
+					RowCount:  3,
+				}},
+				Source: "local_node_state",
 			}},
 			Events: []ClusterEvent{{
 				Timestamp: time.Unix(11, 0).UTC(),
@@ -70,7 +78,15 @@ func TestAggregatorSnapshotMergesNodesRangesAndEvents(t *testing.T) {
 					Replicas:             []ReplicaView{{ReplicaID: 2, NodeID: 2, Role: "voter"}},
 					LeaseholderReplicaID: 1,
 					LeaseholderNodeID:    1,
-					Source:               "local_node_state",
+					Keyspace:             "table",
+					ShardLabel:           "users shard",
+					RowCount:             3,
+					Tables: []RangeTableStatView{{
+						TableID:   7,
+						TableName: "users",
+						RowCount:  3,
+					}},
+					Source: "local_node_state",
 				},
 				{
 					RangeID:    12,
@@ -78,7 +94,15 @@ func TestAggregatorSnapshotMergesNodesRangesAndEvents(t *testing.T) {
 					StartKey:   "6d",
 					EndKey:     "7a",
 					Replicas:   []ReplicaView{{ReplicaID: 3, NodeID: 2, Role: "learner"}},
-					Source:     "local_node_state",
+					Keyspace:   "table",
+					ShardLabel: "orders shard",
+					RowCount:   5,
+					Tables: []RangeTableStatView{{
+						TableID:   9,
+						TableName: "orders",
+						RowCount:  5,
+					}},
+					Source: "local_node_state",
 				},
 			},
 			Events: []ClusterEvent{{
@@ -122,6 +146,12 @@ func TestAggregatorSnapshotMergesNodesRangesAndEvents(t *testing.T) {
 	}
 	if snapshot.Events[0].Type != "node_started" || snapshot.Events[1].Type != "partition_applied" {
 		t.Fatalf("events = %+v, want ordered merged events", snapshot.Events)
+	}
+	if snapshot.Stats.TotalRows != 8 || snapshot.Stats.TotalRanges != 2 || snapshot.Stats.DataRanges != 2 || snapshot.Stats.TotalReplicas != 3 {
+		t.Fatalf("stats = %+v, want rows 8 ranges 2 data 2 replicas 3", snapshot.Stats)
+	}
+	if len(snapshot.Stats.Tables) != 2 || snapshot.Stats.Tables[0].TableName != "orders" || snapshot.Stats.Tables[1].TableName != "users" {
+		t.Fatalf("table stats = %+v, want ordered users/orders summary", snapshot.Stats.Tables)
 	}
 }
 

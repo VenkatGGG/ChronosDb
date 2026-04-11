@@ -143,6 +143,7 @@ func (a *Aggregator) Snapshot(ctx context.Context) (ClusterSnapshot, error) {
 	sort.SliceStable(merged.Events, func(i, j int) bool {
 		return merged.Events[i].Timestamp.Before(merged.Events[j].Timestamp)
 	})
+	merged.Stats = summarizeClusterStats(merged.Ranges)
 	return merged, nil
 }
 
@@ -201,6 +202,7 @@ func (a *Aggregator) Topology(ctx context.Context) (ClusterTopologyView, error) 
 		Nodes:       append([]NodeView(nil), snapshot.Nodes...),
 		Ranges:      cloneRangeViews(snapshot.Ranges),
 		Edges:       edges,
+		Stats:       snapshot.Stats,
 	}, nil
 }
 
@@ -229,6 +231,9 @@ func (a *Aggregator) NodeDetail(ctx context.Context, nodeID uint64) (NodeDetailV
 				ReplicaID:     replica.ReplicaID,
 				ReplicaRole:   replica.Role,
 				Leaseholder:   replica.ReplicaID == view.LeaseholderReplicaID,
+				Keyspace:      view.Keyspace,
+				ShardLabel:    view.ShardLabel,
+				RowCount:      view.RowCount,
 				PlacementMode: view.PlacementMode,
 			})
 			hostedRangeIDs[view.RangeID] = struct{}{}
@@ -402,11 +407,67 @@ func (a *Aggregator) mergeRangeView(snapshot *ClusterSnapshot, index map[uint64]
 	if current.Source == "" {
 		current.Source = incoming.Source
 	}
+	if current.Keyspace == "" && incoming.Keyspace != "" {
+		current.Keyspace = incoming.Keyspace
+	}
+	if current.ShardLabel == "" && incoming.ShardLabel != "" {
+		current.ShardLabel = incoming.ShardLabel
+	}
+	if incoming.RowCount > current.RowCount {
+		current.RowCount = incoming.RowCount
+	}
+	current.Tables = mergeRangeTableStats(current.Tables, incoming.Tables)
 	if current.PlacementMode == "" && incoming.PlacementMode != "" {
 		current.PlacementMode = incoming.PlacementMode
 		current.PreferredRegions = append([]string(nil), incoming.PreferredRegions...)
 		current.LeasePreferences = append([]string(nil), incoming.LeasePreferences...)
 	}
+}
+
+func mergeRangeTableStats(current, incoming []RangeTableStatView) []RangeTableStatView {
+	out := append([]RangeTableStatView(nil), current...)
+	index := make(map[uint64]int, len(out))
+	nameIndex := make(map[string]int, len(out))
+	for i, table := range out {
+		if table.TableID != 0 {
+			index[table.TableID] = i
+		}
+		if table.TableName != "" {
+			nameIndex[table.TableName] = i
+		}
+	}
+	for _, table := range incoming {
+		pos, ok := index[table.TableID]
+		if !ok && table.TableName != "" {
+			pos, ok = nameIndex[table.TableName]
+		}
+		if ok {
+			if table.RowCount > out[pos].RowCount {
+				out[pos].RowCount = table.RowCount
+			}
+			if out[pos].TableID == 0 {
+				out[pos].TableID = table.TableID
+			}
+			if out[pos].TableName == "" {
+				out[pos].TableName = table.TableName
+			}
+			continue
+		}
+		if table.TableID != 0 {
+			index[table.TableID] = len(out)
+		}
+		if table.TableName != "" {
+			nameIndex[table.TableName] = len(out)
+		}
+		out = append(out, table)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].TableName != out[j].TableName {
+			return out[i].TableName < out[j].TableName
+		}
+		return out[i].TableID < out[j].TableID
+	})
+	return out
 }
 
 func mergeReplicaViews(current, incoming []ReplicaView) []ReplicaView {
@@ -432,6 +493,7 @@ func mergeReplicaViews(current, incoming []ReplicaView) []ReplicaView {
 func cloneRangeView(view RangeView) RangeView {
 	copyView := view
 	copyView.Replicas = append([]ReplicaView(nil), view.Replicas...)
+	copyView.Tables = append([]RangeTableStatView(nil), view.Tables...)
 	copyView.PreferredRegions = append([]string(nil), view.PreferredRegions...)
 	copyView.LeasePreferences = append([]string(nil), view.LeasePreferences...)
 	return copyView
@@ -472,6 +534,53 @@ func correlateEvents(events []ClusterEvent, match func(ClusterEvent) bool) []Clu
 		return correlated[i].Timestamp.After(correlated[j].Timestamp)
 	})
 	return correlated
+}
+
+func summarizeClusterStats(ranges []RangeView) ClusterStatsView {
+	stats := ClusterStatsView{
+		TotalRanges: len(ranges),
+	}
+	tableIndex := make(map[uint64]int)
+	tableNameIndex := make(map[string]int)
+	for _, view := range ranges {
+		stats.TotalReplicas += len(view.Replicas)
+		if len(view.Tables) > 0 {
+			stats.DataRanges++
+		}
+		stats.TotalRows += view.RowCount
+		for _, table := range view.Tables {
+			pos, ok := tableIndex[table.TableID]
+			if !ok && table.TableName != "" {
+				pos, ok = tableNameIndex[table.TableName]
+			}
+			if !ok {
+				entry := ClusterTableStatView{
+					TableID:    table.TableID,
+					TableName:  table.TableName,
+					RowCount:   table.RowCount,
+					RangeCount: 1,
+				}
+				if entry.TableName == "" {
+					entry.TableName = fmt.Sprintf("table-%d", entry.TableID)
+				}
+				if entry.TableID != 0 {
+					tableIndex[entry.TableID] = len(stats.Tables)
+				}
+				tableNameIndex[entry.TableName] = len(stats.Tables)
+				stats.Tables = append(stats.Tables, entry)
+				continue
+			}
+			stats.Tables[pos].RowCount += table.RowCount
+			stats.Tables[pos].RangeCount++
+		}
+	}
+	sort.Slice(stats.Tables, func(i, j int) bool {
+		if stats.Tables[i].RowCount != stats.Tables[j].RowCount {
+			return stats.Tables[i].RowCount > stats.Tables[j].RowCount
+		}
+		return stats.Tables[i].TableName < stats.Tables[j].TableName
+	})
+	return stats
 }
 
 func rangeTouchesNodes(view RangeView, nodeIDs map[uint64]struct{}) bool {

@@ -1,6 +1,7 @@
 package systemtest
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -884,7 +885,7 @@ func (n *ProcessNode) handleAdminRanges(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	views, err := n.rangeViews()
+	views, err := n.rangeViews(r.Context())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -905,7 +906,7 @@ func (n *ProcessNode) handleAdminSnapshot(w http.ResponseWriter, r *http.Request
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	snapshot, err := n.snapshot(parsePositiveInt(r.URL.Query().Get("event_limit")))
+	snapshot, err := n.snapshot(r.Context(), parsePositiveInt(r.URL.Query().Get("event_limit")))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -996,14 +997,22 @@ func (n *ProcessNode) nodeView() (adminapi.NodeView, error) {
 	}, nil
 }
 
-func (n *ProcessNode) rangeViews() ([]adminapi.RangeView, error) {
+func (n *ProcessNode) rangeViews(ctx context.Context) ([]adminapi.RangeView, error) {
 	descs, err := n.host.HostedDescriptors()
+	if err != nil {
+		return nil, err
+	}
+	catalog, err := n.host.LoadSQLCatalog(ctx)
 	if err != nil {
 		return nil, err
 	}
 	views := make([]adminapi.RangeView, 0, len(descs))
 	for _, desc := range descs {
-		views = append(views, adminapi.RangeViewFromDescriptor(desc, "runtime_store"))
+		view, err := n.rangeViewFromDescriptor(ctx, desc, catalog)
+		if err != nil {
+			return nil, err
+		}
+		views = append(views, view)
 	}
 	return views, nil
 }
@@ -1019,12 +1028,12 @@ func (n *ProcessNode) recentEvents(limit int) []adminapi.ClusterEvent {
 	return append([]adminapi.ClusterEvent(nil), events[len(events)-limit:]...)
 }
 
-func (n *ProcessNode) snapshot(eventLimit int) (adminapi.ClusterSnapshot, error) {
+func (n *ProcessNode) snapshot(ctx context.Context, eventLimit int) (adminapi.ClusterSnapshot, error) {
 	nodeView, err := n.nodeView()
 	if err != nil {
 		return adminapi.ClusterSnapshot{}, err
 	}
-	rangeViews, err := n.rangeViews()
+	rangeViews, err := n.rangeViews(ctx)
 	if err != nil {
 		return adminapi.ClusterSnapshot{}, err
 	}
@@ -1033,7 +1042,122 @@ func (n *ProcessNode) snapshot(eventLimit int) (adminapi.ClusterSnapshot, error)
 		Nodes:       []adminapi.NodeView{nodeView},
 		Ranges:      rangeViews,
 		Events:      n.recentEvents(eventLimit),
+		Stats:       adminapi.ClusterStatsView{},
 	}, nil
+}
+
+func (n *ProcessNode) rangeViewFromDescriptor(ctx context.Context, desc meta.RangeDescriptor, catalog *chronossql.Catalog) (adminapi.RangeView, error) {
+	view := adminapi.RangeViewFromDescriptor(desc, "runtime_store")
+	view.Keyspace = classifyRangeKeyspace(desc)
+	view.ShardLabel = defaultShardLabel(view.Keyspace, desc.RangeID)
+	if catalog == nil {
+		return view, nil
+	}
+	tableStats, rowCount, err := n.rangeTableStats(ctx, desc, catalog)
+	if err != nil {
+		return adminapi.RangeView{}, err
+	}
+	if len(tableStats) > 0 {
+		view.Keyspace = "table"
+		view.ShardLabel = shardLabelForTables(tableStats)
+		view.Tables = tableStats
+		view.RowCount = rowCount
+	}
+	return view, nil
+}
+
+func (n *ProcessNode) rangeTableStats(ctx context.Context, desc meta.RangeDescriptor, catalog *chronossql.Catalog) ([]adminapi.RangeTableStatView, int, error) {
+	tables := catalog.Tables()
+	if len(tables) == 0 {
+		return nil, 0, nil
+	}
+	stats := make([]adminapi.RangeTableStatView, 0, len(tables))
+	totalRows := 0
+	for _, table := range tables {
+		tableStart := storage.GlobalTablePrimaryPrefix(table.ID)
+		tableEnd := storage.PrefixEnd(tableStart)
+		startKey, endKey, ok := intersectHalfOpenSpan(desc.StartKey, desc.EndKey, tableStart, tableEnd)
+		if !ok {
+			continue
+		}
+		rows, _, err := n.host.ScanRangeLocal(ctx, storage.MVCCScanRequest{
+			StartKey:       startKey,
+			EndKey:         endKey,
+			StartInclusive: true,
+			EndInclusive:   false,
+		})
+		if err != nil {
+			return nil, 0, err
+		}
+		rowCount := 0
+		for _, row := range rows {
+			if storage.IsGlobalTablePrimaryRowKey(table.ID, row.LogicalKey) {
+				rowCount++
+			}
+		}
+		stats = append(stats, adminapi.RangeTableStatView{
+			TableID:   table.ID,
+			TableName: table.Name,
+			RowCount:  rowCount,
+		})
+		totalRows += rowCount
+	}
+	return stats, totalRows, nil
+}
+
+func intersectHalfOpenSpan(leftStart, leftEnd, rightStart, rightEnd []byte) ([]byte, []byte, bool) {
+	start := leftStart
+	if bytes.Compare(rightStart, start) > 0 {
+		start = rightStart
+	}
+	end := leftEnd
+	if len(end) == 0 || (len(rightEnd) > 0 && bytes.Compare(rightEnd, end) < 0) {
+		end = rightEnd
+	}
+	if len(end) > 0 && bytes.Compare(start, end) >= 0 {
+		return nil, nil, false
+	}
+	return append([]byte(nil), start...), append([]byte(nil), end...), true
+}
+
+func classifyRangeKeyspace(desc meta.RangeDescriptor) string {
+	switch {
+	case bytes.HasPrefix(desc.StartKey, storage.Meta1Prefix()):
+		return "meta1"
+	case bytes.HasPrefix(desc.StartKey, storage.Meta2Prefix()):
+		return "meta2"
+	case bytes.HasPrefix(desc.StartKey, storage.GlobalSystemPrefix()):
+		return "system"
+	case bytes.HasPrefix(desc.StartKey, storage.GlobalTablePrefix()):
+		return "table"
+	default:
+		return "local"
+	}
+}
+
+func defaultShardLabel(keyspace string, rangeID uint64) string {
+	switch keyspace {
+	case "meta1":
+		return "meta1 routing"
+	case "meta2":
+		return "meta2 routing"
+	case "system":
+		return "system span"
+	case "table":
+		return fmt.Sprintf("range %d", rangeID)
+	default:
+		return "local metadata"
+	}
+}
+
+func shardLabelForTables(tables []adminapi.RangeTableStatView) string {
+	if len(tables) == 0 {
+		return "data shard"
+	}
+	if len(tables) == 1 {
+		return fmt.Sprintf("%s shard", tables[0].TableName)
+	}
+	return fmt.Sprintf("%s +%d shard", tables[0].TableName, len(tables)-1)
 }
 
 func (n *ProcessNode) statusLocked() (string, []string) {

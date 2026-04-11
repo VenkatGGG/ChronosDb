@@ -672,6 +672,210 @@ a {
   color: var(--text);
 }
 
+.hero-panel {
+  display: grid;
+  gap: 1.25rem;
+  padding: 1.35rem;
+  border: 1px solid rgba(111, 191, 255, 0.16);
+  border-radius: var(--radius-lg);
+  background:
+    linear-gradient(135deg, rgba(28, 56, 88, 0.5), rgba(7, 17, 28, 0.8)),
+    radial-gradient(circle at top right, rgba(110, 240, 194, 0.12), transparent 28%);
+  box-shadow: var(--shadow);
+}
+
+.hero-panel h3 {
+  margin: 0;
+  font-family: "Space Grotesk", sans-serif;
+  font-size: clamp(1.8rem, 3vw, 2.6rem);
+  letter-spacing: -0.04em;
+}
+
+.hero-copy {
+  max-width: 70ch;
+  margin: 0.85rem 0 0;
+  color: var(--text-muted);
+}
+
+.overview-secondary-grid,
+.topology-secondary-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1rem;
+}
+
+.topology-hero-panel {
+  overflow: hidden;
+}
+
+.fabric-shell {
+  overflow-x: auto;
+}
+
+.fabric-board {
+  display: grid;
+  gap: 1rem;
+  min-width: 54rem;
+}
+
+.fabric-node-strip {
+  display: grid;
+  gap: 0.9rem;
+}
+
+.fabric-node-card {
+  padding: 1rem 1.1rem;
+  border: 1px solid rgba(111, 191, 255, 0.18);
+  border-radius: 22px;
+  background:
+    linear-gradient(180deg, rgba(20, 38, 58, 0.78), rgba(9, 20, 33, 0.92)),
+    radial-gradient(circle at top, rgba(247, 178, 103, 0.08), transparent 55%);
+}
+
+.fabric-node-card-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.8rem;
+}
+
+.fabric-node-metrics {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.8rem;
+  margin: 0.9rem 0 0;
+}
+
+.fabric-node-metrics dt {
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.fabric-node-metrics dd {
+  margin: 0.2rem 0 0;
+}
+
+.fabric-range-stack {
+  display: grid;
+  gap: 0.85rem;
+}
+
+.fabric-range-row {
+  display: grid;
+  gap: 0.75rem;
+  padding: 1rem 1.1rem;
+  border: 1px solid rgba(111, 191, 255, 0.16);
+  border-radius: 24px;
+  background:
+    linear-gradient(180deg, rgba(8, 16, 27, 0.96), rgba(8, 17, 29, 0.88)),
+    radial-gradient(circle at left center, rgba(110, 240, 194, 0.06), transparent 25%);
+}
+
+.fabric-range-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.fabric-range-title {
+  margin: 0;
+  font-family: "Space Grotesk", sans-serif;
+  font-size: 1rem;
+}
+
+.fabric-lane-grid {
+  position: relative;
+  display: grid;
+  gap: 0.8rem;
+}
+
+.fabric-lane-grid::before {
+  content: "";
+  position: absolute;
+  left: 1rem;
+  right: 1rem;
+  top: 0.95rem;
+  height: 2px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, rgba(111, 191, 255, 0.18), rgba(110, 240, 194, 0.36), rgba(111, 191, 255, 0.18));
+}
+
+.fabric-lane-cell {
+  position: relative;
+  display: grid;
+  justify-items: center;
+  gap: 0.4rem;
+  min-height: 3.4rem;
+  padding-top: 0.25rem;
+}
+
+.fabric-lane-rail {
+  display: none;
+}
+
+.fabric-lane-dot {
+  width: 1rem;
+  height: 1rem;
+  border-radius: 50%;
+  border: 2px solid rgba(111, 191, 255, 0.26);
+  background: rgba(7, 16, 29, 0.95);
+  box-shadow: 0 0 0 8px rgba(7, 16, 29, 0.58);
+}
+
+.fabric-lane-cell-hosting .fabric-lane-dot {
+  border-color: rgba(111, 191, 255, 0.68);
+  background: linear-gradient(180deg, #63b0ff, #318be6);
+}
+
+.fabric-lane-cell-leaseholder .fabric-lane-dot {
+  border-color: rgba(110, 240, 194, 0.92);
+  background: linear-gradient(180deg, #8bf4d3, #41d3a0);
+  box-shadow:
+    0 0 0 8px rgba(7, 16, 29, 0.58),
+    0 0 22px rgba(110, 240, 194, 0.34);
+}
+
+.fabric-lane-caption {
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  text-align: center;
+}
+
+.ledger-stack {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.ledger-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.95rem 1rem;
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.ledger-row-link {
+  transition: border-color 140ms ease, transform 140ms ease, background 140ms ease;
+}
+
+.ledger-row-link:hover {
+  transform: translateY(-1px);
+  border-color: rgba(110, 240, 194, 0.28);
+  background: rgba(110, 240, 194, 0.07);
+}
+
+.ledger-title {
+  margin: 0;
+  font-family: "Space Grotesk", sans-serif;
+  font-size: 1rem;
+}
+
 @media (max-width: 1080px) {
   .console-shell {
     grid-template-columns: 1fr;
@@ -696,6 +900,15 @@ a {
 
   .scenario-layout {
     grid-template-columns: 1fr;
+  }
+
+  .overview-secondary-grid,
+  .topology-secondary-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .fabric-board {
+    min-width: 44rem;
   }
 }
 

@@ -3,6 +3,7 @@ package systemtest
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/VenkatGGG/ChronosDb/internal/adminapi"
+	"github.com/VenkatGGG/ChronosDb/internal/hlc"
 	"github.com/VenkatGGG/ChronosDb/internal/meta"
 	chronosruntime "github.com/VenkatGGG/ChronosDb/internal/runtime"
 	"github.com/VenkatGGG/ChronosDb/internal/storage"
@@ -179,6 +181,86 @@ func TestProcessNodeProtectsAdminAndControlHTTP(t *testing.T) {
 	}
 }
 
+func TestProcessNodeAdminRangesIncludeRowStats(t *testing.T) {
+	t.Parallel()
+
+	dataDir := t.TempDir()
+	node, err := NewProcessNode(ProcessNodeConfig{
+		NodeID:            1,
+		DataDir:           dataDir,
+		PGListenAddr:      "127.0.0.1:0",
+		ObservabilityAddr: "127.0.0.1:0",
+		ControlAddr:       "127.0.0.1:0",
+		Ranges: []meta.RangeDescriptor{
+			{
+				RangeID:    21,
+				Generation: 1,
+				StartKey:   storage.GlobalTablePrimaryPrefix(7),
+				EndKey:     storage.GlobalTablePrimaryPrefix(8),
+				Replicas: []meta.ReplicaDescriptor{
+					{ReplicaID: 1, NodeID: 1, Role: meta.ReplicaRoleVoter},
+				},
+				LeaseholderReplicaID: 1,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("new process node: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- node.Run(ctx)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case err := <-done:
+			if err != nil && err != context.Canceled {
+				t.Fatalf("node run: %v", err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for process node shutdown")
+		}
+	})
+
+	waitForProcessNodeState(t, filepath.Join(dataDir, "state.json"))
+	if err := node.host.Campaign(context.Background(), 21); err != nil {
+		t.Fatalf("campaign users range: %v", err)
+	}
+	waitForRangeLeader(t, node.host, 21, 1)
+	putTS := hlc.Timestamp{WallTime: 10}
+	for _, id := range []int64{1, 2, 3} {
+		if _, err := node.host.PutValueLocal(
+			context.Background(),
+			storage.GlobalTablePrimaryKey(7, encodedIntKeyForTest(id)),
+			putTS,
+			[]byte(fmt.Sprintf("user-%d", id)),
+		); err != nil {
+			t.Fatalf("put row %d: %v", id, err)
+		}
+		putTS.WallTime++
+	}
+
+	client := &http.Client{Timeout: 2 * time.Second}
+	state := waitForProcessNodeState(t, filepath.Join(dataDir, "state.json"))
+	var ranges []adminapi.RangeView
+	getJSON(t, client, state.ObservabilityURL+"/admin/ranges", &ranges)
+	if len(ranges) != 1 {
+		t.Fatalf("ranges = %+v, want 1", ranges)
+	}
+	if ranges[0].ShardLabel != "users shard" || ranges[0].Keyspace != "table" {
+		t.Fatalf("range label = %+v, want users table shard", ranges[0])
+	}
+	if ranges[0].RowCount != 3 {
+		t.Fatalf("range row count = %d, want 3", ranges[0].RowCount)
+	}
+	if len(ranges[0].Tables) != 1 || ranges[0].Tables[0].TableName != "users" || ranges[0].Tables[0].RowCount != 3 {
+		t.Fatalf("range tables = %+v, want users row count 3", ranges[0].Tables)
+	}
+}
+
 func TestProcessNodePersistsHostedDescriptorsAcrossRestart(t *testing.T) {
 	t.Parallel()
 
@@ -252,6 +334,12 @@ func TestProcessNodePersistsHostedDescriptorsAcrossRestart(t *testing.T) {
 	if nodeView.ReplicaCount != 1 || nodeView.LeaseCount != 1 {
 		t.Fatalf("persisted node counts = replicas %d leases %d, want 1/1", nodeView.ReplicaCount, nodeView.LeaseCount)
 	}
+}
+
+func encodedIntKeyForTest(value int64) []byte {
+	var buf [8]byte
+	binary.BigEndian.PutUint64(buf[:], uint64(value)^(uint64(1)<<63))
+	return buf[:]
 }
 
 func TestProcessNodeRaftTransportElectsAcrossProcesses(t *testing.T) {

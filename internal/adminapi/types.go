@@ -20,19 +20,30 @@ type ReplicaView struct {
 	Role      string `json:"role"`
 }
 
+// RangeTableStatView summarizes one table's logical row presence inside a range.
+type RangeTableStatView struct {
+	TableID   uint64 `json:"table_id"`
+	TableName string `json:"table_name"`
+	RowCount  int    `json:"row_count"`
+}
+
 // RangeView is the UI/API-safe rendering of a range descriptor.
 type RangeView struct {
-	RangeID              uint64        `json:"range_id"`
-	Generation           uint64        `json:"generation"`
-	StartKey             string        `json:"start_key"`
-	EndKey               string        `json:"end_key,omitempty"`
-	Replicas             []ReplicaView `json:"replicas"`
-	LeaseholderReplicaID uint64        `json:"leaseholder_replica_id,omitempty"`
-	LeaseholderNodeID    uint64        `json:"leaseholder_node_id,omitempty"`
-	PlacementMode        string        `json:"placement_mode,omitempty"`
-	PreferredRegions     []string      `json:"preferred_regions,omitempty"`
-	LeasePreferences     []string      `json:"lease_preferences,omitempty"`
-	Source               string        `json:"source,omitempty"`
+	RangeID              uint64               `json:"range_id"`
+	Generation           uint64               `json:"generation"`
+	StartKey             string               `json:"start_key"`
+	EndKey               string               `json:"end_key,omitempty"`
+	Replicas             []ReplicaView        `json:"replicas"`
+	LeaseholderReplicaID uint64               `json:"leaseholder_replica_id,omitempty"`
+	LeaseholderNodeID    uint64               `json:"leaseholder_node_id,omitempty"`
+	Keyspace             string               `json:"keyspace,omitempty"`
+	ShardLabel           string               `json:"shard_label,omitempty"`
+	RowCount             int                  `json:"row_count,omitempty"`
+	Tables               []RangeTableStatView `json:"tables,omitempty"`
+	PlacementMode        string               `json:"placement_mode,omitempty"`
+	PreferredRegions     []string             `json:"preferred_regions,omitempty"`
+	LeasePreferences     []string             `json:"lease_preferences,omitempty"`
+	Source               string               `json:"source,omitempty"`
 }
 
 // NodeView is the node/operator view exposed to the UI.
@@ -63,12 +74,30 @@ type ClusterEvent struct {
 	Fields    map[string]string `json:"fields,omitempty"`
 }
 
+// ClusterTableStatView summarizes one table across the merged cluster snapshot.
+type ClusterTableStatView struct {
+	TableID    uint64 `json:"table_id"`
+	TableName  string `json:"table_name"`
+	RowCount   int    `json:"row_count"`
+	RangeCount int    `json:"range_count"`
+}
+
+// ClusterStatsView is the high-level cluster summary used by the console shell.
+type ClusterStatsView struct {
+	TotalRows     int                    `json:"total_rows"`
+	TotalRanges   int                    `json:"total_ranges"`
+	DataRanges    int                    `json:"data_ranges"`
+	TotalReplicas int                    `json:"total_replicas"`
+	Tables        []ClusterTableStatView `json:"tables,omitempty"`
+}
+
 // ClusterSnapshot is the top-level snapshot returned by a future aggregator.
 type ClusterSnapshot struct {
-	GeneratedAt time.Time      `json:"generated_at"`
-	Nodes       []NodeView     `json:"nodes"`
-	Ranges      []RangeView    `json:"ranges"`
-	Events      []ClusterEvent `json:"events,omitempty"`
+	GeneratedAt time.Time        `json:"generated_at"`
+	Nodes       []NodeView       `json:"nodes"`
+	Ranges      []RangeView      `json:"ranges"`
+	Events      []ClusterEvent   `json:"events,omitempty"`
+	Stats       ClusterStatsView `json:"stats"`
 }
 
 // TopologyEdgeView is one replica-placement edge in the cluster topology graph.
@@ -86,6 +115,7 @@ type ClusterTopologyView struct {
 	Nodes       []NodeView         `json:"nodes"`
 	Ranges      []RangeView        `json:"ranges"`
 	Edges       []TopologyEdgeView `json:"edges"`
+	Stats       ClusterStatsView   `json:"stats"`
 }
 
 // NodeHostedRangeView is one range residency row in a node drilldown view.
@@ -97,6 +127,9 @@ type NodeHostedRangeView struct {
 	ReplicaID     uint64 `json:"replica_id"`
 	ReplicaRole   string `json:"replica_role"`
 	Leaseholder   bool   `json:"leaseholder"`
+	Keyspace      string `json:"keyspace,omitempty"`
+	ShardLabel    string `json:"shard_label,omitempty"`
+	RowCount      int    `json:"row_count,omitempty"`
 	PlacementMode string `json:"placement_mode,omitempty"`
 }
 
