@@ -862,12 +862,19 @@ Design constraints:
 - keep commits scoped by concern area so auth, HTTP contracts, and API-shape
   refactors can be reviewed independently
 
-### [ ] Phase 15 Planned Execution
+### [x] Phase 15 Planned Execution
 
-- [ ] 15.1 Add pgwire authentication and session-principal plumbing
+- [x] 15.1 Add pgwire authentication and session-principal plumbing
   by introducing an explicit startup authenticator seam, propagating the
   authenticated principal into the session, and teaching the pgwire client/test
   stack how to satisfy the new handshake
+  - pgwire startup now runs through an explicit authenticator interface and a
+    cleartext-password challenge instead of sending `AuthenticationOk`
+    unconditionally, and authenticated sessions now carry a `Principal`
+    surfaced through the session object
+  - process-node, local-controller, pgclient, and raw pgwire test helpers now
+    all satisfy the same startup challenge, with stable default demo
+    credentials wired through the node runtime and CLI entrypoints
 - [x] 15.2 Fix scenario run HTTP contracts
   so missing retained runs map to `404` at the console API boundary instead of
   surfacing as generic `502` backend failures
@@ -891,24 +898,29 @@ Design constraints:
     helpers without fake cancellation parameters, while proposal/dispatch/read
     paths keep `context.Context` only where they actually resolve, block, or
     wait on distributed state
-- [ ] 15.6 Reduce runtime/systemtest boundary bleed
+- [x] 15.6 Reduce runtime/systemtest boundary bleed
   by carving durable runtime-facing pieces out of `internal/systemtest` where
   production/demo code currently depends on test-oriented package seams
-- [ ] 15.7 Trim narrating doc comments and signature-echo docs
+  - command and demo packages now import the durable `internal/node` launch
+    surface for default catalog, node config, and process construction instead
+    of depending directly on `internal/systemtest`
+- [x] 15.7 Trim narrating doc comments and signature-echo docs
   where exported comments restate obvious code instead of documenting
   constraints, invariants, or compatibility semantics
+  - storage, parser, and external-controller comments now describe semantics
+    and boundaries more directly instead of narrating obvious control flow
 
 Execution order:
 
 - [x] Milestone 15A: contract correctness
   Complete `15.2` and `15.3` first so HTTP and prepared-query callers stop
   depending on misleading contracts before broader refactors begin.
-- [ ] Milestone 15B: auth and trust boundaries
+- [x] Milestone 15B: auth and trust boundaries
   Complete `15.1` before any further UI/runtime exposure work so pgwire no
   longer remains the most obvious unauthenticated surface.
 - [x] Milestone 15C: API-shape cleanup
   Complete `15.4` and `15.5` together so request-shape and cancellation-policy
   changes settle into one coherent exported contract set.
-- [ ] Milestone 15D: package and doc cleanup
+- [x] Milestone 15D: package and doc cleanup
   Finish with `15.6` and `15.7` once the live contracts are stable enough to
   extract and rename boundaries without churn.

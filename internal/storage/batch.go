@@ -17,12 +17,12 @@ type WriteBatch struct {
 	opCount int
 }
 
-// NewWriteBatch allocates a new Pebble batch owned by the engine.
+// NewWriteBatch returns a Pebble batch tracked for empty-commit elision.
 func (e *Engine) NewWriteBatch() *WriteBatch {
 	return &WriteBatch{batch: e.db.NewBatch()}
 }
 
-// Close releases the underlying batch handle.
+// Close releases the underlying Pebble batch.
 func (b *WriteBatch) Close() error {
 	if b == nil || b.batch == nil {
 		return nil
@@ -30,12 +30,12 @@ func (b *WriteBatch) Close() error {
 	return b.batch.Close()
 }
 
-// Empty reports whether any operations have been queued.
+// Empty reports whether the batch has queued any mutations.
 func (b *WriteBatch) Empty() bool {
 	return b == nil || b.opCount == 0
 }
 
-// SetRaw appends a raw set operation to the batch.
+// SetRaw stages one raw key/value mutation.
 func (b *WriteBatch) SetRaw(key, value []byte) error {
 	if err := b.batch.Set(key, value, nil); err != nil {
 		return err
@@ -44,7 +44,7 @@ func (b *WriteBatch) SetRaw(key, value []byte) error {
 	return nil
 }
 
-// DeleteRaw appends a raw delete operation to the batch.
+// DeleteRaw stages one raw key deletion.
 func (b *WriteBatch) DeleteRaw(key []byte) error {
 	if err := b.batch.Delete(key, nil); err != nil {
 		return err

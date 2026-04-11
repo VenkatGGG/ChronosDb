@@ -161,13 +161,13 @@ Start the seeded 3-node cluster plus console:
 Then open [http://127.0.0.1:8080](http://127.0.0.1:8080) and connect with:
 
 ```bash
-psql "postgresql://chronos@127.0.0.1:26257/postgres?sslmode=disable"
+PGPASSWORD=chronos psql "postgresql://chronos@127.0.0.1:26257/postgres?sslmode=disable"
 ```
 
 Run the prepared-statement CRUD workload harness against the seeded cluster:
 
 ```bash
-./bin/chronos-appcompat -pg-addr 127.0.0.1:26257 -iterations 10
+./bin/chronos-appcompat -pg-addr 127.0.0.1:26257 -user chronos -password chronos -iterations 10
 ```
 
 Or have the seeded demo run it automatically on startup:

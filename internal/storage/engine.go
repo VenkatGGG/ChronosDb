@@ -25,7 +25,7 @@ type Metadata struct {
 	Version      StoreVersion
 }
 
-// Engine is the Phase 1 single-node storage wrapper around Pebble.
+// Engine wraps the single-store Pebble keyspace and bootstrap metadata.
 type Engine struct {
 	db       *pebble.DB
 	dir      string
@@ -33,7 +33,7 @@ type Engine struct {
 	metadata Metadata
 }
 
-// Open opens the Pebble engine and loads local bootstrap metadata if present.
+// Open loads the Pebble keyspace and any persisted store metadata.
 func Open(_ context.Context, opts Options) (*Engine, error) {
 	if opts.Dir == "" {
 		return nil, fmt.Errorf("open engine: directory is required")
@@ -69,12 +69,12 @@ func (e *Engine) Close() error {
 	return e.db.Close()
 }
 
-// Metadata returns the current local bootstrap metadata.
+// Metadata returns the persisted local store identity and version state.
 func (e *Engine) Metadata() Metadata {
 	return e.metadata
 }
 
-// Bootstrap writes the store identity and current store version into an empty store.
+// Bootstrap writes the initial store identity and version markers once.
 func (e *Engine) Bootstrap(_ context.Context, ident StoreIdent) error {
 	if err := ident.Validate(); err != nil {
 		return err
@@ -109,12 +109,12 @@ func (e *Engine) Bootstrap(_ context.Context, ident StoreIdent) error {
 	return nil
 }
 
-// PutRaw writes a raw key/value pair through the engine.
+// PutRaw applies one raw key/value write with a synced commit.
 func (e *Engine) PutRaw(_ context.Context, key, value []byte) error {
 	return e.db.Set(key, value, pebble.Sync)
 }
 
-// GetRaw returns a copy of the value stored for key.
+// GetRaw returns a copied value for one raw key.
 func (e *Engine) GetRaw(_ context.Context, key []byte) ([]byte, error) {
 	value, closer, err := e.db.Get(key)
 	if err != nil {

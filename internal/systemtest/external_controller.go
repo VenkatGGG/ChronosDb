@@ -15,7 +15,7 @@ import (
 	"time"
 )
 
-// NodeLaunchSpec describes one child-process launch.
+// NodeLaunchSpec captures the per-node addresses and data directory for one child process.
 type NodeLaunchSpec struct {
 	NodeID            uint64
 	DataDir           string
@@ -24,7 +24,7 @@ type NodeLaunchSpec struct {
 	ControlAddr       string
 }
 
-// ExternalProcessControllerConfig configures a process-backed cluster controller.
+// ExternalProcessControllerConfig describes how the OS-process-backed cluster should be launched.
 type ExternalProcessControllerConfig struct {
 	Nodes        []uint64
 	BinaryPath   string
@@ -47,7 +47,7 @@ type externalNode struct {
 	waitDone  chan error
 }
 
-// ExternalProcessController drives faults against separate OS processes.
+// ExternalProcessController drives faults against separate ChronosDB processes.
 type ExternalProcessController struct {
 	mu     sync.RWMutex
 	cfg    ExternalProcessControllerConfig
@@ -57,7 +57,7 @@ type ExternalProcessController struct {
 
 var _ ArtifactController = (*ExternalProcessController)(nil)
 
-// NewExternalProcessController launches a process-backed cluster.
+// NewExternalProcessController starts the configured child-process cluster.
 func NewExternalProcessController(cfg ExternalProcessControllerConfig) (*ExternalProcessController, error) {
 	if len(cfg.Nodes) == 0 {
 		return nil, fmt.Errorf("systemtest: external controller requires nodes")
@@ -88,7 +88,7 @@ func NewExternalProcessController(cfg ExternalProcessControllerConfig) (*Externa
 	return controller, nil
 }
 
-// Close stops all child processes.
+// Close stops all child processes and aggregates shutdown errors.
 func (c *ExternalProcessController) Close() error {
 	c.mu.Lock()
 	nodes := make([]*externalNode, 0, len(c.nodes))
@@ -171,7 +171,7 @@ func (c *ExternalProcessController) InjectAmbiguousCommit(_ context.Context, spe
 	return c.postJSON(spec.GatewayNodeID, "/control/ambiguous-commit", spec)
 }
 
-// Wait blocks for the provided duration.
+// Wait delays scenario execution without mutating controller state.
 func (c *ExternalProcessController) Wait(ctx context.Context, d time.Duration) error {
 	timer := time.NewTimer(d)
 	defer timer.Stop()
